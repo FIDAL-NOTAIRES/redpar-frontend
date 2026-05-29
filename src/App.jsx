@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Circle, Building2, MapPin, FileText, RotateCcw, ArrowRight, AlertCircle, Users, Calendar, ExternalLink } from 'lucide-react';
+import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Building2, MapPin, FileText, RotateCcw, ArrowRight, AlertCircle, ExternalLink, Download } from 'lucide-react';
 
 const BACKEND_URL = 'https://redpar-backend.vercel.app';
 
@@ -26,6 +26,8 @@ export default function App() {
   const [parcellesError, setParcellesError] = useState(null);
   const [parcelles, setParcelles] = useState([]);
   const [totalParcelles, setTotalParcelles] = useState(0);
+  const [truncated, setTruncated] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const recognitionRef = useRef(null);
 
   useEffect(() => {
@@ -59,13 +61,14 @@ export default function App() {
   };
 
   const fetchParcelles = async (siren) => {
-    setParcellesLoading(true); setParcellesError(null); setParcelles([]); setTotalParcelles(0);
+    setParcellesLoading(true); setParcellesError(null); setParcelles([]); setTotalParcelles(0); setTruncated(false);
     try {
-      const r = await fetch(`${BACKEND_URL}/api/parcelles?siren=${encodeURIComponent(siren)}`);
+      const r = await fetch(`${BACKEND_URL}/api/parcelles?siren=${encodeURIComponent(siren)}&maxResults=10000`);
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
       const data = await r.json();
       setParcelles(data.parcelles || []);
       setTotalParcelles(data.total || 0);
+      setTruncated(data.truncated || false);
     } catch (e) { setParcellesError(`Erreur : ${e.message}`); }
     finally { setParcellesLoading(false); }
   };
@@ -81,14 +84,144 @@ export default function App() {
 
   const resetAll = () => {
     setStep(1); setCompanyName(''); setPappersResults([]); setSelectedCompany(null);
-    setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null);
+    setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
+  };
+
+  // Export Excel (format SpreadsheetML 2003 XML, lisible par Excel, charte Fidal)
+  const exportExcel = () => {
+    if (!parcelles.length) return;
+    setExporting(true);
+
+    const escapeXml = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+    const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'EPCI', 'Adresse', 'Surface (m²)', 'Nature culture', 'Coordonnées GPS'];
+
+    const titleRow = `
+      <Row ss:Height="30">
+        <Cell ss:MergeAcross="9" ss:StyleID="sTitle"><Data ss:Type="String">RAPPORT REDPAR - ${escapeXml(selectedCompany?.nom)}</Data></Cell>
+      </Row>`;
+
+    const infoRow = `
+      <Row ss:Height="20">
+        <Cell ss:MergeAcross="9" ss:StyleID="sSubtitle"><Data ss:Type="String">SIREN : ${escapeXml(selectedCompany?.siren)} | ${escapeXml(selectedCompany?.formeJuridique)} | ${totalParcelles} parcelle(s) au total | Source : MAJIC (DGFiP) via Koumoul</Data></Cell>
+      </Row>`;
+
+    const headerRow = `
+      <Row ss:Height="22">
+        ${headers.map(h => `<Cell ss:StyleID="sHeader"><Data ss:Type="String">${escapeXml(h)}</Data></Cell>`).join('')}
+      </Row>`;
+
+    const dataRows = parcelles.map((p, i) => `
+      <Row>
+        <Cell ss:StyleID="sIndex"><Data ss:Type="Number">${i + 1}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.codeParcelle)}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.commune)}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.departement)}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.region)}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.epci)}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.adresse)}</Data></Cell>
+        <Cell ss:StyleID="sNumber"><Data ss:Type="Number">${p.contenance || 0}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.natureCulture)}</Data></Cell>
+        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.coordonnees)}</Data></Cell>
+      </Row>`).join('');
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+  <Styles>
+    <Style ss:ID="sTitle">
+      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+      <Borders/>
+      <Font ss:FontName="Calibri" ss:Size="14" ss:Bold="1" ss:Color="#FBBF24"/>
+      <Interior ss:Color="#1E2952" ss:Pattern="Solid"/>
+    </Style>
+    <Style ss:ID="sSubtitle">
+      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+      <Font ss:FontName="Calibri" ss:Size="10" ss:Italic="1" ss:Color="#1E2952"/>
+      <Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/>
+    </Style>
+    <Style ss:ID="sHeader">
+      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+      <Borders>
+        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="2" ss:Color="#FBBF24"/>
+      </Borders>
+      <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#FBBF24"/>
+      <Interior ss:Color="#1E2952" ss:Pattern="Solid"/>
+    </Style>
+    <Style ss:ID="sIndex">
+      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
+      <Borders>
+        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E7E5E4"/>
+      </Borders>
+      <Font ss:FontName="Calibri" ss:Size="10" ss:Bold="1" ss:Color="#1E2952"/>
+    </Style>
+    <Style ss:ID="sCell">
+      <Alignment ss:Vertical="Center"/>
+      <Borders>
+        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E7E5E4"/>
+      </Borders>
+      <Font ss:FontName="Calibri" ss:Size="10" ss:Color="#1E2952"/>
+    </Style>
+    <Style ss:ID="sNumber">
+      <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
+      <Borders>
+        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E7E5E4"/>
+      </Borders>
+      <Font ss:FontName="Calibri" ss:Size="10" ss:Color="#1E2952"/>
+      <NumberFormat ss:Format="#,##0"/>
+    </Style>
+  </Styles>
+  <Worksheet ss:Name="Parcelles REDPAR">
+    <Table>
+      <Column ss:Width="40"/>
+      <Column ss:Width="120"/>
+      <Column ss:Width="130"/>
+      <Column ss:Width="120"/>
+      <Column ss:Width="140"/>
+      <Column ss:Width="140"/>
+      <Column ss:Width="200"/>
+      <Column ss:Width="80"/>
+      <Column ss:Width="100"/>
+      <Column ss:Width="160"/>
+      ${titleRow}
+      ${infoRow}
+      ${headerRow}
+      ${dataRows}
+    </Table>
+    <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
+      <FreezePanes/>
+      <FrozenNoSplit/>
+      <SplitHorizontal>3</SplitHorizontal>
+      <TopRowBottomPane>3</TopRowBottomPane>
+      <ActivePane>2</ActivePane>
+    </WorksheetOptions>
+  </Worksheet>
+</Workbook>`;
+
+    const blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const dateStr = new Date().toISOString().split('T')[0];
+    const cleanName = (selectedCompany?.nom || 'export').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
+    a.download = `REDPAR_${cleanName}_${dateStr}.xls`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setExporting(false);
   };
 
   const totalSurface = parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
+  const uniqueCommunes = new Set(parcelles.map(p => p.commune)).size;
 
   return (
     <div className="min-h-screen bg-stone-50 p-4 md:p-8">
-      <div className="max-w-5xl mx-auto">
+      <div className="max-w-6xl mx-auto">
         <div className="mb-8">
           <div className="flex items-start gap-4 mb-2">
             <FidalLogo />
@@ -125,7 +258,7 @@ export default function App() {
             <h2 className="text-lg font-semibold text-blue-950 mb-1">Nom de l'entreprise</h2>
             <p className="text-sm text-stone-500 mb-6">Saisissez le nom au clavier ou utilisez le micro</p>
             <div className="relative">
-              <input type="text" value={companyName} onChange={(e) => setCompanyName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && goToStep2()} placeholder="Ex : CARREFOUR HYPERMARCHES" className="w-full px-4 py-4 pr-14 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 text-blue-950 text-lg" autoFocus />
+              <input type="text" value={companyName} onChange={(e) => setCompanyName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && goToStep2()} placeholder="Ex : LOGIS METROPOLE" className="w-full px-4 py-4 pr-14 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 text-blue-950 text-lg" autoFocus />
               {speechSupported && (
                 <button onClick={toggleMicrophone} className={`absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full flex items-center justify-center ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-blue-950 text-amber-400 hover:bg-blue-900'}`}>
                   {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
@@ -192,9 +325,17 @@ export default function App() {
             <div className="bg-white rounded-xl border border-stone-200 p-4 shadow-sm flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 text-sm text-blue-950">
                 {parcellesLoading ? <Loader2 className="w-4 h-4 text-amber-500 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-amber-500" />}
-                {parcellesLoading ? 'Recherche dans la base MAJIC...' : `${totalParcelles} parcelle${totalParcelles > 1 ? 's' : ''} trouvée${totalParcelles > 1 ? 's' : ''}`}
+                {parcellesLoading ? 'Recherche dans la base MAJIC (peut prendre quelques secondes pour les grosses sociétés)...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} trouvée${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
               </div>
-              <button onClick={resetAll} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-950 rounded-lg hover:bg-stone-100"><RotateCcw className="w-4 h-4" />Nouvelle recherche</button>
+              <div className="flex items-center gap-2">
+                {!parcellesLoading && parcelles.length > 0 && (
+                  <button onClick={exportExcel} disabled={exporting} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm transition-colors disabled:opacity-50">
+                    {exporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                    Exporter Excel
+                  </button>
+                )}
+                <button onClick={resetAll} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-950 rounded-lg hover:bg-stone-100"><RotateCcw className="w-4 h-4" />Nouvelle recherche</button>
+              </div>
             </div>
 
             <div className="bg-blue-950 text-white rounded-xl shadow-sm overflow-hidden relative">
@@ -210,6 +351,7 @@ export default function App() {
               <div className="bg-white rounded-xl border border-stone-200 p-12 shadow-sm flex flex-col items-center gap-3">
                 <Loader2 className="w-8 h-8 text-amber-500 animate-spin" />
                 <span className="text-stone-600">Interrogation de la base MAJIC (Koumoul / DGFiP)...</span>
+                <span className="text-xs text-stone-400">Récupération de toutes les parcelles, merci de patienter</span>
               </div>
             )}
 
@@ -224,7 +366,7 @@ export default function App() {
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
                 <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
                 <div className="font-semibold text-amber-900 mb-1">Aucune parcelle trouvée</div>
-                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans le fichier MAJIC (cadastre 2022). Elle ne possède peut-être pas de parcelles à son nom, ou les biens sont détenus par une autre structure (SCI, holding...).</div>
+                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans le fichier MAJIC (cadastre 2022). Elle ne possède peut-être pas de parcelles à son nom, ou les biens sont détenus par une autre structure.</div>
               </div>
             )}
 
@@ -233,8 +375,8 @@ export default function App() {
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Parcelles</div>
-                    <div className="text-2xl font-semibold text-blue-950">{totalParcelles}</div>
-                    {totalParcelles > parcelles.length && <div className="text-xs text-stone-500 mt-1">({parcelles.length} affichées)</div>}
+                    <div className="text-2xl font-semibold text-blue-950">{totalParcelles.toLocaleString('fr-FR')}</div>
+                    {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées (limite 10 000)</div>}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Surface totale</div>
@@ -242,7 +384,7 @@ export default function App() {
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Communes</div>
-                    <div className="text-2xl font-semibold text-blue-950">{new Set(parcelles.map(p => p.commune)).size}</div>
+                    <div className="text-2xl font-semibold text-blue-950">{uniqueCommunes.toLocaleString('fr-FR')}</div>
                   </div>
                 </div>
 
@@ -252,9 +394,9 @@ export default function App() {
                     <h3 className="font-semibold text-blue-950">Détail des parcelles</h3>
                     <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Données officielles MAJIC (DGFiP) via Koumoul</span>
                   </div>
-                  <div className="overflow-x-auto">
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                     <table className="w-full text-sm">
-                      <thead className="bg-stone-50 border-b border-stone-200">
+                      <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
                         <tr>
                           <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">#</th>
                           <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Référence cadastrale</th>
@@ -269,11 +411,11 @@ export default function App() {
                         {parcelles.map((p, i) => (
                           <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
                             <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                            <td className="px-4 py-3 font-mono text-xs text-blue-950">{p.codeParcelle}</td>
+                            <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
                             <td className="px-4 py-3 text-blue-950">{p.commune}</td>
                             <td className="px-4 py-3 text-stone-600">{p.departement}</td>
                             <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
-                            <td className="px-4 py-3 text-right text-blue-950">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
+                            <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
                             <td className="px-4 py-3 text-center">
                               {p.coordonnees && (
                                 <a href={`https://www.google.com/maps/search/?api=1&query=${p.coordonnees}`} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 inline-flex">
