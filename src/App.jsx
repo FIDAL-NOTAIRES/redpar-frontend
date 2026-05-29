@@ -95,7 +95,7 @@ export default function App() {
     setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
   };
 
-  // Export Excel xlsx avec SheetJS — charte Fidal + AutoFilter + liens GMaps satellite
+  // Export Excel xlsx avec SheetJS — charte Fidal + AutoFilter + liens GMaps satellite + en-tête
   const exportExcel = () => {
     if (!parcelles.length || !window.XLSX) {
       if (!window.XLSX) alert("La librairie d'export n'est pas encore chargée, attendez quelques secondes et réessayez.");
@@ -106,10 +106,18 @@ export default function App() {
     try {
       const XLSX = window.XLSX;
 
-      // Données : ligne d'en-tête + lignes de parcelles
       const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Google Maps'];
+      const numCols = headers.length;
 
-      const aoa = [headers];
+      // Données : titre + sous-titre + en-têtes + parcelles
+      const titleText = `RAPPORT REDPAR — ${selectedCompany?.nom || ''}`;
+      const subtitleText = `SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : MAJIC (DGFiP) via Koumoul  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
+
+      const aoa = [];
+      aoa.push([titleText, ...Array(numCols - 1).fill('')]);
+      aoa.push([subtitleText, ...Array(numCols - 1).fill('')]);
+      aoa.push(headers);
+
       parcelles.forEach((p, i) => {
         const link = buildSatelliteLink(p.coordonnees);
         aoa.push([
@@ -127,38 +135,49 @@ export default function App() {
 
       const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-      // Largeurs des colonnes
-      ws['!cols'] = [
-        { wch: 5 },   // #
-        { wch: 18 },  // Réf
-        { wch: 22 },  // Commune
-        { wch: 18 },  // Dépt
-        { wch: 22 },  // Région
-        { wch: 35 },  // Adresse
-        { wch: 12 },  // Surface
-        { wch: 14 },  // Nature culture
-        { wch: 18 },  // Google Maps
+      // Fusion des lignes titre et sous-titre
+      ws['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } },
       ];
 
-      // Hauteur ligne d'en-tête
-      ws['!rows'] = [{ hpx: 26 }];
+      // Largeurs colonnes
+      ws['!cols'] = [
+        { wch: 5 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 22 },
+        { wch: 35 }, { wch: 12 }, { wch: 14 }, { wch: 18 },
+      ];
 
-      // Styles : en-têtes (bleu marine + texte doré) et cellules
+      // Hauteurs des 3 premières lignes
+      ws['!rows'] = [{ hpx: 32 }, { hpx: 20 }, { hpx: 26 }];
+
+      // Styles
+      const titleStyle = {
+        font: { name: 'Calibri', sz: 16, bold: true, color: { rgb: 'FBBF24' } },
+        fill: { fgColor: { rgb: '1E2952' }, patternType: 'solid' },
+        alignment: { horizontal: 'center', vertical: 'center' },
+      };
+      const subtitleStyle = {
+        font: { name: 'Calibri', sz: 10, italic: true, color: { rgb: '1E2952' } },
+        fill: { fgColor: { rgb: 'FEF3C7' }, patternType: 'solid' },
+        alignment: { horizontal: 'center', vertical: 'center' },
+      };
       const headerStyle = {
         font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FBBF24' } },
         fill: { fgColor: { rgb: '1E2952' }, patternType: 'solid' },
         alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
-        border: {
-          bottom: { style: 'medium', color: { rgb: 'FBBF24' } },
-        },
+        border: { bottom: { style: 'medium', color: { rgb: 'FBBF24' } } },
       };
-      const numCols = headers.length;
+
+      if (ws['A1']) ws['A1'].s = titleStyle;
+      if (ws['A2']) ws['A2'].s = subtitleStyle;
+
+      // En-têtes (ligne 3 = index 2)
       for (let c = 0; c < numCols; c++) {
-        const addr = XLSX.utils.encode_cell({ r: 0, c });
+        const addr = XLSX.utils.encode_cell({ r: 2, c });
         if (ws[addr]) ws[addr].s = headerStyle;
       }
 
-      // Style cellules de données
+      // Styles cellules de données
       const cellBase = {
         font: { name: 'Calibri', sz: 10, color: { rgb: '1E2952' } },
         alignment: { vertical: 'center' },
@@ -170,37 +189,38 @@ export default function App() {
         alignment: { horizontal: 'center', vertical: 'center' },
       };
 
-      for (let r = 1; r <= parcelles.length; r++) {
+      const firstDataRow = 3;
+      for (let r = firstDataRow; r < firstDataRow + parcelles.length; r++) {
         for (let c = 0; c < numCols; c++) {
           const addr = XLSX.utils.encode_cell({ r, c });
           if (!ws[addr]) continue;
-          // # et Nature culture : centrés
           if (c === 0 || c === 7) ws[addr].s = cellCenter;
-          // Surface : aligné à droite + format nombre
           else if (c === 6) { ws[addr].s = cellRight; ws[addr].z = '#,##0'; }
-          // Google Maps : centré, souligné (lien)
           else if (c === 8) ws[addr].s = cellLink;
-          // Autres : alignement par défaut (gauche, centré verticalement)
           else ws[addr].s = cellBase;
         }
       }
 
-      // AutoFilter sur toute la plage (active les filtres/tri Excel)
-      const range = XLSX.utils.encode_range({
-        s: { r: 0, c: 0 },
-        e: { r: parcelles.length, c: numCols - 1 },
-      });
-      ws['!autofilter'] = { ref: range };
+      // AutoFilter sur la plage à partir des en-têtes (ligne 3)
+      ws['!autofilter'] = {
+        ref: XLSX.utils.encode_range({
+          s: { r: 2, c: 0 },
+          e: { r: 2 + parcelles.length, c: numCols - 1 },
+        }),
+      };
 
-      // Figer la 1re ligne
-      ws['!freeze'] = { xSplit: 0, ySplit: 1 };
-      ws['!views'] = [{ state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft' }];
+      // Figer les 3 premières lignes
+      ws['!views'] = [{
+        state: 'frozen',
+        xSplit: 0,
+        ySplit: 3,
+        topLeftCell: 'A4',
+        activePane: 'bottomLeft',
+      }];
 
-      // Création workbook
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Parcelles');
 
-      // Propriétés du fichier
       wb.Props = {
         Title: `REDPAR - ${selectedCompany?.nom || ''}`,
         Subject: 'Recherche de parcelles',
