@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Building2, MapPin, FileText, RotateCcw, ArrowRight, AlertCircle, ExternalLink, Download } from 'lucide-react';
+import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Building2, MapPin, FileText, RotateCcw, ArrowRight, AlertCircle, Download } from 'lucide-react';
 
 const BACKEND_URL = 'https://redpar-backend.vercel.app';
 
@@ -12,6 +12,14 @@ const FidalLogo = () => (
     />
   </div>
 );
+
+// Génère un lien Google Maps vue satellite depuis "lat,lng"
+const buildSatelliteLink = (coords) => {
+  if (!coords) return null;
+  const [lat, lng] = coords.split(',').map(s => s.trim());
+  if (!lat || !lng) return null;
+  return `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`;
+};
 
 export default function App() {
   const [step, setStep] = useState(1);
@@ -87,133 +95,128 @@ export default function App() {
     setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
   };
 
-  // Export Excel (format SpreadsheetML 2003 XML, lisible par Excel, charte Fidal)
+  // Export Excel xlsx avec SheetJS — charte Fidal + AutoFilter + liens GMaps satellite
   const exportExcel = () => {
-    if (!parcelles.length) return;
+    if (!parcelles.length || !window.XLSX) {
+      if (!window.XLSX) alert("La librairie d'export n'est pas encore chargée, attendez quelques secondes et réessayez.");
+      return;
+    }
     setExporting(true);
 
-    const escapeXml = (str) => String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    try {
+      const XLSX = window.XLSX;
 
-    const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'EPCI', 'Adresse', 'Surface (m²)', 'Nature culture', 'Coordonnées GPS'];
+      // Données : ligne d'en-tête + lignes de parcelles
+      const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Google Maps'];
 
-    const titleRow = `
-      <Row ss:Height="30">
-        <Cell ss:MergeAcross="9" ss:StyleID="sTitle"><Data ss:Type="String">RAPPORT REDPAR - ${escapeXml(selectedCompany?.nom)}</Data></Cell>
-      </Row>`;
+      const aoa = [headers];
+      parcelles.forEach((p, i) => {
+        const link = buildSatelliteLink(p.coordonnees);
+        aoa.push([
+          i + 1,
+          p.codeParcelle || '',
+          p.commune || '',
+          p.departement || '',
+          p.region || '',
+          p.adresse || '',
+          p.contenance || 0,
+          p.natureCulture || '',
+          link ? { t: 's', v: 'Voir (satellite)', l: { Target: link, Tooltip: 'Ouvrir Google Maps en vue satellite' } } : '',
+        ]);
+      });
 
-    const infoRow = `
-      <Row ss:Height="20">
-        <Cell ss:MergeAcross="9" ss:StyleID="sSubtitle"><Data ss:Type="String">SIREN : ${escapeXml(selectedCompany?.siren)} | ${escapeXml(selectedCompany?.formeJuridique)} | ${totalParcelles} parcelle(s) au total | Source : MAJIC (DGFiP) via Koumoul</Data></Cell>
-      </Row>`;
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
 
-    const headerRow = `
-      <Row ss:Height="22">
-        ${headers.map(h => `<Cell ss:StyleID="sHeader"><Data ss:Type="String">${escapeXml(h)}</Data></Cell>`).join('')}
-      </Row>`;
+      // Largeurs des colonnes
+      ws['!cols'] = [
+        { wch: 5 },   // #
+        { wch: 18 },  // Réf
+        { wch: 22 },  // Commune
+        { wch: 18 },  // Dépt
+        { wch: 22 },  // Région
+        { wch: 35 },  // Adresse
+        { wch: 12 },  // Surface
+        { wch: 14 },  // Nature culture
+        { wch: 18 },  // Google Maps
+      ];
 
-    const dataRows = parcelles.map((p, i) => `
-      <Row>
-        <Cell ss:StyleID="sIndex"><Data ss:Type="Number">${i + 1}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.codeParcelle)}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.commune)}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.departement)}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.region)}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.epci)}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.adresse)}</Data></Cell>
-        <Cell ss:StyleID="sNumber"><Data ss:Type="Number">${p.contenance || 0}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.natureCulture)}</Data></Cell>
-        <Cell ss:StyleID="sCell"><Data ss:Type="String">${escapeXml(p.coordonnees)}</Data></Cell>
-      </Row>`).join('');
+      // Hauteur ligne d'en-tête
+      ws['!rows'] = [{ hpx: 26 }];
 
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:o="urn:schemas-microsoft-com:office:office"
- xmlns:x="urn:schemas-microsoft-com:office:excel"
- xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:html="http://www.w3.org/TR/REC-html40">
-  <Styles>
-    <Style ss:ID="sTitle">
-      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
-      <Borders/>
-      <Font ss:FontName="Calibri" ss:Size="14" ss:Bold="1" ss:Color="#FBBF24"/>
-      <Interior ss:Color="#1E2952" ss:Pattern="Solid"/>
-    </Style>
-    <Style ss:ID="sSubtitle">
-      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
-      <Font ss:FontName="Calibri" ss:Size="10" ss:Italic="1" ss:Color="#1E2952"/>
-      <Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/>
-    </Style>
-    <Style ss:ID="sHeader">
-      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="2" ss:Color="#FBBF24"/>
-      </Borders>
-      <Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#FBBF24"/>
-      <Interior ss:Color="#1E2952" ss:Pattern="Solid"/>
-    </Style>
-    <Style ss:ID="sIndex">
-      <Alignment ss:Horizontal="Center" ss:Vertical="Center"/>
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E7E5E4"/>
-      </Borders>
-      <Font ss:FontName="Calibri" ss:Size="10" ss:Bold="1" ss:Color="#1E2952"/>
-    </Style>
-    <Style ss:ID="sCell">
-      <Alignment ss:Vertical="Center"/>
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E7E5E4"/>
-      </Borders>
-      <Font ss:FontName="Calibri" ss:Size="10" ss:Color="#1E2952"/>
-    </Style>
-    <Style ss:ID="sNumber">
-      <Alignment ss:Horizontal="Right" ss:Vertical="Center"/>
-      <Borders>
-        <Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#E7E5E4"/>
-      </Borders>
-      <Font ss:FontName="Calibri" ss:Size="10" ss:Color="#1E2952"/>
-      <NumberFormat ss:Format="#,##0"/>
-    </Style>
-  </Styles>
-  <Worksheet ss:Name="Parcelles REDPAR">
-    <Table>
-      <Column ss:Width="40"/>
-      <Column ss:Width="120"/>
-      <Column ss:Width="130"/>
-      <Column ss:Width="120"/>
-      <Column ss:Width="140"/>
-      <Column ss:Width="140"/>
-      <Column ss:Width="200"/>
-      <Column ss:Width="80"/>
-      <Column ss:Width="100"/>
-      <Column ss:Width="160"/>
-      ${titleRow}
-      ${infoRow}
-      ${headerRow}
-      ${dataRows}
-    </Table>
-    <WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">
-      <FreezePanes/>
-      <FrozenNoSplit/>
-      <SplitHorizontal>3</SplitHorizontal>
-      <TopRowBottomPane>3</TopRowBottomPane>
-      <ActivePane>2</ActivePane>
-    </WorksheetOptions>
-  </Worksheet>
-</Workbook>`;
+      // Styles : en-têtes (bleu marine + texte doré) et cellules
+      const headerStyle = {
+        font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FBBF24' } },
+        fill: { fgColor: { rgb: '1E2952' }, patternType: 'solid' },
+        alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+        border: {
+          bottom: { style: 'medium', color: { rgb: 'FBBF24' } },
+        },
+      };
+      const numCols = headers.length;
+      for (let c = 0; c < numCols; c++) {
+        const addr = XLSX.utils.encode_cell({ r: 0, c });
+        if (ws[addr]) ws[addr].s = headerStyle;
+      }
 
-    const blob = new Blob([xml], { type: 'application/vnd.ms-excel;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    const dateStr = new Date().toISOString().split('T')[0];
-    const cleanName = (selectedCompany?.nom || 'export').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
-    a.download = `REDPAR_${cleanName}_${dateStr}.xls`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    setExporting(false);
+      // Style cellules de données
+      const cellBase = {
+        font: { name: 'Calibri', sz: 10, color: { rgb: '1E2952' } },
+        alignment: { vertical: 'center' },
+      };
+      const cellCenter = { ...cellBase, alignment: { horizontal: 'center', vertical: 'center' } };
+      const cellRight = { ...cellBase, alignment: { horizontal: 'right', vertical: 'center' } };
+      const cellLink = {
+        font: { name: 'Calibri', sz: 10, color: { rgb: '1E2952' }, underline: true, bold: true },
+        alignment: { horizontal: 'center', vertical: 'center' },
+      };
+
+      for (let r = 1; r <= parcelles.length; r++) {
+        for (let c = 0; c < numCols; c++) {
+          const addr = XLSX.utils.encode_cell({ r, c });
+          if (!ws[addr]) continue;
+          // # et Nature culture : centrés
+          if (c === 0 || c === 7) ws[addr].s = cellCenter;
+          // Surface : aligné à droite + format nombre
+          else if (c === 6) { ws[addr].s = cellRight; ws[addr].z = '#,##0'; }
+          // Google Maps : centré, souligné (lien)
+          else if (c === 8) ws[addr].s = cellLink;
+          // Autres : alignement par défaut (gauche, centré verticalement)
+          else ws[addr].s = cellBase;
+        }
+      }
+
+      // AutoFilter sur toute la plage (active les filtres/tri Excel)
+      const range = XLSX.utils.encode_range({
+        s: { r: 0, c: 0 },
+        e: { r: parcelles.length, c: numCols - 1 },
+      });
+      ws['!autofilter'] = { ref: range };
+
+      // Figer la 1re ligne
+      ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+      ws['!views'] = [{ state: 'frozen', xSplit: 0, ySplit: 1, topLeftCell: 'A2', activePane: 'bottomLeft' }];
+
+      // Création workbook
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Parcelles');
+
+      // Propriétés du fichier
+      wb.Props = {
+        Title: `REDPAR - ${selectedCompany?.nom || ''}`,
+        Subject: 'Recherche de parcelles',
+        Author: 'FIDAL Notaires',
+        Company: 'FIDAL Notaires',
+        CreatedDate: new Date(),
+      };
+
+      const dateStr = new Date().toISOString().split('T')[0];
+      const cleanName = (selectedCompany?.nom || 'export').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
+      XLSX.writeFile(wb, `REDPAR_${cleanName}_${dateStr}.xlsx`);
+    } catch (err) {
+      alert('Erreur lors de l\'export Excel : ' + err.message);
+    } finally {
+      setExporting(false);
+    }
   };
 
   const totalSurface = parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
@@ -325,7 +328,7 @@ export default function App() {
             <div className="bg-white rounded-xl border border-stone-200 p-4 shadow-sm flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 text-sm text-blue-950">
                 {parcellesLoading ? <Loader2 className="w-4 h-4 text-amber-500 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-amber-500" />}
-                {parcellesLoading ? 'Recherche dans la base MAJIC (peut prendre quelques secondes pour les grosses sociétés)...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} trouvée${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
+                {parcellesLoading ? 'Recherche dans la base MAJIC...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
               </div>
               <div className="flex items-center gap-2">
                 {!parcellesLoading && parcelles.length > 0 && (
@@ -366,7 +369,7 @@ export default function App() {
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
                 <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
                 <div className="font-semibold text-amber-900 mb-1">Aucune parcelle trouvée</div>
-                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans le fichier MAJIC (cadastre 2022). Elle ne possède peut-être pas de parcelles à son nom, ou les biens sont détenus par une autre structure.</div>
+                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans le fichier MAJIC (cadastre 2022).</div>
               </div>
             )}
 
@@ -404,27 +407,32 @@ export default function App() {
                           <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Département</th>
                           <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
                           <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Surface</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Nature</th>
                           <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Carte</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {parcelles.map((p, i) => (
-                          <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
-                            <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                            <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
-                            <td className="px-4 py-3 text-blue-950">{p.commune}</td>
-                            <td className="px-4 py-3 text-stone-600">{p.departement}</td>
-                            <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
-                            <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
-                            <td className="px-4 py-3 text-center">
-                              {p.coordonnees && (
-                                <a href={`https://www.google.com/maps/search/?api=1&query=${p.coordonnees}`} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 inline-flex">
-                                  <ExternalLink className="w-4 h-4" />
-                                </a>
-                              )}
-                            </td>
-                          </tr>
-                        ))}
+                        {parcelles.map((p, i) => {
+                          const link = buildSatelliteLink(p.coordonnees);
+                          return (
+                            <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
+                              <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
+                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
+                              <td className="px-4 py-3 text-blue-950">{p.commune}</td>
+                              <td className="px-4 py-3 text-stone-600">{p.departement}</td>
+                              <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
+                              <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
+                              <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
+                              <td className="px-4 py-3 text-center">
+                                {link && (
+                                  <a href={link} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 underline text-xs font-medium">
+                                    Voir
+                                  </a>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
