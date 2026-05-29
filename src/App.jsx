@@ -5,11 +5,11 @@ const BACKEND_URL = 'https://redpar-backend.vercel.app';
 
 const FidalLogo = () => (
   <div className="flex-shrink-0">
-    <svg width="200" height="105" viewBox="0 0 200 105" xmlns="http://www.w3.org/2000/svg">
-      <rect x="1" y="1" width="198" height="103" fill="white" stroke="#1e2952" strokeWidth="1.5" />
-      <text x="100" y="58" textAnchor="middle" fontFamily="'Helvetica Neue', 'Arial Black', Arial, sans-serif" fontSize="42" fontWeight="900" fill="#1e2952" letterSpacing="1">FIDAL</text>
-      <text x="100" y="84" textAnchor="middle" fontFamily="'Helvetica Neue', Arial, sans-serif" fontSize="15" fontWeight="700" fill="#1e2952" letterSpacing="2">NOTAIRES</text>
-    </svg>
+    <img
+      src="/logo-fidal.png"
+      alt="FIDAL Notaires"
+      style={{ height: '105px', width: 'auto', display: 'block' }}
+    />
   </div>
 );
 
@@ -77,7 +77,7 @@ export default function App() {
       setTimeout(() => setDvfStatus(p => ({ ...p, [task.id]: 'done' })), i * 700 + 2200);
     });
     setTimeout(() => {
-      // ⚠️ Données simulées : à brancher sur la vraie API DVF plus tard
+      // Données simulées : à brancher sur la vraie API DVF plus tard
       const mockReport = {
         parcelles: [
           { ref: '59368-000-AB-0042', commune: 'La Madeleine (59)', surface: 245, type: 'Bâti commercial', valeur: 1850000, dateAcquisition: '2010-05-12' },
