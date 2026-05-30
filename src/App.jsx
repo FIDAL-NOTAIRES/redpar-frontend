@@ -3,6 +3,12 @@ import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Building
 
 const BACKEND_URL = 'https://redpar-backend.vercel.app';
 
+// Formatage des nombres pour le PDF (espace simple compatible avec les polices PDF)
+const formatNumberForPdf = (n) => {
+  if (n === null || n === undefined || n === '') return '';
+  return Math.round(Number(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+};
+
 const FidalLogo = () => (
   <div className="flex-shrink-0">
     <img src="/logo-fidal.png" alt="FIDAL Notaires" style={{ height: '105px', width: 'auto', display: 'block' }} />
@@ -130,7 +136,6 @@ export default function App() {
     recognitionRef.current = r;
   }, []);
 
-  // Précharger le vrai logo Fidal en base64 pour l'export PDF
   useEffect(() => {
     if (window.__fidalLogoData) return;
     fetch('/logo-fidal.png')
@@ -288,18 +293,15 @@ export default function App() {
       const GOLD = [251, 191, 36];
       const BEIGE = [254, 243, 199];
 
-      // EN-TÊTE bleu marine + bande dorée
       doc.setFillColor(...NAVY);
       doc.rect(0, 0, pageWidth, 30, 'F');
       doc.setFillColor(...GOLD);
       doc.rect(0, 30, pageWidth, 1.5, 'F');
 
-      // Vrai logo Fidal (PNG)
       try {
         if (window.__fidalLogoData) {
           doc.addImage(window.__fidalLogoData, 'PNG', margin, 5, 32, 20);
         } else {
-          // Fallback texte si le logo n'est pas encore chargé
           doc.setFillColor(255, 255, 255);
           doc.rect(margin, 6, 28, 18, 'F');
           doc.setDrawColor(...NAVY);
@@ -316,7 +318,6 @@ export default function App() {
         console.warn('Logo non inséré', e);
       }
 
-      // Titre rapport
       doc.setTextColor(...GOLD);
       doc.setFontSize(8);
       doc.setFont('helvetica', 'normal');
@@ -343,17 +344,18 @@ export default function App() {
       doc.setTextColor(...NAVY);
       doc.setFontSize(8);
       doc.setFont('helvetica', 'bold');
-      doc.text(`${totalParcelles.toLocaleString('fr-FR')} parcelle(s) au total`, margin + 3, y);
+      doc.text(`${formatNumberForPdf(totalParcelles)} parcelle(s) au total`, margin + 3, y);
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(7);
       doc.text('Source : MAJIC (DGFiP) via Koumoul • Cadastre 2022', margin + 3, y + 4);
       y += 14;
 
       const cellW = (pageWidth - 2 * margin - 8) / 3;
+      const totalSurfaceCalc = parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
       const stats3 = [
-        { label: 'PARCELLES', value: totalParcelles.toLocaleString('fr-FR') },
-        { label: 'SURFACE TOTALE', value: parcelles.reduce((s, p) => s + (p.contenance || 0), 0).toLocaleString('fr-FR') + ' m²' },
-        { label: 'COMMUNES', value: stats.communes.length.toString() },
+        { label: 'PARCELLES', value: formatNumberForPdf(totalParcelles) },
+        { label: 'SURFACE TOTALE', value: formatNumberForPdf(totalSurfaceCalc) + ' m2' },
+        { label: 'COMMUNES', value: formatNumberForPdf(stats.communes.length) },
       ];
       stats3.forEach((s, i) => {
         const x = margin + i * (cellW + 4);
@@ -378,13 +380,13 @@ export default function App() {
       doc.setTextColor(...GOLD);
       doc.setFontSize(9);
       doc.setFont('helvetica', 'bold');
-      doc.text(stats.depts.length > 1 ? `RÉPARTITION PAR DÉPARTEMENT (${stats.depts.length})` : 'DÉPARTEMENT', margin + 2, y + 4);
+      doc.text(stats.depts.length > 1 ? `REPARTITION PAR DEPARTEMENT (${stats.depts.length})` : 'DEPARTEMENT', margin + 2, y + 4);
       y += 8;
 
       doc.autoTable({
         startY: y,
-        head: [['Département', 'Parcelles', 'Surface (m²)', '%']],
-        body: stats.depts.map(d => [d.nom, d.count.toLocaleString('fr-FR'), d.surface.toLocaleString('fr-FR'), d.pct + '%']),
+        head: [['Département', 'Parcelles', 'Surface (m2)', '%']],
+        body: stats.depts.map(d => [d.nom, formatNumberForPdf(d.count), formatNumberForPdf(d.surface), d.pct + '%']),
         theme: 'grid',
         headStyles: { fillColor: NAVY, textColor: GOLD, fontStyle: 'bold', fontSize: 8 },
         bodyStyles: { fontSize: 8, textColor: NAVY },
@@ -396,7 +398,7 @@ export default function App() {
 
       const showCommunes = stats.communes.length <= 10 ? stats.communes : stats.communes.slice(0, 10);
       const communeTitle = stats.communes.length <= 10
-        ? `RÉPARTITION PAR COMMUNE (${stats.communes.length})`
+        ? `REPARTITION PAR COMMUNE (${stats.communes.length})`
         : `TOP 10 COMMUNES (sur ${stats.communes.length})`;
 
       if (y > pageHeight - 50) { doc.addPage(); y = margin; }
@@ -410,8 +412,8 @@ export default function App() {
 
       doc.autoTable({
         startY: y,
-        head: [['Commune', 'Département', 'Parcelles', 'Surface (m²)', '%']],
-        body: showCommunes.map(c => [c.nom, c.departement, c.count.toLocaleString('fr-FR'), c.surface.toLocaleString('fr-FR'), c.pct + '%']),
+        head: [['Commune', 'Département', 'Parcelles', 'Surface (m2)', '%']],
+        body: showCommunes.map(c => [c.nom, c.departement, formatNumberForPdf(c.count), formatNumberForPdf(c.surface), c.pct + '%']),
         theme: 'grid',
         headStyles: { fillColor: NAVY, textColor: GOLD, fontStyle: 'bold', fontSize: 8 },
         bodyStyles: { fontSize: 8, textColor: NAVY },
@@ -428,7 +430,7 @@ export default function App() {
       doc.setTextColor(...GOLD);
       doc.setFontSize(9);
       doc.setFont('helvetica', 'bold');
-      doc.text(`DÉTAIL DES PARCELLES (${parcelles.length.toLocaleString('fr-FR')})`, margin + 2, y + 4);
+      doc.text(`DETAIL DES PARCELLES (${formatNumberForPdf(parcelles.length)})`, margin + 2, y + 4);
       y += 8;
 
       doc.autoTable({
@@ -440,7 +442,7 @@ export default function App() {
           p.commune || '',
           p.departement || '',
           p.adresse || '',
-          (p.contenance || 0).toLocaleString('fr-FR') + ' m²',
+          formatNumberForPdf(p.contenance || 0) + ' m2',
           p.natureCulture || '',
         ]),
         theme: 'grid',
