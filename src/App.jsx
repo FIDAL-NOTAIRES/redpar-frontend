@@ -555,3 +555,128 @@ export default function App() {
                         <div className="flex items-start justify-between gap-4">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-2 flex-wrap">
+                              <Building2 className="w-4 h-4 text-blue-950" />
+                              <div className="font-semibold text-blue-950">{c.nom}</div>
+                              <span className="text-xs px-2 py-0.5 bg-stone-100 text-stone-700 rounded">{c.formeJuridique}</span>
+                              <span className={`text-xs px-2 py-0.5 rounded border ${c.statut === 'Active' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-stone-100 text-stone-600 border-stone-200'}`}>{c.statut}</span>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-sm">
+                              <div><span className="text-stone-500">SIREN : </span><span className="text-blue-950 font-mono">{c.siren}</span></div>
+                              <div><span className="text-stone-500">Créée : </span><span className="text-blue-950">{c.dateCreation}</span></div>
+                              <div className="md:col-span-2"><span className="text-stone-500">Adresse : </span><span className="text-blue-950">{c.adresse}</span></div>
+                              <div className="md:col-span-2"><span className="text-stone-500">APE : </span><span className="text-blue-950">{c.codeApe}</span></div>
+                              <div className="md:col-span-2"><span className="text-stone-500">Dirigeants : </span><span className="text-blue-950">{c.dirigeants.join(', ')}</span></div>
+                            </div>
+                          </div>
+                          {sel && <CheckCircle2 className="w-6 h-6 text-blue-950 flex-shrink-0" />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+            <div className="flex justify-between mt-8">
+              <button onClick={goToStep1} className="flex items-center gap-2 px-5 py-2.5 text-blue-950 rounded-lg font-medium hover:bg-stone-100"><ChevronLeft className="w-4 h-4" />Retour</button>
+              <button onClick={confirmCompany} disabled={!selectedCompany} className="flex items-center gap-2 px-5 py-2.5 bg-blue-950 text-white rounded-lg font-medium hover:bg-blue-900 disabled:bg-stone-300">Rechercher parcelles <ArrowRight className="w-4 h-4" /></button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && (
+          <div className="space-y-6">
+            <div className="bg-white rounded-xl border border-stone-200 p-4 shadow-sm flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2 text-sm text-blue-950">
+                {parcellesLoading ? <Loader2 className="w-4 h-4 text-amber-500 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-amber-500" />}
+                {parcellesLoading ? 'Recherche dans la base MAJIC...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                {!parcellesLoading && parcelles.length > 0 && (
+                  <>
+                    <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
+                      {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
+                    </button>
+                    <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
+                      {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
+                    </button>
+                  </>
+                )}
+                <button onClick={resetAll} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-950 rounded-lg hover:bg-stone-100"><RotateCcw className="w-4 h-4" />Nouvelle recherche</button>
+              </div>
+            </div>
+
+            <div className="bg-blue-950 text-white rounded-xl shadow-sm overflow-hidden relative">
+              <div className="absolute top-0 left-0 w-full h-1 bg-amber-400" />
+              <div className="p-6">
+                <div className="flex items-center gap-2 text-xs text-amber-400 mb-2"><FileText className="w-3.5 h-3.5" />RAPPORT REDPAR</div>
+                <h2 className="text-2xl font-semibold mb-1">{selectedCompany?.nom}</h2>
+                <div className="text-sm text-blue-200">SIREN : <span className="font-mono text-white">{selectedCompany?.siren}</span> • {selectedCompany?.formeJuridique}</div>
+              </div>
+            </div>
+
+            {parcellesLoading && (
+              <div className="bg-white rounded-xl border border-stone-200 p-12 shadow-sm flex flex-col items-center gap-3">
+                <Loader2 className="w-8 h-8 text-amber-500 animate-spin" />
+                <span className="text-stone-600">Interrogation de la base MAJIC (Koumoul / DGFiP)...</span>
+              </div>
+            )}
+
+            {!parcellesLoading && parcellesError && (
+              <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                <div><div className="font-medium text-red-900">Erreur</div><div className="text-sm text-red-700">{parcellesError}</div></div>
+              </div>
+            )}
+
+            {!parcellesLoading && !parcellesError && parcelles.length === 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
+                <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
+                <div className="font-semibold text-amber-900 mb-1">Aucune parcelle trouvée</div>
+                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans le fichier MAJIC (cadastre 2022).</div>
+              </div>
+            )}
+
+            {!parcellesLoading && parcelles.length > 0 && (
+              <>
+                {/* STATS GLOBALES */}
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                  <div className="bg-white border border-stone-200 rounded-lg p-4">
+                    <div className="text-xs text-stone-500 mb-1">Parcelles</div>
+                    <div className="text-2xl font-semibold text-blue-950">{totalParcelles.toLocaleString('fr-FR')}</div>
+                    {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées (limite 10 000)</div>}
+                  </div>
+                  <div className="bg-white border border-stone-200 rounded-lg p-4">
+                    <div className="text-xs text-stone-500 mb-1">Surface totale</div>
+                    <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
+                  </div>
+                  <div className="bg-white border border-stone-200 rounded-lg p-4">
+                    <div className="text-xs text-stone-500 mb-1">Communes</div>
+                    <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
+                  </div>
+                </div>
+
+                {/* CARTE INTERACTIVE */}
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                    <MapIcon className="w-4 h-4 text-blue-950" />
+                    <h3 className="font-semibold text-blue-950">Carte interactive</h3>
+                    <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
+                  </div>
+                  <ParcellesMap parcelles={parcelles} companyName={selectedCompany?.nom} />
+                </div>
+
+                {/* STATS PAR DÉPARTEMENT ET COMMUNE */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                      <BarChart3 className="w-4 h-4 text-blue-950" />
+                      <h3 className="font-semibold text-blue-950">
+                        {stats.depts.length > 1 ? `Répartition par département (${stats.depts.length})` : 'Département'}
+                      </h3>
+                    </div>
+                    <div className="p-4 space-y-3">
+                      {stats.depts.map((d) => (
+                        <div key={d.nom}>
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="font-medium text-blue-950">{d.nom}</span>
+                            <span className="text-sm text-stone-600">{d.count.toLocaleString('fr-FR')} •
