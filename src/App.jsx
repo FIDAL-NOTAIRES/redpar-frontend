@@ -23,20 +23,16 @@ const parseCoords = (coords) => {
   return [lat, lng];
 };
 
-// Composant carte Leaflet
 function ParcellesMap({ parcelles, companyName }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
 
   useEffect(() => {
     if (!window.L || !mapRef.current) return;
-
-    // Nettoyer une carte existante
     if (mapInstanceRef.current) {
       mapInstanceRef.current.remove();
       mapInstanceRef.current = null;
     }
-
     const L = window.L;
     const validParcelles = parcelles.filter(p => parseCoords(p.coordonnees));
     if (validParcelles.length === 0) return;
@@ -49,7 +45,6 @@ function ParcellesMap({ parcelles, companyName }) {
       attribution: '© OpenStreetMap',
     }).addTo(map);
 
-    // Icône personnalisée Fidal
     const fidalIcon = L.divIcon({
       className: 'custom-fidal-icon',
       html: '<div style="background:#1e2952;color:#fbbf24;width:24px;height:24px;border-radius:50%;border:2px solid white;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;box-shadow:0 2px 4px rgba(0,0,0,0.3)">●</div>',
@@ -74,7 +69,6 @@ function ParcellesMap({ parcelles, companyName }) {
       const coords = parseCoords(p.coordonnees);
       if (!coords) return;
       bounds.push(coords);
-
       const satLink = buildSatelliteLink(p.coordonnees);
       const marker = L.marker(coords, { icon: fidalIcon });
       const popupContent = `
@@ -90,7 +84,6 @@ function ParcellesMap({ parcelles, companyName }) {
       marker.bindPopup(popupContent);
       markers.addLayer(marker);
     });
-
     map.addLayer(markers);
 
     if (bounds.length > 0) {
@@ -135,6 +128,21 @@ export default function App() {
     r.onerror = () => setIsListening(false);
     r.onend = () => setIsListening(false);
     recognitionRef.current = r;
+  }, []);
+
+  // Précharger le vrai logo Fidal en base64 pour l'export PDF
+  useEffect(() => {
+    if (window.__fidalLogoData) return;
+    fetch('/logo-fidal.png')
+      .then(r => r.blob())
+      .then(blob => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      }))
+      .then(dataUrl => { window.__fidalLogoData = dataUrl; })
+      .catch(err => console.warn('Logo non préchargé', err));
   }, []);
 
   const toggleMicrophone = () => {
@@ -183,7 +191,6 @@ export default function App() {
     setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
   };
 
-  // Calcul des statistiques
   const computeStats = () => {
     const byDept = {};
     const byCommune = {};
@@ -207,7 +214,6 @@ export default function App() {
     return { depts, communes };
   };
 
-  // Export Excel (inchangé)
   const exportExcel = () => {
     if (!parcelles.length || !window.XLSX) {
       if (!window.XLSX) alert("Librairie Excel non chargée");
@@ -263,7 +269,6 @@ export default function App() {
     finally { setExportingExcel(false); }
   };
 
-  // Export PDF avec jsPDF + autotable
   const exportPdf = () => {
     if (!parcelles.length || !window.jspdf || !window.jspdf.jsPDF) {
       alert("Librairie PDF non chargée");
@@ -279,7 +284,6 @@ export default function App() {
       const stats = computeStats();
       const dateStr = new Date().toLocaleDateString('fr-FR');
 
-      // Couleurs Fidal
       const NAVY = [30, 41, 82];
       const GOLD = [251, 191, 36];
       const BEIGE = [254, 243, 199];
@@ -290,40 +294,47 @@ export default function App() {
       doc.setFillColor(...GOLD);
       doc.rect(0, 30, pageWidth, 1.5, 'F');
 
-      // Logo FIDAL (texte stylisé en blanc dans cadre)
-      doc.setFillColor(255, 255, 255);
-      doc.rect(margin, 6, 28, 18, 'F');
-      doc.setDrawColor(...NAVY);
-      doc.setLineWidth(0.3);
-      doc.rect(margin, 6, 28, 18);
-      doc.setTextColor(...NAVY);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(11);
-      doc.text('FIDAL', margin + 14, 14, { align: 'center' });
-      doc.setFontSize(6);
-      doc.text('NOTAIRES', margin + 14, 19, { align: 'center' });
+      // Vrai logo Fidal (PNG)
+      try {
+        if (window.__fidalLogoData) {
+          doc.addImage(window.__fidalLogoData, 'PNG', margin, 5, 32, 20);
+        } else {
+          // Fallback texte si le logo n'est pas encore chargé
+          doc.setFillColor(255, 255, 255);
+          doc.rect(margin, 6, 28, 18, 'F');
+          doc.setDrawColor(...NAVY);
+          doc.setLineWidth(0.3);
+          doc.rect(margin, 6, 28, 18);
+          doc.setTextColor(...NAVY);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(11);
+          doc.text('FIDAL', margin + 14, 14, { align: 'center' });
+          doc.setFontSize(6);
+          doc.text('NOTAIRES', margin + 14, 19, { align: 'center' });
+        }
+      } catch (e) {
+        console.warn('Logo non inséré', e);
+      }
 
       // Titre rapport
       doc.setTextColor(...GOLD);
       doc.setFontSize(8);
       doc.setFont('helvetica', 'normal');
-      doc.text('RAPPORT REDPAR', margin + 35, 13);
+      doc.text('RAPPORT REDPAR', margin + 38, 13);
       doc.setTextColor(255, 255, 255);
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
-      doc.text(selectedCompany?.nom || '', margin + 35, 20);
+      doc.text(selectedCompany?.nom || '', margin + 38, 20);
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8);
-      doc.text(`SIREN : ${selectedCompany?.siren} • ${selectedCompany?.formeJuridique || ''}`, margin + 35, 26);
+      doc.text(`SIREN : ${selectedCompany?.siren} • ${selectedCompany?.formeJuridique || ''}`, margin + 38, 26);
 
-      // Date en haut à droite
       doc.setFontSize(8);
       doc.setTextColor(...GOLD);
       doc.text(dateStr, pageWidth - margin, 26, { align: 'right' });
 
       let y = 42;
 
-      // Bloc info source
       doc.setFillColor(...BEIGE);
       doc.rect(margin, y - 4, pageWidth - 2 * margin, 10, 'F');
       doc.setDrawColor(...GOLD);
@@ -338,7 +349,6 @@ export default function App() {
       doc.text('Source : MAJIC (DGFiP) via Koumoul • Cadastre 2022', margin + 3, y + 4);
       y += 14;
 
-      // Stats globales : 3 cases
       const cellW = (pageWidth - 2 * margin - 8) / 3;
       const stats3 = [
         { label: 'PARCELLES', value: totalParcelles.toLocaleString('fr-FR') },
@@ -363,7 +373,6 @@ export default function App() {
       });
       y += 22;
 
-      // Section : Répartition par département
       doc.setFillColor(...NAVY);
       doc.rect(margin, y, pageWidth - 2 * margin, 6, 'F');
       doc.setTextColor(...GOLD);
@@ -385,7 +394,6 @@ export default function App() {
       });
       y = doc.lastAutoTable.finalY + 6;
 
-      // Section : Répartition par commune (toutes si <=10, top 10 sinon)
       const showCommunes = stats.communes.length <= 10 ? stats.communes : stats.communes.slice(0, 10);
       const communeTitle = stats.communes.length <= 10
         ? `RÉPARTITION PAR COMMUNE (${stats.communes.length})`
@@ -413,7 +421,6 @@ export default function App() {
       });
       y = doc.lastAutoTable.finalY + 8;
 
-      // SECTION : Détail de toutes les parcelles
       doc.addPage();
       y = margin;
       doc.setFillColor(...NAVY);
@@ -450,14 +457,12 @@ export default function App() {
           6: { halign: 'center', cellWidth: 10 },
         },
         margin: { left: margin, right: margin, top: 14 },
-        didDrawPage: (data) => {
-          // En-tête sur chaque page
+        didDrawPage: () => {
           const ph = doc.internal.pageSize.getHeight();
           doc.setFontSize(7);
           doc.setTextColor(...NAVY);
           doc.text(`REDPAR — ${selectedCompany?.nom} — SIREN ${selectedCompany?.siren}`, margin, 8);
           doc.text(`Page ${doc.internal.getCurrentPageInfo().pageNumber}`, pageWidth - margin, 8, { align: 'right' });
-          // Pied de page
           doc.setDrawColor(...GOLD);
           doc.setLineWidth(0.5);
           doc.line(margin, ph - 8, pageWidth - margin, ph - 8);
@@ -638,7 +643,6 @@ export default function App() {
 
             {!parcellesLoading && parcelles.length > 0 && (
               <>
-                {/* STATS GLOBALES */}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Parcelles</div>
@@ -655,7 +659,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* CARTE INTERACTIVE */}
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
                     <MapIcon className="w-4 h-4 text-blue-950" />
@@ -665,7 +668,6 @@ export default function App() {
                   <ParcellesMap parcelles={parcelles} companyName={selectedCompany?.nom} />
                 </div>
 
-                {/* STATS PAR DÉPARTEMENT ET COMMUNE */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                     <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
@@ -725,7 +727,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* TABLEAU DÉTAIL */}
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <MapPin className="w-4 h-4 text-blue-950" />
