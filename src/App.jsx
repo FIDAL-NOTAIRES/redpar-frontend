@@ -679,4 +679,102 @@ export default function App() {
                         <div key={d.nom}>
                           <div className="flex items-center justify-between mb-1">
                             <span className="font-medium text-blue-950">{d.nom}</span>
-                            <span className="text-sm text-stone-600">{d.count.toLocaleString('fr-FR')} •
+                            <span className="text-sm text-stone-600">{d.count.toLocaleString('fr-FR')} • {d.surface.toLocaleString('fr-FR')} m²</span>
+                          </div>
+                          <div className="w-full bg-stone-100 rounded-full h-3 overflow-hidden">
+                            <div className="h-full bg-blue-950 rounded-full" style={{ width: `${d.pct}%` }} />
+                          </div>
+                          <div className="text-right text-xs text-blue-950 font-medium mt-0.5">{d.pct}%</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                      <MapPin className="w-4 h-4 text-blue-950" />
+                      <h3 className="font-semibold text-blue-950">
+                        {showAllCommunes ? `Communes (${stats.communes.length})` : `Top 10 communes (sur ${stats.communes.length})`}
+                      </h3>
+                    </div>
+                    <div className="p-4">
+                      <table className="w-full text-sm">
+                        <thead>
+                          <tr className="border-b border-stone-200">
+                            <th className="text-left text-xs font-semibold text-stone-500 uppercase pb-2">Commune</th>
+                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Parc.</th>
+                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Surface</th>
+                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">%</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {displayedCommunes.map((c, i) => (
+                            <tr key={c.nom} className="border-b border-stone-100 last:border-0">
+                              <td className="py-2 flex items-center gap-2">
+                                <div className="w-5 h-5 rounded bg-blue-950 text-amber-400 text-[10px] font-semibold flex items-center justify-center">{i + 1}</div>
+                                <span className="text-blue-950">{c.nom}</span>
+                              </td>
+                              <td className="py-2 text-right text-blue-950">{c.count}</td>
+                              <td className="py-2 text-right text-stone-600">{c.surface.toLocaleString('fr-FR')} m²</td>
+                              <td className="py-2 text-right text-blue-950 font-medium">{c.pct}%</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+
+                {/* TABLEAU DÉTAIL */}
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+                    <MapPin className="w-4 h-4 text-blue-950" />
+                    <h3 className="font-semibold text-blue-950">Détail des parcelles</h3>
+                    <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Données MAJIC (DGFiP) via Koumoul</span>
+                  </div>
+                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">#</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Référence</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Département</th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
+                          <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Surface</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Nature</th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Carte</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {parcelles.map((p, i) => {
+                          const link = buildSatelliteLink(p.coordonnees);
+                          return (
+                            <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
+                              <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
+                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
+                              <td className="px-4 py-3 text-blue-950">{p.commune}</td>
+                              <td className="px-4 py-3 text-stone-600">{p.departement}</td>
+                              <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
+                              <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
+                              <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
+                              <td className="px-4 py-3 text-center">
+                                {link && (
+                                  <a href={link} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 underline text-xs font-medium">Voir</a>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
