@@ -492,14 +492,39 @@ export default function App() {
   return (
     <div className="min-h-screen bg-stone-50 p-4 md:p-8">
       <div className="max-w-6xl mx-auto">
+        {/* ===== En-tête REDPAR — charte FIDAL ===== */}
         <div className="mb-8">
-          <div className="flex items-start gap-4 mb-2">
-            <FidalLogo />
-            <div className="border-l-2 border-amber-400 pl-4 pt-2">
-              <h1 className="text-2xl font-semibold text-blue-950">REDPAR</h1>
-              <p className="text-sm text-stone-500">REcherche De PARcelles</p>
+          <header className="redpar-header">
+            <style>{`
+              .redpar-header{background:#0F2238;border-radius:12px;height:120px;display:flex;align-items:center;gap:26px;padding:0 30px;color:#fff;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;animation:redpar-rise .5s ease both;}
+              @keyframes redpar-rise{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:none;}}
+              @media (prefers-reduced-motion:reduce){.redpar-header{animation:none;}}
+              .redpar-lockup{display:flex;align-items:baseline;gap:6px;}
+              .redpar-divider{width:1px;height:52px;background:#657D96;opacity:.55;}
+              .redpar-wordmark{font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1;}
+              .redpar-subtitle{font-size:12px;letter-spacing:4px;color:#6DD5DC;margin-top:7px;}
+              @media (max-width:640px){.redpar-header{gap:16px;padding:0 18px;}.redpar-wordmark{font-size:26px;}.redpar-subtitle{font-size:10px;letter-spacing:2.5px;}.redpar-divider,.redpar-mark{display:none;}}
+            `}</style>
+            <div className="redpar-lockup" aria-label="FIDAL Notaires">
+              <span style={{ fontFamily: "Georgia, serif", fontSize: 26, letterSpacing: ".5px" }}>FIDAL</span>
+              <span style={{ fontFamily: "Georgia, serif", fontSize: 30, color: "#E3CC7A" }}>/</span>
+              <span style={{ fontSize: 11, letterSpacing: "3px" }}>NOTAIRES</span>
             </div>
-          </div>
+            <div className="redpar-divider" aria-hidden="true" />
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              <span className="redpar-wordmark">REDPAR</span>
+              <span className="redpar-subtitle">PATRIMOINE FONCIER DES PERSONNES MORALES</span>
+            </div>
+            <div style={{ flex: 1 }} />
+            <svg className="redpar-mark" width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#33838B" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+              <polygon points="5,4 19,7 20,17 8,20 4,11" />
+              <circle cx="5" cy="4" r="1.7" fill="#33838B" stroke="none" />
+              <circle cx="19" cy="7" r="1.7" fill="#33838B" stroke="none" />
+              <circle cx="20" cy="17" r="1.7" fill="#33838B" stroke="none" />
+              <circle cx="8" cy="20" r="1.7" fill="#33838B" stroke="none" />
+              <circle cx="4" cy="11" r="1.7" fill="#33838B" stroke="none" />
+            </svg>
+          </header>
         </div>
 
         {step < 3 && (
