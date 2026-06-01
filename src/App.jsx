@@ -229,31 +229,41 @@ export default function App() {
       const XLSX = window.XLSX;
       const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Google Maps'];
       const numCols = headers.length;
-      const titleText = `RAPPORT REDPAR — ${selectedCompany?.nom || ''}`;
-      const subtitleText = `SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : MAJIC (DGFiP) via Koumoul  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
+      // Bandeau marque (charte FIDAL) + sujet du rapport
+      const brandText = 'FIDAL / NOTAIRES          REDPAR';
+      const brandSubtitleText = 'PATRIMOINE FONCIER DES PERSONNES MORALES';
+      const subjectText = `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : MAJIC (DGFiP) via Koumoul  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
       const aoa = [];
-      aoa.push([titleText, ...Array(numCols - 1).fill('')]);
-      aoa.push([subtitleText, ...Array(numCols - 1).fill('')]);
+      aoa.push([brandText, ...Array(numCols - 1).fill('')]);
+      aoa.push([brandSubtitleText, ...Array(numCols - 1).fill('')]);
+      aoa.push([subjectText, ...Array(numCols - 1).fill('')]);
       aoa.push(headers);
       parcelles.forEach((p, i) => {
         const link = buildSatelliteLink(p.coordonnees);
         aoa.push([i + 1, p.codeParcelle || '', p.commune || '', p.departement || '', p.region || '', p.adresse || '', p.contenance || 0, p.natureCulture || '', link ? { t: 's', v: 'Voir (satellite)', l: { Target: link } } : '']);
       });
       const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } }];
+      ws['!merges'] = [
+        { s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } },
+        { s: { r: 2, c: 0 }, e: { r: 2, c: numCols - 1 } },
+      ];
       ws['!cols'] = [{ wch: 5 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 22 }, { wch: 35 }, { wch: 12 }, { wch: 14 }, { wch: 18 }];
-      ws['!rows'] = [{ hpx: 32 }, { hpx: 20 }, { hpx: 26 }];
-      const titleStyle = { font: { name: 'Calibri', sz: 16, bold: true, color: { rgb: 'FBBF24' } }, fill: { fgColor: { rgb: '1E2952' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center' } };
-      const subtitleStyle = { font: { name: 'Calibri', sz: 10, italic: true, color: { rgb: '1E2952' } }, fill: { fgColor: { rgb: 'FEF3C7' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center' } };
-      const headerStyle = { font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FBBF24' } }, fill: { fgColor: { rgb: '1E2952' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true }, border: { bottom: { style: 'medium', color: { rgb: 'FBBF24' } } } };
-      if (ws['A1']) ws['A1'].s = titleStyle;
-      if (ws['A2']) ws['A2'].s = subtitleStyle;
-      for (let c = 0; c < numCols; c++) { const a = XLSX.utils.encode_cell({ r: 2, c }); if (ws[a]) ws[a].s = headerStyle; }
-      const cellBase = { font: { name: 'Calibri', sz: 10, color: { rgb: '1E2952' } }, alignment: { vertical: 'center' } };
+      ws['!rows'] = [{ hpx: 30 }, { hpx: 18 }, { hpx: 20 }, { hpx: 26 }];
+      // Charte : navy #0F2238, ocre #E3CC7A, cyan #6DD5DC
+      const brandStyle = { font: { name: 'Calibri', sz: 16, bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '0F2238' }, patternType: 'solid' }, alignment: { horizontal: 'left', vertical: 'center', indent: 1 } };
+      const brandSubtitleStyle = { font: { name: 'Calibri', sz: 10, color: { rgb: '6DD5DC' } }, fill: { fgColor: { rgb: '0F2238' }, patternType: 'solid' }, alignment: { horizontal: 'left', vertical: 'center', indent: 1 } };
+      const subjectStyle = { font: { name: 'Calibri', sz: 9.5, italic: true, color: { rgb: '0F2238' } }, fill: { fgColor: { rgb: 'F8F4E0' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center' } };
+      const headerStyle = { font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'E3CC7A' } }, fill: { fgColor: { rgb: '0F2238' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true }, border: { bottom: { style: 'medium', color: { rgb: 'E3CC7A' } } } };
+      if (ws['A1']) ws['A1'].s = brandStyle;
+      if (ws['A2']) ws['A2'].s = brandSubtitleStyle;
+      if (ws['A3']) ws['A3'].s = subjectStyle;
+      for (let c = 0; c < numCols; c++) { const a = XLSX.utils.encode_cell({ r: 3, c }); if (ws[a]) ws[a].s = headerStyle; }
+      const cellBase = { font: { name: 'Calibri', sz: 10, color: { rgb: '0F2238' } }, alignment: { vertical: 'center' } };
       const cellCenter = { ...cellBase, alignment: { horizontal: 'center', vertical: 'center' } };
       const cellRight = { ...cellBase, alignment: { horizontal: 'right', vertical: 'center' } };
-      const cellLink = { font: { name: 'Calibri', sz: 10, color: { rgb: '1E2952' }, underline: true, bold: true }, alignment: { horizontal: 'center', vertical: 'center' } };
-      for (let r = 3; r < 3 + parcelles.length; r++) {
+      const cellLink = { font: { name: 'Calibri', sz: 10, color: { rgb: '33838B' }, underline: true, bold: true }, alignment: { horizontal: 'center', vertical: 'center' } };
+      for (let r = 4; r < 4 + parcelles.length; r++) {
         for (let c = 0; c < numCols; c++) {
           const a = XLSX.utils.encode_cell({ r, c });
           if (!ws[a]) continue;
@@ -263,8 +273,8 @@ export default function App() {
           else ws[a].s = cellBase;
         }
       }
-      ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 2, c: 0 }, e: { r: 2 + parcelles.length, c: numCols - 1 } }) };
-      ws['!views'] = [{ state: 'frozen', xSplit: 0, ySplit: 3, topLeftCell: 'A4', activePane: 'bottomLeft' }];
+      ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: 3 + parcelles.length, c: numCols - 1 } }) };
+      ws['!views'] = [{ state: 'frozen', xSplit: 0, ySplit: 4, topLeftCell: 'A5', activePane: 'bottomLeft' }];
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'Parcelles');
       const dateStr = new Date().toISOString().split('T')[0];
@@ -289,52 +299,86 @@ export default function App() {
       const stats = computeStats();
       const dateStr = new Date().toLocaleDateString('fr-FR');
 
-      const NAVY = [30, 41, 82];
-      const GOLD = [251, 191, 36];
-      const BEIGE = [254, 243, 199];
+      // ===== Palette charte FIDAL =====
+      const NAVY = [15, 34, 56];      // #0F2238
+      const OCRE = [227, 204, 122];   // #E3CC7A (slash, accents)
+      const CYAN = [109, 213, 220];   // #6DD5DC (sous-titre)
+      const TEAL = [51, 131, 139];    // #33838B (polygone)
+      const GREYBLUE = [101, 125, 150];
+      const GOLD = OCRE;              // accents du corps (sections, tableaux)
+      const BEIGE = [248, 244, 224];  // teinte ocre très pâle
 
+      // ===== Bandeau marque (même identité que le web) =====
+      const bandH = 26;
       doc.setFillColor(...NAVY);
-      doc.rect(0, 0, pageWidth, 30, 'F');
-      doc.setFillColor(...GOLD);
-      doc.rect(0, 30, pageWidth, 1.5, 'F');
+      doc.rect(0, 0, pageWidth, bandH, 'F');
+      doc.setFillColor(...OCRE);
+      doc.rect(0, bandH, pageWidth, 1.2, 'F');
 
-      try {
-        if (window.__fidalLogoData) {
-          doc.addImage(window.__fidalLogoData, 'PNG', margin, 5, 32, 20);
-        } else {
-          doc.setFillColor(255, 255, 255);
-          doc.rect(margin, 6, 28, 18, 'F');
-          doc.setDrawColor(...NAVY);
-          doc.setLineWidth(0.3);
-          doc.rect(margin, 6, 28, 18);
-          doc.setTextColor(...NAVY);
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(11);
-          doc.text('FIDAL', margin + 14, 14, { align: 'center' });
-          doc.setFontSize(6);
-          doc.text('NOTAIRES', margin + 14, 19, { align: 'center' });
-        }
-      } catch (e) {
-        console.warn('Logo non inséré', e);
-      }
-
-      doc.setTextColor(...GOLD);
-      doc.setFontSize(8);
-      doc.setFont('helvetica', 'normal');
-      doc.text('RAPPORT REDPAR', margin + 38, 13);
+      // Lockup FIDAL / NOTAIRES
+      let lx = margin;
+      doc.setFont('times', 'bold');
+      doc.setFontSize(15);
       doc.setTextColor(255, 255, 255);
+      doc.text('FIDAL', lx, 13);
+      lx += doc.getTextWidth('FIDAL') + 2;
+      doc.setTextColor(...OCRE);
+      doc.setFontSize(17);
+      doc.text('/', lx, 13.5);
+      lx += doc.getTextWidth('/') + 3;
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7);
+      doc.setTextColor(255, 255, 255);
+      doc.text('NOTAIRES', lx, 12.5, { charSpace: 0.8 });
+      lx += doc.getTextWidth('NOTAIRES') + 0.8 * 7 + 6;
+
+      // Séparateur vertical
+      doc.setDrawColor(...GREYBLUE);
+      doc.setLineWidth(0.3);
+      doc.line(lx, 5, lx, 21);
+      const titleX = lx + 6;
+
+      // REDPAR + sous-titre
+      doc.setFont('times', 'bold');
+      doc.setFontSize(22);
+      doc.setTextColor(255, 255, 255);
+      doc.text('REDPAR', titleX, 14);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(6.5);
+      doc.setTextColor(...CYAN);
+      doc.text('PATRIMOINE FONCIER DES PERSONNES MORALES', titleX + 0.5, 20, { charSpace: 0.7 });
+
+      // Emblème polygone (à droite)
+      try {
+        const ps = 14, px = pageWidth - margin - ps, py = 6;
+        const poly = [[5, 4], [19, 7], [20, 17], [8, 20], [4, 11]].map(([a, b]) => [px + (a / 24) * ps, py + (b / 24) * ps]);
+        doc.setDrawColor(...TEAL);
+        doc.setFillColor(...TEAL);
+        doc.setLineWidth(0.5);
+        for (let i = 0; i < poly.length; i++) {
+          const a = poly[i], b = poly[(i + 1) % poly.length];
+          doc.line(a[0], a[1], b[0], b[1]);
+        }
+        poly.forEach(pt => doc.circle(pt[0], pt[1], 0.7, 'F'));
+      } catch (e) { /* polygone optionnel */ }
+
+      // ===== Sujet du rapport =====
+      doc.setTextColor(...TEAL);
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(14);
-      doc.text(selectedCompany?.nom || '', margin + 38, 20);
+      doc.setFontSize(7);
+      doc.text('RAPPORT REDPAR', margin, bandH + 7, { charSpace: 0.5 });
+      doc.setTextColor(...NAVY);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13);
+      doc.text(selectedCompany?.nom || '', margin, bandH + 13);
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8);
-      doc.text(`SIREN : ${selectedCompany?.siren} • ${selectedCompany?.formeJuridique || ''}`, margin + 38, 26);
+      doc.setTextColor(...GREYBLUE);
+      doc.text(`SIREN : ${selectedCompany?.siren} • ${selectedCompany?.formeJuridique || ''}`, margin, bandH + 18);
+      doc.setTextColor(...NAVY);
+      doc.text(dateStr, pageWidth - margin, bandH + 18, { align: 'right' });
 
-      doc.setFontSize(8);
-      doc.setTextColor(...GOLD);
-      doc.text(dateStr, pageWidth - margin, 26, { align: 'right' });
-
-      let y = 42;
+      let y = bandH + 26;
 
       doc.setFillColor(...BEIGE);
       doc.rect(margin, y - 4, pageWidth - 2 * margin, 10, 'F');
