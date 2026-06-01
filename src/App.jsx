@@ -288,7 +288,7 @@ export default function App() {
       ws.columns = widths.map(w => ({ width: w }));
 
       // --- Ligne 1 : bandeau image ---
-      const bannerW = 1010, bannerH = 150;
+      const bannerW = 1240, bannerH = 150;
       ws.getRow(1).height = bannerH * 0.75; // px -> points
       const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
       ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: bannerW, height: bannerH } });
