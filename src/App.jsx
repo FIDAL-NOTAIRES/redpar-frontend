@@ -219,67 +219,147 @@ export default function App() {
     return { depts, communes };
   };
 
-  const exportExcel = () => {
-    if (!parcelles.length || !window.XLSX) {
-      if (!window.XLSX) alert("Librairie Excel non chargée");
+  // Dessine le bandeau de marque sur un canvas et renvoie un PNG (dataURL)
+  const drawBannerDataUrl = (wPx, hPx) => {
+    const scale = 2;
+    const cv = document.createElement('canvas');
+    cv.width = wPx * scale;
+    cv.height = hPx * scale;
+    const ctx = cv.getContext('2d');
+    ctx.scale(scale, scale);
+    const drawSpaced = (text, x, y, gap) => {
+      let cx = x;
+      for (const ch of text) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + gap; }
+      return cx;
+    };
+    ctx.fillStyle = '#0F2238';
+    ctx.fillRect(0, 0, wPx, hPx);
+    ctx.fillStyle = '#E3CC7A';
+    ctx.fillRect(0, hPx - 3, wPx, 3);
+    ctx.textBaseline = 'middle';
+    let x = 40;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = "bold 34px Georgia, 'Times New Roman', serif";
+    ctx.fillText('FIDAL', x, 70);
+    x += ctx.measureText('FIDAL').width + 10;
+    ctx.fillStyle = '#E3CC7A';
+    ctx.font = "bold 40px Georgia, 'Times New Roman', serif";
+    ctx.fillText('/', x, 70);
+    x += ctx.measureText('/').width + 12;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = "15px 'Segoe UI', Arial, sans-serif";
+    x = drawSpaced('NOTAIRES', x, 70, 3) + 22;
+    ctx.strokeStyle = 'rgba(101,125,150,0.6)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, 42); ctx.lineTo(x, 108); ctx.stroke();
+    x += 26;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = "bold 46px Georgia, 'Times New Roman', serif";
+    ctx.fillText('REDPAR', x, 62);
+    ctx.fillStyle = '#6DD5DC';
+    ctx.font = "14px 'Segoe UI', Arial, sans-serif";
+    drawSpaced('PATRIMOINE FONCIER DES PERSONNES MORALES', x + 2, 98, 3);
+    const ps = 54, px = wPx - 40 - ps, py = 48;
+    const poly = [[5, 4], [19, 7], [20, 17], [8, 20], [4, 11]].map(([a, b]) => [px + (a / 24) * ps, py + (b / 24) * ps]);
+    ctx.strokeStyle = '#33838B';
+    ctx.fillStyle = '#33838B';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    poly.forEach((pt, i) => (i ? ctx.lineTo(pt[0], pt[1]) : ctx.moveTo(pt[0], pt[1])));
+    ctx.closePath(); ctx.stroke();
+    poly.forEach(pt => { ctx.beginPath(); ctx.arc(pt[0], pt[1], 2.4, 0, Math.PI * 2); ctx.fill(); });
+    return cv.toDataURL('image/png');
+  };
+
+  const exportExcel = async () => {
+    if (!parcelles.length || !window.ExcelJS) {
+      if (!window.ExcelJS) alert("Librairie Excel (ExcelJS) non chargée");
       return;
     }
     setExportingExcel(true);
     try {
-      const XLSX = window.XLSX;
+      const ExcelJS = window.ExcelJS;
       const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Google Maps'];
       const numCols = headers.length;
-      // Bandeau marque (charte FIDAL) + sujet du rapport
-      const brandText = 'FIDAL / NOTAIRES          REDPAR';
-      const brandSubtitleText = 'PATRIMOINE FONCIER DES PERSONNES MORALES';
+      const widths = [5, 18, 22, 18, 22, 35, 12, 14, 18];
+
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet('Parcelles', { views: [{ state: 'frozen', ySplit: 3 }] });
+      ws.columns = widths.map(w => ({ width: w }));
+
+      // --- Ligne 1 : bandeau image ---
+      const bannerW = 1010, bannerH = 150;
+      ws.getRow(1).height = bannerH * 0.75; // px -> points
+      const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
+      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: bannerW, height: bannerH } });
+
+      // --- Ligne 2 : sujet du rapport ---
       const subjectText = `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : MAJIC (DGFiP) via Koumoul  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
-      const aoa = [];
-      aoa.push([brandText, ...Array(numCols - 1).fill('')]);
-      aoa.push([brandSubtitleText, ...Array(numCols - 1).fill('')]);
-      aoa.push([subjectText, ...Array(numCols - 1).fill('')]);
-      aoa.push(headers);
-      parcelles.forEach((p, i) => {
-        const link = buildSatelliteLink(p.coordonnees);
-        aoa.push([i + 1, p.codeParcelle || '', p.commune || '', p.departement || '', p.region || '', p.adresse || '', p.contenance || 0, p.natureCulture || '', link ? { t: 's', v: 'Voir (satellite)', l: { Target: link } } : '']);
+      ws.mergeCells(2, 1, 2, numCols);
+      const subjectCell = ws.getCell(2, 1);
+      subjectCell.value = subjectText;
+      subjectCell.font = { name: 'Calibri', size: 9.5, italic: true, color: { argb: 'FF0F2238' } };
+      subjectCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F4E0' } };
+      subjectCell.alignment = { horizontal: 'center', vertical: 'middle' };
+      ws.getRow(2).height = 18;
+
+      // --- Ligne 3 : en-têtes de colonnes ---
+      const headerRow = ws.getRow(3);
+      headers.forEach((h, i) => {
+        const cell = headerRow.getCell(i + 1);
+        cell.value = h;
+        cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFE3CC7A' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F2238' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        cell.border = { bottom: { style: 'medium', color: { argb: 'FFE3CC7A' } } };
       });
-      const ws = XLSX.utils.aoa_to_sheet(aoa);
-      ws['!merges'] = [
-        { s: { r: 0, c: 0 }, e: { r: 0, c: numCols - 1 } },
-        { s: { r: 1, c: 0 }, e: { r: 1, c: numCols - 1 } },
-        { s: { r: 2, c: 0 }, e: { r: 2, c: numCols - 1 } },
-      ];
-      ws['!cols'] = [{ wch: 5 }, { wch: 18 }, { wch: 22 }, { wch: 18 }, { wch: 22 }, { wch: 35 }, { wch: 12 }, { wch: 14 }, { wch: 18 }];
-      ws['!rows'] = [{ hpx: 30 }, { hpx: 18 }, { hpx: 20 }, { hpx: 26 }];
-      // Charte : navy #0F2238, ocre #E3CC7A, cyan #6DD5DC
-      const brandStyle = { font: { name: 'Calibri', sz: 16, bold: true, color: { rgb: 'FFFFFF' } }, fill: { fgColor: { rgb: '0F2238' }, patternType: 'solid' }, alignment: { horizontal: 'left', vertical: 'center', indent: 1 } };
-      const brandSubtitleStyle = { font: { name: 'Calibri', sz: 10, color: { rgb: '6DD5DC' } }, fill: { fgColor: { rgb: '0F2238' }, patternType: 'solid' }, alignment: { horizontal: 'left', vertical: 'center', indent: 1 } };
-      const subjectStyle = { font: { name: 'Calibri', sz: 9.5, italic: true, color: { rgb: '0F2238' } }, fill: { fgColor: { rgb: 'F8F4E0' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center' } };
-      const headerStyle = { font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'E3CC7A' } }, fill: { fgColor: { rgb: '0F2238' }, patternType: 'solid' }, alignment: { horizontal: 'center', vertical: 'center', wrapText: true }, border: { bottom: { style: 'medium', color: { rgb: 'E3CC7A' } } } };
-      if (ws['A1']) ws['A1'].s = brandStyle;
-      if (ws['A2']) ws['A2'].s = brandSubtitleStyle;
-      if (ws['A3']) ws['A3'].s = subjectStyle;
-      for (let c = 0; c < numCols; c++) { const a = XLSX.utils.encode_cell({ r: 3, c }); if (ws[a]) ws[a].s = headerStyle; }
-      const cellBase = { font: { name: 'Calibri', sz: 10, color: { rgb: '0F2238' } }, alignment: { vertical: 'center' } };
-      const cellCenter = { ...cellBase, alignment: { horizontal: 'center', vertical: 'center' } };
-      const cellRight = { ...cellBase, alignment: { horizontal: 'right', vertical: 'center' } };
-      const cellLink = { font: { name: 'Calibri', sz: 10, color: { rgb: '33838B' }, underline: true, bold: true }, alignment: { horizontal: 'center', vertical: 'center' } };
-      for (let r = 4; r < 4 + parcelles.length; r++) {
-        for (let c = 0; c < numCols; c++) {
-          const a = XLSX.utils.encode_cell({ r, c });
-          if (!ws[a]) continue;
-          if (c === 0 || c === 7) ws[a].s = cellCenter;
-          else if (c === 6) { ws[a].s = cellRight; ws[a].z = '#,##0'; }
-          else if (c === 8) ws[a].s = cellLink;
-          else ws[a].s = cellBase;
+      headerRow.height = 24;
+
+      // --- Données ---
+      parcelles.forEach((p, i) => {
+        const r = i + 4;
+        const link = buildSatelliteLink(p.coordonnees);
+        const row = ws.getRow(r);
+        const navy = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
+        row.getCell(1).value = i + 1;
+        row.getCell(2).value = p.codeParcelle || '';
+        row.getCell(3).value = p.commune || '';
+        row.getCell(4).value = p.departement || '';
+        row.getCell(5).value = p.region || '';
+        row.getCell(6).value = p.adresse || '';
+        row.getCell(7).value = p.contenance || 0;
+        row.getCell(8).value = p.natureCulture || '';
+        const linkCell = row.getCell(9);
+        if (link) {
+          linkCell.value = { text: 'Voir (satellite)', hyperlink: link };
+          linkCell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
+        } else {
+          linkCell.value = '';
         }
-      }
-      ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 3, c: 0 }, e: { r: 3 + parcelles.length, c: numCols - 1 } }) };
-      ws['!views'] = [{ state: 'frozen', xSplit: 0, ySplit: 4, topLeftCell: 'A5', activePane: 'bottomLeft' }];
-      const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Parcelles');
+        for (let c = 1; c <= numCols; c++) {
+          const cell = row.getCell(c);
+          if (c !== 9) cell.font = navy;
+          if (c === 1 || c === 8) cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          else if (c === 7) { cell.alignment = { horizontal: 'right', vertical: 'middle' }; cell.numFmt = '#,##0'; }
+          else if (c === 9) cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          else cell.alignment = { vertical: 'middle' };
+        }
+      });
+
+      ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + parcelles.length, column: numCols } };
+
+      const buf = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const dateStr = new Date().toISOString().split('T')[0];
       const cleanName = (selectedCompany?.nom || 'export').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
-      XLSX.writeFile(wb, `REDPAR_${cleanName}_${dateStr}.xlsx`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `REDPAR_${cleanName}_${dateStr}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
     } catch (err) { alert("Erreur Excel : " + err.message); }
     finally { setExportingExcel(false); }
   };
