@@ -13,6 +13,44 @@ const BACKEND_URL = 'https://redpar-backend.vercel.app';
 // jamais de génération en masse.
 const PAINT_URL = 'https://paint-blue.vercel.app';
 
+// Deux liens, deux usages assumés.
+// À l'écran : on ouvre PAINT, qui génère l'extrait ET colorie la parcelle, prêt
+// à annoter et à exporter — c'est l'outil de travail.
+// Dans le classeur : on pointe le PDF brut, parce qu'un tableur remis à un tiers
+// doit livrer une pièce, pas ouvrir une application du cabinet.
+// Échelle choisie d'après la CONTENANCE, que REDPAR connaît. C'est décisif : à
+// 1/1000, une parcelle de 45 m² en centre-ville est minuscule, son numéro est
+// collé aux voisins, et le remplissage automatique part dans la rue. Une échelle
+// rapprochée agrandit la parcelle et fiabilise le repérage.
+// Un extrait A4 couvre environ 17 cm de largeur utile, soit 17 × N centimètres
+// sur le terrain ; on vise une parcelle occupant une part lisible du cadre.
+// Valeurs limitées à celles que propose PAINT : 200, 500, 1000, 2000, 5000.
+const echellePourContenance = (m2) => {
+  const a = Number(m2 || 0);
+  if (!a) return '1000';
+  if (a < 300) return '200';        // largeur du cadre ~34 m
+  if (a < 3000) return '500';       // ~85 m
+  if (a < 30000) return '1000';     // ~170 m
+  if (a < 300000) return '2000';    // ~340 m
+  return '5000';                    // ~850 m
+};
+
+const lienPaintColorise = (codeParcelle, nomCommune, contenance) => {
+  const r = String(codeParcelle || '');
+  if (r.length !== 14) return null;
+  const qs = new URLSearchParams({
+    commune: r.slice(0, 5),
+    nomCommune: nomCommune || '',
+    prefixe: r.slice(5, 8),
+    section: r.slice(8, 10),
+    parcelle: r.slice(10, 14),
+    echelle: echellePourContenance(contenance),
+    format: 'A4|portrait',
+    auto: '1',
+  });
+  return `${PAINT_URL}/?${qs.toString()}`;
+};
+
 const lienExtraitCadastral = (codeParcelle) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
@@ -996,7 +1034,7 @@ export default function App() {
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
-        ['Extraits cadastraux', "La colonne « Extrait cadastral » ouvre l'extrait officiel du plan (DGFiP) pour la parcelle, généré à la demande par l'application PAINT du cabinet. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée."],
+        ['Extraits cadastraux', "La colonne « Extrait cadastral » ouvre le PDF de l'extrait officiel du plan (DGFiP) pour la parcelle, généré à la demande. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. Depuis l'application, le lien « Plan » ouvre en outre PAINT avec la parcelle déjà coloriée."],
         ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
           ? "Société CESSÉE au répertoire Sirene, et pourtant encore inscrite à la documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation postérieure au 1er janvier " + millesime + ". À instruire avant toute reprise."
           : "Société active au répertoire Sirene à la date de génération du présent document."} Source du statut : API Recherche d'Entreprises (gouv.fr), distincte des fichiers cadastraux.`],
@@ -1760,9 +1798,9 @@ export default function App() {
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-center">
-                                  {lienExtraitCadastral(o.codeParcelle) && (
-                                    <a href={lienExtraitCadastral(o.codeParcelle)} target="_blank" rel="noreferrer"
-                                      title="Extrait cadastral officiel (DGFiP), pour vérifier l'écart sur le plan"
+                                  {lienPaintColorise(o.codeParcelle, o.commune, o.contenance) && (
+                                    <a href={lienPaintColorise(o.codeParcelle, o.commune, o.contenance)} target="_blank" rel="noreferrer"
+                                      title="Ouvre PAINT pour confronter l'écart au plan, parcelle déjà coloriée"
                                       className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                   )}
                                 </td>
@@ -1822,9 +1860,9 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienExtraitCadastral(p.codeParcelle) && (
-                                  <a href={lienExtraitCadastral(p.codeParcelle)} target="_blank" rel="noreferrer"
-                                    title="Extrait cadastral officiel (DGFiP), généré à la demande"
+                                {lienPaintColorise(p.codeParcelle, p.commune, p.contenance) && (
+                                  <a href={lienPaintColorise(p.codeParcelle, p.commune, p.contenance)} target="_blank" rel="noreferrer"
+                                    title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
                                     className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                 )}
                               </td>
@@ -1923,8 +1961,9 @@ export default function App() {
                                   <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
                                   <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
                                   <td className="px-4 py-3 text-center">
-                                    {lienExtraitCadastral(im.codeParcelle) && (
-                                      <a href={lienExtraitCadastral(im.codeParcelle)} target="_blank" rel="noreferrer"
+                                    {lienPaintColorise(im.codeParcelle, im.commune, im.contenance) && (
+                                      <a href={lienPaintColorise(im.codeParcelle, im.commune, im.contenance)} target="_blank" rel="noreferrer"
+                                        title="Ouvre PAINT : extrait généré et parcelle coloriée"
                                         className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                     )}
                                   </td>
