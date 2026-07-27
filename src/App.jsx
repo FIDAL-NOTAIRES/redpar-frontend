@@ -143,7 +143,18 @@ function surfaceDistincte(liste) {
   return m2;
 }
 
-function ParcellesMap({ parcelles, locaux = [], companyName }) {
+// Conversion GeoJSON -> Leaflet. Les GeoJSON du cadastre sont en WGS84 avec
+// l'ordre [longitude, latitude] ; Leaflet attend [latitude, longitude].
+// Inverser est l'erreur classique : on se retrouve au large de la Somalie.
+function anneauxLeaflet(geom) {
+  if (!geom) return [];
+  const inverse = (anneau) => anneau.map(([lng, lat]) => [lat, lng]);
+  if (geom.type === 'Polygon') return [geom.coordinates.map(inverse)];
+  if (geom.type === 'MultiPolygon') return geom.coordinates.map((p) => p.map(inverse));
+  return [];
+}
+
+function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
 
@@ -224,6 +235,36 @@ function ParcellesMap({ parcelles, locaux = [], companyName }) {
     });
     map.addLayer(markers);
 
+    // ---- Contours de parcelles ----------------------------------------------
+    // Tracés par-dessus le fond, sous les marqueurs. Carmin de la charte de
+    // colorisation, pour que l'écran et le plan colorié parlent la même langue.
+    let groupeContours = null;
+    if (contours && contours.size > 0) {
+      groupeContours = L.layerGroup();
+      let tracees = 0;
+      parcelles.forEach((p) => {
+        const geom = contours.get(p.codeParcelle);
+        if (!geom) return;
+        anneauxLeaflet(geom).forEach((anneaux) => {
+          const poly = L.polygon(anneaux, {
+            color: '#A01040', weight: 2, opacity: 0.9,
+            fillColor: '#A01040', fillOpacity: 0.25,
+          });
+          poly.bindPopup(`
+            <div style="font-family:system-ui;min-width:200px">
+              <div style="font-weight:700;color:#A01040;margin-bottom:6px;border-bottom:2px solid #A01040;padding-bottom:4px">Contour cadastral</div>
+              <div style="font-family:monospace;font-size:11px;color:#1e2952">${p.codeParcelle || ''}</div>
+              <div style="font-size:12px;color:#475569;margin-top:3px">${p.commune || ''} — ${(p.contenance || 0).toLocaleString('fr-FR')} m²</div>
+              <div style="font-size:11px;color:#94a3b8;margin-top:3px">${p.adresse || ''}</div>
+            </div>`);
+          groupeContours.addLayer(poly);
+          anneaux[0].forEach((pt) => bounds.push(pt));
+          tracees++;
+        });
+      });
+      if (tracees > 0) map.addLayer(groupeContours);
+    }
+
     if (validImmeubles.length > 0) {
       const groupeBati = L.markerClusterGroup({
         chunkedLoading: true,
@@ -249,9 +290,13 @@ function ParcellesMap({ parcelles, locaux = [], companyName }) {
         groupeBati.addLayer(m);
       });
       map.addLayer(groupeBati);
+      const couches = { 'Parcelles (non bâti)': markers, 'Immeubles (bâti)': groupeBati };
+      if (groupeContours) couches['Contours cadastraux'] = groupeContours;
+      L.control.layers(null, couches, { collapsed: false }).addTo(map);
+    } else if (groupeContours) {
       L.control.layers(null, {
         'Parcelles (non bâti)': markers,
-        'Immeubles (bâti)': groupeBati,
+        'Contours cadastraux': groupeContours,
       }, { collapsed: false }).addTo(map);
     }
 
@@ -265,7 +310,7 @@ function ParcellesMap({ parcelles, locaux = [], companyName }) {
         mapInstanceRef.current = null;
       }
     };
-  }, [parcelles, locaux, companyName]);
+  }, [parcelles, locaux, contours, companyName]);
 
   return <div ref={mapRef} style={{ height: '500px', width: '100%' }} />;
 }
@@ -312,6 +357,11 @@ export default function App() {
   const [qLocaux, setQLocaux] = useState('');
   const [triLocaux, setTriLocaux] = useState({ champ: '', sens: 'asc' });
   const [locauxGroupes, setLocauxGroupes] = useState(true);
+  // Contours : chargés À LA DEMANDE et non avec le relevé. Sur un portefeuille de
+  // mille six cents parcelles, les géométries représentent plusieurs mégaoctets —
+  // inutile de les imposer à qui veut seulement le tableau et les exports.
+  const [contours, setContours] = useState(null);
+  const [contoursEtat, setContoursEtat] = useState(null);
 
   const droitsPresents = (() => {
     const m = new Map();
@@ -481,6 +531,46 @@ export default function App() {
   };
 
   // Volet bâti, inexistant avant le passage aux fichiers DGFiP 2025.
+  // Contours cadastraux, par commune, avec le même découpage que le géocodage.
+  const chargerContours = async () => {
+    const parCommune = new Map();
+    parcelles.forEach((p) => {
+      if (!p.codeInsee || !p.codeParcelle) return;
+      if (!parCommune.has(p.codeInsee)) parCommune.set(p.codeInsee, new Set());
+      parCommune.get(p.codeInsee).add(p.codeParcelle);
+    });
+    if (!parCommune.size) return;
+    const taches = [];
+    for (const [insee, refs] of parCommune) {
+      const liste = [...refs];
+      for (let i = 0; i < liste.length; i += 400) taches.push([insee, liste.slice(i, i + 400)]);
+    }
+    const trouves = new Map();
+    let faites = 0;
+    setContoursEtat({ total: taches.length, faites: 0, geometries: 0 });
+    let curseur = 0;
+    const travailleur = async () => {
+      while (curseur < taches.length) {
+        const [insee, refs] = taches[curseur++];
+        try {
+          const suffixes = refs.map((r) => r.slice(5)).join(',');
+          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}&contours=1`);
+          if (r.ok) {
+            const d = await r.json();
+            Object.entries(d.geo || {}).forEach(([ref, g]) => {
+              if (g.contour) trouves.set(ref, g.contour);
+            });
+          }
+        } catch { /* une commune absente du plan ne doit pas bloquer les autres */ }
+        faites++;
+        setContoursEtat({ total: taches.length, faites, geometries: trouves.size });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, taches.length) }, travailleur));
+    setContours(trouves);
+    setContoursEtat({ total: taches.length, faites, geometries: trouves.size, termine: true });
+  };
+
   const fetchLocaux = async (siren) => {
     setLocauxLoading(true); setLocauxError(null); setLocauxBruts([]); setTotalLocaux(0);
     try {
@@ -504,6 +594,7 @@ export default function App() {
     setStep(3);
     setDroitsChoisis(null);
     setQParcelles(''); setQLocaux('');
+    setContours(null); setContoursEtat(null);
     setTriParcelles({ champ: '', sens: 'asc' }); setTriLocaux({ champ: '', sens: 'asc' });
     // Les deux relevés partent ensemble ; le géocodage attend les deux pour
     // n'interroger chaque commune qu'une fois.
@@ -1674,11 +1765,29 @@ export default function App() {
                         <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
                       </span>
                     )}
+                    {geoStatus?.termine && !contours && !contoursEtat && (
+                      <button onClick={chargerContours}
+                        className="ml-auto px-3 py-1.5 text-xs rounded-lg border border-stone-300 text-blue-950 hover:border-blue-900 hover:text-blue-900">
+                        Afficher les contours cadastraux
+                      </button>
+                    )}
+                    {contoursEtat && !contoursEtat.termine && (
+                      <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-700">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        contours : commune {contoursEtat.faites}/{contoursEtat.total}
+                      </span>
+                    )}
+                    {contoursEtat?.termine && (
+                      <span className="ml-auto text-xs text-stone-500">
+                        {contoursEtat.geometries.toLocaleString('fr-FR')} contour(s) tracé(s)
+                      </span>
+                    )}
                   </div>
-                  <ParcellesMap parcelles={parcelles} locaux={locaux} companyName={selectedCompany?.nom} />
+                  <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
                   <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
                     Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
                     {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les lots détenus sur la parcelle.
+                    {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
                     {geoStatus?.termine && geoStatus.trouvees < (geoStatus.demandees || 0) && (
                       <span className="text-amber-700"> {((geoStatus.demandees || 0) - geoStatus.trouvees).toLocaleString('fr-FR')} référence(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
                     )}
