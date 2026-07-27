@@ -29,6 +29,24 @@ const parseCoords = (coords) => {
   return [lat, lng];
 };
 
+// Surface : sommer sur les PARCELLES DISTINCTES, jamais sur les lignes. Une
+// parcelle figure autant de fois qu'elle a de titulaires de droits
+// (propriétaire, gérant, syndic, usufruitier...) ; sommer les lignes la compte
+// plusieurs fois. Écart mesuré au niveau national : +41 %.
+// Fonction déclarée hors du composant : hissée, donc utilisable avant sa
+// position dans le fichier, et pure, donc sans raison d'être recréée à chaque
+// rendu.
+function surfaceDistincte(liste) {
+  const vues = new Set();
+  let m2 = 0;
+  liste.forEach((p) => {
+    if (!p.codeParcelle || vues.has(p.codeParcelle)) return;
+    vues.add(p.codeParcelle);
+    m2 += (p.contenance || 0);
+  });
+  return m2;
+}
+
 function ParcellesMap({ parcelles, locaux = [], companyName }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -204,10 +222,23 @@ export default function App() {
   })();
 
   const propriete = droitsPresents.filter(([d]) => d.startsWith('P')).map(([d]) => d);
-  // Si aucun titre de propriété n'existe dans le relevé, tout retenir plutôt
-  // que d'afficher une page vide.
-  const droitsActifs = droitsChoisis
-    ?? (propriete.length ? propriete : droitsPresents.map(([d]) => d));
+  // Par défaut TOUS les titres sont retenus : un relevé de patrimoine doit
+  // d'abord montrer tout ce sur quoi la société apparaît, y compris les droits
+  // réels autres que la propriété — emphytéose, bail à construction, usufruit.
+  // On exclut ensuite en conscience, plutôt que de risquer d'omettre un bien.
+  // Contrepartie assumée : les agrégats mêlent alors propriété et gestion, d'où
+  // la part de propriété affichée en permanence sous les indicateurs (voir plus
+  // bas), pour que la distinction ne puisse pas passer inaperçue.
+  const droitsActifs = droitsChoisis ?? droitsPresents.map(([d]) => d);
+
+  // Part de la propriété au sein de ce qui est affiché, pour lecture immédiate.
+  const estPropriete = (o) => (o.codeDroit || '').startsWith('P');
+  const parcellesPropriete = parcellesBrutes.filter(estPropriete);
+  const surfaceEnPropriete = surfaceDistincte(parcellesPropriete);
+  const localsPropriete = locauxBruts.filter(estPropriete).length;
+  // Vrai dès qu'un titre autre que la propriété est retenu : c'est là que la
+  // distinction doit être rappelée à l'écran.
+  const melangeDesTitres = droitsActifs.some((d) => !d.startsWith('P'));
 
   const retenu = (o) => droitsActifs.includes(o.codeDroit || '(non renseigné)');
   const parcelles = parcellesBrutes.filter(retenu);
@@ -216,8 +247,8 @@ export default function App() {
   const ecartesLocaux = locauxBruts.length - locaux.length;
   const filtreActif = ecartesParcelles + ecartesLocaux > 0;
   const libelleFiltre = droitsActifs.length === droitsPresents.length
-    ? 'tous titres de droit'
-    : `titres retenus : ${droitsActifs.join(', ')}`;
+    ? `tous titres de droit (${droitsPresents.length} titre(s) présent(s) dans ce relevé)`
+    : `titres retenus : ${droitsActifs.join(' ; ')}`;
 
   const basculerDroit = (d) => setDroitsChoisis(
     droitsActifs.includes(d) ? droitsActifs.filter((x) => x !== d) : [...droitsActifs, d]);
@@ -1133,20 +1164,6 @@ export default function App() {
     }
   };
 
-  // Surface : sommer sur les PARCELLES DISTINCTES, jamais sur les lignes. Une
-  // parcelle figure autant de fois qu'elle a de titulaires de droits
-  // (propriétaire, gérant, syndic, usufruitier...) ; sommer les lignes la
-  // compte plusieurs fois. Écart mesuré au niveau national : +41 %.
-  const surfaceDistincte = (liste) => {
-    const vues = new Set();
-    let m2 = 0;
-    liste.forEach((p) => {
-      if (!p.codeParcelle || vues.has(p.codeParcelle)) return;
-      vues.add(p.codeParcelle);
-      m2 += (p.contenance || 0);
-    });
-    return m2;
-  };
   const totalSurface = surfaceDistincte(parcelles);
   const parcellesDistinctes = new Set(parcelles.map((p) => p.codeParcelle).filter(Boolean)).size;
   const stats = parcelles.length > 0 ? computeStats() : { depts: [], communes: [] };
@@ -1352,11 +1369,18 @@ export default function App() {
                   <span className="text-xs text-stone-500">
                     les indicateurs, la carte et les exports ne portent que sur les titres cochés
                   </span>
-                  {droitsChoisis && (
-                    <button onClick={() => setDroitsChoisis(null)} className="ml-auto text-xs text-blue-900 underline hover:text-blue-700">
-                      revenir à la propriété seule
-                    </button>
-                  )}
+                  <div className="ml-auto flex items-center gap-3">
+                    {propriete.length > 0 && propriete.length < droitsPresents.length && (
+                      <button onClick={() => setDroitsChoisis(propriete)} className="text-xs text-blue-900 underline hover:text-blue-700">
+                        propriété seule
+                      </button>
+                    )}
+                    {droitsActifs.length < droitsPresents.length && (
+                      <button onClick={() => setDroitsChoisis(null)} className="text-xs text-blue-900 underline hover:text-blue-700">
+                        tous les titres
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {droitsPresents.map(([d, n]) => {
@@ -1376,6 +1400,11 @@ export default function App() {
                     {ecartesParcelles.toLocaleString('fr-FR')} parcelle(s) et {ecartesLocaux.toLocaleString('fr-FR')} local(aux) écartés par ce filtre : la société y figure à un autre titre que ceux retenus.
                   </div>
                 )}
+                {melangeDesTitres && (
+                  <div className="mt-3 text-xs text-blue-900 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+                    Titres autres que la propriété retenus : les totaux mêlent donc les biens détenus en propriété et ceux sur lesquels la société n'a qu'un autre droit réel ou une mission de gestion. La part de propriété est rappelée sous chaque indicateur.
+                  </div>
+                )}
                 {droitsActifs.length === 0 && (
                   <div className="mt-3 text-xs text-red-700">Aucun titre retenu : cochez-en au moins un.</div>
                 )}
@@ -1391,11 +1420,17 @@ export default function App() {
                     {ecartesParcelles > 0 && (
                       <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
                     )}
+                    {melangeDesTitres && (
+                      <div className="text-xs text-blue-900 mt-1">dont {parcellesPropriete.length.toLocaleString('fr-FR')} au titre de la propriété</div>
+                    )}
                     {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Surface totale</div>
                     <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
+                    {melangeDesTitres && (
+                      <div className="text-xs text-blue-900 mt-1">dont {surfaceEnPropriete.toLocaleString('fr-FR')} m² en propriété</div>
+                    )}
                     {parcellesDistinctes < parcelles.length && (
                       <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
                     )}
@@ -1414,6 +1449,9 @@ export default function App() {
                     )}
                     {ecartesLocaux > 0 && (
                       <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
+                    )}
+                    {melangeDesTitres && !locauxLoading && (
+                      <div className="text-xs text-blue-900 mt-1">dont {localsPropriete.toLocaleString('fr-FR')} au titre de la propriété</div>
                     )}
                     {locauxTronque && (
                       <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
