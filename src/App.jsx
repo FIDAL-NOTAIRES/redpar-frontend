@@ -439,10 +439,17 @@ export default function App() {
     const ws = wb.addWorksheet(nom, { views: [{ state: 'frozen', ySplit: 3 }] });
     ws.columns = widths.map((w) => ({ width: w }));
 
-    const bannerW = 1240, bannerH = 150;
-    ws.getRow(1).height = bannerH * 0.75;
+    // Largeur du bandeau = largeur RÉELLE du tableau, et non une valeur fixe.
+    // Une colonne Excel de largeur w (en caractères) mesure environ w × 7 + 5
+    // pixels avec Calibri 11. Les deux onglets n'ayant pas les mêmes colonnes
+    // (190 unités pour les parcelles, 200 pour les locaux), un bandeau figé à
+    // 1 240 px s'arrêtait avant le bord droit du tableau, différemment sur
+    // chacun. L'ancrage « br » sur la dernière colonne verrouille le bord.
+    const bannerW = widths.reduce((t, w) => t + Math.round(w * 7) + 5, 0);
+    const bannerH = 150;
+    ws.getRow(1).height = bannerH * 0.75;   // px -> points
     const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
-    ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: bannerW, height: bannerH } });
+    ws.addImage(imgId, { tl: { col: 0, row: 0 }, br: { col: numCols, row: 1 } });
 
     ws.mergeCells(2, 1, 2, numCols);
     const sujetCell = ws.getCell(2, 1);
