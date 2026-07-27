@@ -121,6 +121,11 @@ export default function App() {
   const [parcelles, setParcelles] = useState([]);
   const [totalParcelles, setTotalParcelles] = useState(0);
   const [truncated, setTruncated] = useState(false);
+  const [locaux, setLocaux] = useState([]);
+  const [totalLocaux, setTotalLocaux] = useState(0);
+  const [locauxLoading, setLocauxLoading] = useState(false);
+  const [locauxError, setLocauxError] = useState(null);
+  const [geoStatus, setGeoStatus] = useState(null);
   const [exportingExcel, setExportingExcel] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const recognitionRef = useRef(null);
@@ -169,17 +174,80 @@ export default function App() {
     finally { setPappersLoading(false); }
   };
 
+  // Géocodage à la parcelle. Les fichiers DGFiP ne portent aucune coordonnée :
+  // on les obtient du plan cadastral, commune par commune, via /api/geo.
+  // Les parcelles s'affichent immédiatement, la carte se remplit ensuite.
+  const geocoderParcelles = async (liste) => {
+    const parCommune = new Map();
+    liste.forEach((p) => {
+      if (!p.codeInsee || !p.codeParcelle) return;
+      if (!parCommune.has(p.codeInsee)) parCommune.set(p.codeInsee, []);
+      parCommune.get(p.codeInsee).push(p.codeParcelle);
+    });
+    if (parCommune.size === 0) return;
+    setGeoStatus({ communes: parCommune.size, faites: 0, trouvees: 0 });
+
+    const coords = new Map();
+    let faites = 0, trouvees = 0;
+    const taches = [];
+    for (const [insee, refs] of parCommune) {
+      // L'endpoint plafonne à 400 références par appel : on découpe.
+      for (let i = 0; i < refs.length; i += 400) {
+        taches.push([insee, refs.slice(i, i + 400)]);
+      }
+    }
+    const CONCURRENCE = 6;
+    let curseur = 0;
+    const travailleur = async () => {
+      while (curseur < taches.length) {
+        const [insee, refs] = taches[curseur++];
+        try {
+          const suffixes = refs.map((r) => r.slice(5)).join(',');
+          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}`);
+          if (r.ok) {
+            const d = await r.json();
+            Object.entries(d.geo || {}).forEach(([ref, g]) => {
+              coords.set(ref, `${g.lat}, ${g.lng}`);
+              trouvees++;
+            });
+          }
+        } catch { /* une commune manquante ne doit pas casser la carte */ }
+        faites++;
+        setGeoStatus({ communes: parCommune.size, faites, trouvees });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCE, taches.length) }, travailleur));
+    setParcelles((prev) => prev.map((p) => (coords.has(p.codeParcelle)
+      ? { ...p, coordonnees: coords.get(p.codeParcelle) } : p)));
+    setGeoStatus({ communes: parCommune.size, faites, trouvees, termine: true });
+  };
+
   const fetchParcelles = async (siren) => {
-    setParcellesLoading(true); setParcellesError(null); setParcelles([]); setTotalParcelles(0); setTruncated(false);
+    setParcellesLoading(true); setParcellesError(null); setParcelles([]); setTotalParcelles(0); setTruncated(false); setGeoStatus(null);
     try {
       const r = await fetch(`${BACKEND_URL}/api/parcelles?siren=${encodeURIComponent(siren)}&maxResults=10000`);
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
       const data = await r.json();
-      setParcelles(data.parcelles || []);
+      const liste = data.parcelles || [];
+      setParcelles(liste);
       setTotalParcelles(data.total || 0);
       setTruncated(data.truncated || false);
-    } catch (e) { setParcellesError(`Erreur : ${e.message}`); }
-    finally { setParcellesLoading(false); }
+      setParcellesLoading(false);
+      geocoderParcelles(liste);
+    } catch (e) { setParcellesError(`Erreur : ${e.message}`); setParcellesLoading(false); }
+  };
+
+  // Volet bâti, inexistant avant le passage aux fichiers DGFiP 2025.
+  const fetchLocaux = async (siren) => {
+    setLocauxLoading(true); setLocauxError(null); setLocaux([]); setTotalLocaux(0);
+    try {
+      const r = await fetch(`${BACKEND_URL}/api/locaux?siren=${encodeURIComponent(siren)}&maxResults=20000`);
+      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
+      const data = await r.json();
+      setLocaux(data.locaux || []);
+      setTotalLocaux(data.total || 0);
+    } catch (e) { setLocauxError(`Erreur : ${e.message}`); }
+    finally { setLocauxLoading(false); }
   };
 
   const goToStep1 = () => setStep(1);
@@ -189,11 +257,40 @@ export default function App() {
     if (!selectedCompany) return;
     setStep(3);
     fetchParcelles(selectedCompany.siren);
+    fetchLocaux(selectedCompany.siren);
   };
 
   const resetAll = () => {
     setStep(1); setCompanyName(''); setPappersResults([]); setSelectedCompany(null);
     setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
+    setLocaux([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null);
+  };
+
+  // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
+  // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
+  const immeubles = new Set(locaux.map((l) => l.codeParcelle).filter(Boolean)).size;
+
+  // Export des locaux. L'Excel à la charte reste à faire ; ce CSV permet déjà
+  // d'exploiter le volet bâti dans un tableur.
+  const exportLocauxCsv = () => {
+    const sep = ';';
+    const entetes = ['#', 'Reference parcelle', 'Commune', 'Departement', 'Region',
+      'Adresse', 'Batiment', 'Entree', 'Niveau', 'Porte', 'Droit'];
+    const echap = (v) => {
+      const t = String(v ?? '');
+      return /[";\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+    };
+    const lignes = [entetes.join(sep)].concat(locaux.map((l, i) => [
+      i + 1, l.codeParcelle, l.commune, l.departement, l.region, l.adresse,
+      l.batiment, l.entree, l.niveau, l.porte, l.codeDroit,
+    ].map(echap).join(sep)));
+    // BOM pour qu'Excel reconnaisse l'UTF-8 sans manipulation.
+    const blob = new Blob(['\uFEFF' + lignes.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `REDPAR-locaux-${(selectedCompany?.nom || 'societe').replace(/[^A-Za-z0-9]+/g, '-')}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
   };
 
   const computeStats = () => {
@@ -744,7 +841,7 @@ export default function App() {
             <div className="bg-white rounded-xl border border-stone-200 p-4 shadow-sm flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2 text-sm text-blue-950">
                 {parcellesLoading ? <Loader2 className="w-4 h-4 text-amber-500 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-amber-500" />}
-                {parcellesLoading ? 'Recherche dans la base MAJIC...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
+                {parcellesLoading ? 'Recherche dans les fichiers DGFiP...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
                 {!parcellesLoading && parcelles.length > 0 && (
@@ -788,7 +885,7 @@ export default function App() {
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
                 <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
                 <div className="font-semibold text-amber-900 mb-1">Aucune parcelle trouvée</div>
-                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans le fichier MAJIC (cadastre 2022).</div>
+                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans les fichiers DGFiP des personnes morales (situation au 1er janvier 2025). Rappel : les personnes physiques, les entreprises individuelles et les sociétés unipersonnelles en sont absentes par construction.</div>
               </div>
             )}
 
@@ -808,6 +905,27 @@ export default function App() {
                     <div className="text-xs text-stone-500 mb-1">Communes</div>
                     <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
                   </div>
+                  <div className="bg-white border border-stone-200 rounded-lg p-4">
+                    <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
+                    <div className="text-2xl font-semibold text-blue-950">
+                      {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : totalLocaux.toLocaleString('fr-FR')}
+                    </div>
+                    {!locauxLoading && totalLocaux > 0 && (
+                      <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
+                    )}
+                  </div>
+                  <div className="bg-white border border-stone-200 rounded-lg p-4">
+                    <div className="text-xs text-stone-500 mb-1">Géocodage</div>
+                    <div className="text-2xl font-semibold text-blue-950">
+                      {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
+                    </div>
+                    <div className="text-xs text-stone-500 mt-1">
+                      {!geoStatus ? 'en attente'
+                        : geoStatus.termine
+                          ? `parcelles localisées sur ${parcelles.length.toLocaleString('fr-FR')}`
+                          : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
+                    </div>
+                  </div>
                 </div>
 
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
@@ -815,8 +933,19 @@ export default function App() {
                     <MapIcon className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950">Carte interactive</h3>
                     <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
+                    {geoStatus && !geoStatus.termine && (
+                      <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-700">
+                        <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
+                      </span>
+                    )}
                   </div>
                   <ParcellesMap parcelles={parcelles} companyName={selectedCompany?.nom} />
+                  <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
+                    Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
+                    {geoStatus?.termine && geoStatus.trouvees < parcelles.length && (
+                      <span className="text-amber-700"> {(parcelles.length - geoStatus.trouvees).toLocaleString('fr-FR')} parcelle(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
+                    )}
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -882,7 +1011,7 @@ export default function App() {
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <MapPin className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950">Détail des parcelles</h3>
-                    <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Données MAJIC (DGFiP) via Koumoul</span>
+                    <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Fichiers DGFiP des personnes morales — millésime 2025</span>
                   </div>
                   <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                     <table className="w-full text-sm">
@@ -921,6 +1050,76 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
+                </div>
+
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+                    <Building2 className="w-4 h-4 text-blue-950" />
+                    <h3 className="font-semibold text-blue-950">Détail des locaux</h3>
+                    <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Volet bâti — millésime 2025</span>
+                    {!locauxLoading && locaux.length > 0 && (
+                      <button onClick={exportLocauxCsv} className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm">
+                        <Download className="w-4 h-4" />CSV
+                      </button>
+                    )}
+                  </div>
+
+                  {locauxLoading && (
+                    <div className="px-6 py-8 flex items-center justify-center gap-2 text-sm text-blue-950">
+                      <Loader2 className="w-4 h-4 text-amber-500 animate-spin" />Relevé du bâti en cours...
+                    </div>
+                  )}
+
+                  {locauxError && (
+                    <div className="px-6 py-6 text-sm text-red-700">{locauxError}</div>
+                  )}
+
+                  {!locauxLoading && !locauxError && locaux.length === 0 && (
+                    <div className="px-6 py-8 text-center text-sm text-stone-600">
+                      Aucun local bâti au nom de cette personne morale.
+                      <div className="text-xs text-stone-500 mt-1">Le fichier des locaux ne comporte ni surface ni numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte.</div>
+                    </div>
+                  )}
+
+                  {!locauxLoading && locaux.length > 0 && (
+                    <>
+                      <div className="px-6 py-3 border-b border-stone-200 text-xs text-stone-500">
+                        {totalLocaux.toLocaleString('fr-FR')} lot{totalLocaux > 1 ? 's' : ''} sur {immeubles.toLocaleString('fr-FR')} parcelle{immeubles > 1 ? 's' : ''} bâtie{immeubles > 1 ? 's' : ''}. Un même lot peut figurer deux fois à des titres de droit différents.
+                      </div>
+                      <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
+                            <tr>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">#</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Parcelle</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
+                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Bât.</th>
+                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Entrée</th>
+                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Niv.</th>
+                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Porte</th>
+                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Droit</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {locaux.map((l, i) => (
+                              <tr key={(l.codeParcelle || '') + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
+                                <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
+                                <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
+                                <td className="px-4 py-3 text-blue-950">{l.commune}</td>
+                                <td className="px-4 py-3 text-blue-950 text-xs">{l.adresse}</td>
+                                <td className="px-4 py-3 text-center text-blue-950">{l.batiment}</td>
+                                <td className="px-4 py-3 text-center text-blue-950">{l.entree}</td>
+                                <td className="px-4 py-3 text-center text-blue-950">{l.niveau}</td>
+                                <td className="px-4 py-3 text-center text-blue-950">{l.porte}</td>
+                                <td className="px-4 py-3 text-stone-600 text-xs">{l.codeDroit}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </>
+                  )}
                 </div>
               </>
             )}
