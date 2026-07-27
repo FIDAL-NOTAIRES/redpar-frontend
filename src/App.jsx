@@ -361,7 +361,6 @@ export default function App() {
   // mille six cents parcelles, les géométries représentent plusieurs mégaoctets —
   // inutile de les imposer à qui veut seulement le tableau et les exports.
   const [contours, setContours] = useState(null);
-  const [contoursEtat, setContoursEtat] = useState(null);
 
   const droitsPresents = (() => {
     const m = new Map();
@@ -478,6 +477,7 @@ export default function App() {
     // donc une parcelle qui a bougé — division, réunion, remembrement,
     // arpentage — et qu'il faut instruire.
     const infos = new Map();
+    const geometries = new Map();
     let faites = 0, trouvees = 0, demandees = 0;
     let curseur = 0;
     const travailleur = async () => {
@@ -486,7 +486,10 @@ export default function App() {
         demandees += refs.length;
         try {
           const suffixes = refs.map((r) => r.slice(5)).join(',');
-          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}`);
+          // contours=1 : la géométrie voyage AVEC le géocodage. Les deux
+          // interrogeaient le même endpoint, les mêmes communes, les mêmes
+          // références — c'était deux séries d'appels pour rien.
+          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}&contours=1`);
           if (r.ok) {
             const d = await r.json();
             Object.entries(d.geo || {}).forEach(([ref, g]) => {
@@ -494,12 +497,14 @@ export default function App() {
                 coordonnees: `${g.lat}, ${g.lng}`,
                 contenanceCadastre: g.contenance_cadastre ?? null,
               });
+              if (g.contour) geometries.set(ref, g.contour);
               trouvees++;
             });
           }
         } catch { /* une commune absente du plan ne doit pas casser la carte */ }
         faites++;
         setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees });
+        setContours(new Map(geometries));   // tracé progressif : la carte se garnit
       }
     };
     await Promise.all(Array.from({ length: Math.min(6, taches.length) }, travailleur));
@@ -509,6 +514,7 @@ export default function App() {
       : { ...o, _planLu: true, _absenteDuPlan: true });
     setParcellesBrutes((prev) => prev.map(poser));
     setLocauxBruts((prev) => prev.map(poser));
+    setContours(new Map(geometries));
     setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees, termine: true });
   };
 
@@ -531,46 +537,6 @@ export default function App() {
   };
 
   // Volet bâti, inexistant avant le passage aux fichiers DGFiP 2025.
-  // Contours cadastraux, par commune, avec le même découpage que le géocodage.
-  const chargerContours = async () => {
-    const parCommune = new Map();
-    parcelles.forEach((p) => {
-      if (!p.codeInsee || !p.codeParcelle) return;
-      if (!parCommune.has(p.codeInsee)) parCommune.set(p.codeInsee, new Set());
-      parCommune.get(p.codeInsee).add(p.codeParcelle);
-    });
-    if (!parCommune.size) return;
-    const taches = [];
-    for (const [insee, refs] of parCommune) {
-      const liste = [...refs];
-      for (let i = 0; i < liste.length; i += 400) taches.push([insee, liste.slice(i, i + 400)]);
-    }
-    const trouves = new Map();
-    let faites = 0;
-    setContoursEtat({ total: taches.length, faites: 0, geometries: 0 });
-    let curseur = 0;
-    const travailleur = async () => {
-      while (curseur < taches.length) {
-        const [insee, refs] = taches[curseur++];
-        try {
-          const suffixes = refs.map((r) => r.slice(5)).join(',');
-          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}&contours=1`);
-          if (r.ok) {
-            const d = await r.json();
-            Object.entries(d.geo || {}).forEach(([ref, g]) => {
-              if (g.contour) trouves.set(ref, g.contour);
-            });
-          }
-        } catch { /* une commune absente du plan ne doit pas bloquer les autres */ }
-        faites++;
-        setContoursEtat({ total: taches.length, faites, geometries: trouves.size });
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(4, taches.length) }, travailleur));
-    setContours(trouves);
-    setContoursEtat({ total: taches.length, faites, geometries: trouves.size, termine: true });
-  };
-
   const fetchLocaux = async (siren) => {
     setLocauxLoading(true); setLocauxError(null); setLocauxBruts([]); setTotalLocaux(0);
     try {
@@ -594,7 +560,7 @@ export default function App() {
     setStep(3);
     setDroitsChoisis(null);
     setQParcelles(''); setQLocaux('');
-    setContours(null); setContoursEtat(null);
+    setContours(null);
     setTriParcelles({ champ: '', sens: 'asc' }); setTriLocaux({ champ: '', sens: 'asc' });
     // Les deux relevés partent ensemble ; le géocodage attend les deux pour
     // n'interroger chaque commune qu'une fois.
@@ -1766,29 +1732,13 @@ export default function App() {
                           <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
                         </span>
                       )}
-                      {/* Le tracé des contours ne dépend PAS du géocodage : ce sont deux
-                          appels distincts. Ne pas reconditionner ce bouton à
-                          geoStatus.termine, sinon il n'apparaît jamais quand la
-                          localisation traîne ou échoue. */}
-                      {!contours && !contoursEtat && (
-                        <button onClick={chargerContours}
-                          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg text-white shadow-sm"
-                          style={{ backgroundColor: '#A01040' }}>
-                          <MapIcon className="w-4 h-4" />Tracer les contours cadastraux
-                        </button>
-                      )}
-                      {contoursEtat && !contoursEtat.termine && (
-                        <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          contours : lot {contoursEtat.faites}/{contoursEtat.total}
-                        </span>
-                      )}
-                      {contoursEtat?.termine && (
+                      {/* Les contours arrivent AVEC le géocodage : même endpoint,
+                          mêmes communes, mêmes références. Ne pas les redissocier. */}
+                      {contours && contours.size > 0 && (
                         <span className="flex items-center gap-2 text-xs text-stone-600">
                           <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: '#A01040', opacity: 0.55 }} />
-                          {contoursEtat.geometries.toLocaleString('fr-FR')} contour(s) tracé(s) sur {parcelles.length.toLocaleString('fr-FR')}
-                          <button onClick={() => { setContours(null); setContoursEtat(null); }}
-                            className="underline hover:text-blue-900">retirer</button>
+                          {contours.size.toLocaleString('fr-FR')} contour(s) tracé(s)
+                          <span className="text-stone-400">— décochez la couche pour les masquer</span>
                         </span>
                       )}
                     </div>
