@@ -296,15 +296,22 @@ export default function App() {
   const computeStats = () => {
     const byDept = {};
     const byCommune = {};
+    const vuesDept = new Set(), vuesComm = new Set();
     parcelles.forEach(p => {
       const dept = p.departement || 'N/C';
       const comm = p.commune || 'N/C';
+      // Les surfaces ne s'additionnent qu'une fois par parcelle (cf. surfaceDistincte).
+      const cleD = dept + '|' + p.codeParcelle, cleC = comm + '|' + p.codeParcelle;
+      const neufD = p.codeParcelle && !vuesDept.has(cleD);
+      const neufC = p.codeParcelle && !vuesComm.has(cleC);
+      if (neufD) vuesDept.add(cleD);
+      if (neufC) vuesComm.add(cleC);
       if (!byDept[dept]) byDept[dept] = { count: 0, surface: 0 };
       byDept[dept].count++;
-      byDept[dept].surface += (p.contenance || 0);
+      if (neufD) byDept[dept].surface += (p.contenance || 0);
       if (!byCommune[comm]) byCommune[comm] = { count: 0, surface: 0, departement: dept };
       byCommune[comm].count++;
-      byCommune[comm].surface += (p.contenance || 0);
+      if (neufC) byCommune[comm].surface += (p.contenance || 0);
     });
     const totalCount = parcelles.length;
     const depts = Object.entries(byDept)
@@ -391,7 +398,7 @@ export default function App() {
       ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: bannerW, height: bannerH } });
 
       // --- Ligne 2 : sujet du rapport ---
-      const subjectText = `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : MAJIC (DGFiP) via Koumoul  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
+      const subjectText = `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : fichiers des parcelles des personnes morales (DGFiP), situation au 1er janvier 2025 — Licence Ouverte 2.0  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
       ws.mergeCells(2, 1, 2, numCols);
       const subjectCell = ws.getCell(2, 1);
       subjectCell.value = subjectText;
@@ -568,11 +575,13 @@ export default function App() {
       doc.text(`${formatNumberForPdf(totalParcelles)} parcelle(s) au total`, margin + 3, y);
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(7);
-      doc.text('Source : MAJIC (DGFiP) via Koumoul • Cadastre 2022', margin + 3, y + 4);
+      doc.text('Source : fichiers des personnes morales (DGFiP), situation au 01/01/2025 • Licence Ouverte 2.0', margin + 3, y + 4);
+      doc.text('Geolocalisation : plan cadastral informatise (DGFiP, version Etalab). Donnee de pre-controle : seul le releve', margin + 3, y + 7.5);
+      doc.text('de propriete ou l\'etat hypothecaire fait foi. Personnes physiques et societes unipersonnelles hors perimetre.', margin + 3, y + 11);
       y += 14;
 
       const cellW = (pageWidth - 2 * margin - 8) / 3;
-      const totalSurfaceCalc = parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
+      const totalSurfaceCalc = surfaceDistincte(parcelles);
       const stats3 = [
         { label: 'PARCELLES', value: formatNumberForPdf(totalParcelles) },
         { label: 'SURFACE TOTALE', value: formatNumberForPdf(totalSurfaceCalc) + ' m2' },
@@ -705,7 +714,22 @@ export default function App() {
     }
   };
 
-  const totalSurface = parcelles.reduce((s, p) => s + (p.contenance || 0), 0);
+  // Surface : sommer sur les PARCELLES DISTINCTES, jamais sur les lignes. Une
+  // parcelle figure autant de fois qu'elle a de titulaires de droits
+  // (propriétaire, gérant, syndic, usufruitier...) ; sommer les lignes la
+  // compte plusieurs fois. Écart mesuré au niveau national : +41 %.
+  const surfaceDistincte = (liste) => {
+    const vues = new Set();
+    let m2 = 0;
+    liste.forEach((p) => {
+      if (!p.codeParcelle || vues.has(p.codeParcelle)) return;
+      vues.add(p.codeParcelle);
+      m2 += (p.contenance || 0);
+    });
+    return m2;
+  };
+  const totalSurface = surfaceDistincte(parcelles);
+  const parcellesDistinctes = new Set(parcelles.map((p) => p.codeParcelle).filter(Boolean)).size;
   const stats = parcelles.length > 0 ? computeStats() : { depts: [], communes: [] };
   const showAllCommunes = stats.communes.length <= 10;
   const displayedCommunes = showAllCommunes ? stats.communes : stats.communes.slice(0, 10);
@@ -870,7 +894,7 @@ export default function App() {
             {parcellesLoading && (
               <div className="bg-white rounded-xl border border-stone-200 p-12 shadow-sm flex flex-col items-center gap-3">
                 <Loader2 className="w-8 h-8 text-amber-500 animate-spin" />
-                <span className="text-stone-600">Interrogation de la base MAJIC (Koumoul / DGFiP)...</span>
+                <span className="text-stone-600">Interrogation des fichiers des personnes morales (DGFiP, millésime 2025)...</span>
               </div>
             )}
 
@@ -900,6 +924,9 @@ export default function App() {
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Surface totale</div>
                     <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
+                    {parcellesDistinctes < parcelles.length && (
+                      <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
+                    )}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Communes</div>
