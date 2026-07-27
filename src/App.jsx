@@ -31,6 +31,12 @@ const lienPaintColorise = (codeParcelle, nomCommune) => {
   // l'homogénéité d'un dossier primait sur le confort de détection.
   echelle: '1000',
     format: 'A4|portrait',
+    // Carmin profond, et non l'orange : sur l'extrait cadastral le bâti est
+    // lui-même figuré en orange, ce qui rendrait la parcelle retenue
+    // indistinguable des constructions. Teinte choisie par mesure de l'écart au
+    // pêche du bâti composé à 45 % d'opacité — le rouge doux de la palette, lui,
+    // tombe dans la zone de confusion. Détail dans le code de PAINT.
+    couleur: '#A01040',
     auto: '1',
   });
   return `${PAINT_URL}/?${qs.toString()}`;
