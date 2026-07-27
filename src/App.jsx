@@ -336,6 +336,19 @@ export default function App() {
   // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
   const immeubles = new Set(locaux.map((l) => l.codeParcelle).filter(Boolean)).size;
 
+  // Forme juridique affichable, une seule fois pour l'interface et les exports.
+  // ⚠ L'API Recherche d'Entreprises renvoie la CHAÎNE « N/C » quand elle ne la
+  // connaît pas : un repli par « || » ne se déclenche donc pas. Il faut tester
+  // la valeur, pas seulement sa présence.
+  const formeJuridiqueAffichee = () => {
+    const api = (selectedCompany?.formeJuridique || '').trim();
+    if (api && api.toUpperCase() !== 'N/C') return api;
+    const src = parcelles[0] || locaux[0] || {};
+    return src.formeJuridiqueLibelle
+      ? `${src.formeJuridiqueLibelle} (${src.formeJuridique})`
+      : 'forme juridique non communiquée';
+  };
+
   const computeStats = () => {
     const byDept = {};
     const byCommune = {};
@@ -485,7 +498,7 @@ export default function App() {
     try {
       const ExcelJS = window.ExcelJS;
       const wb = new ExcelJS.Workbook();
-      const fj = selectedCompany?.formeJuridique || parcelles[0]?.formeJuridiqueLibelle || '';
+      const fj = formeJuridiqueAffichee();
       const sujet = (quoi, n) => `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}`
         + `  |  ${fj}  |  ${n.toLocaleString('fr-FR')} ${quoi}`
         + `  |  Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime}`
@@ -677,7 +690,7 @@ export default function App() {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(8);
       doc.setTextColor(...GREYBLUE);
-      doc.text(`SIREN : ${selectedCompany?.siren} • ${selectedCompany?.formeJuridique || ''}`, margin, bandH + 18);
+      doc.text(`SIREN : ${selectedCompany?.siren} • ${formeJuridiqueAffichee()}`, margin, bandH + 18);
       doc.setTextColor(...NAVY);
       doc.text(dateStr, pageWidth - margin, bandH + 18, { align: 'right' });
 
@@ -1012,11 +1025,7 @@ export default function App() {
                   {/* L'API Recherche d'Entreprises ne renvoie pas toujours la forme
                       juridique (« N/C ») : on retombe alors sur celle des fichiers
                       DGFiP, avec son code entre parenthèses pour rester vérifiable. */}
-                  {selectedCompany?.formeJuridique && selectedCompany.formeJuridique !== 'N/C'
-                    ? selectedCompany.formeJuridique
-                    : (parcelles[0]?.formeJuridiqueLibelle || locaux[0]?.formeJuridiqueLibelle)
-                      ? `${parcelles[0]?.formeJuridiqueLibelle || locaux[0]?.formeJuridiqueLibelle} (${parcelles[0]?.formeJuridique || locaux[0]?.formeJuridique})`
-                      : 'forme juridique non communiquée'}
+                  {formeJuridiqueAffichee()}
                 </div>
               </div>
             </div>
@@ -1082,7 +1091,7 @@ export default function App() {
                     <div className="text-xs text-stone-500 mt-1">
                       {!geoStatus ? 'en attente'
                         : geoStatus.termine
-                          ? `parcelles localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} demandées`
+                          ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
                           : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
                     </div>
                   </div>
