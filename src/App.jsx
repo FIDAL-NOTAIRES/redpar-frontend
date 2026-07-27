@@ -696,21 +696,29 @@ export default function App() {
 
       let y = bandH + 26;
 
+      // Le cadre doit couvrir le titre PLUS les quatre lignes de mentions, qui
+      // descendent jusqu'à y + 14,5. Sous-dimensionné, il laissait les mentions
+      // déborder sur le fond blanc.
+      const hMentions = 22;
       doc.setFillColor(...BEIGE);
-      doc.rect(margin, y - 4, pageWidth - 2 * margin, 10, 'F');
+      doc.rect(margin, y - 4, pageWidth - 2 * margin, hMentions, 'F');
       doc.setDrawColor(...GOLD);
       doc.setLineWidth(1.5);
-      doc.line(margin, y - 4, margin, y + 6);
+      doc.line(margin, y - 4, margin, y - 4 + hMentions);
       doc.setTextColor(...NAVY);
       doc.setFontSize(8);
       doc.setFont('helvetica', 'bold');
       doc.text(`${formatNumberForPdf(totalParcelles)} parcelle(s) au total`, margin + 3, y);
       doc.setFont('helvetica', 'italic');
       doc.setFontSize(7);
-      doc.text('Source : fichiers des personnes morales (DGFiP), situation au 01/01/2025 • Licence Ouverte 2.0', margin + 3, y + 4);
-      doc.text('Geolocalisation : plan cadastral informatise (DGFiP, version Etalab). Donnee de pre-controle : seul le releve', margin + 3, y + 7.5);
-      doc.text('de propriete ou l\'etat hypothecaire fait foi. Personnes physiques et societes unipersonnelles hors perimetre.', margin + 3, y + 11);
-      y += 14;
+      // Accents conservés : jsPDF les rend correctement en Helvetica, comme le
+      // montre la ligne « Généré par REDPAR » du pied de page. Un document
+      // remis à un client ne se lit pas en texte désaccentué.
+      doc.text(`Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime} • Licence Ouverte 2.0`, margin + 3, y + 4);
+      doc.text('Géolocalisation : plan cadastral informatisé (DGFiP, version Etalab), position au centroïde de la parcelle.', margin + 3, y + 7.5);
+      doc.text('Donnée de pré-contrôle : seul le relevé de propriété ou l\'état hypothécaire fait foi. Personnes physiques,', margin + 3, y + 11);
+      doc.text('entreprises individuelles et sociétés unipersonnelles hors périmètre ; simples locataires absents.', margin + 3, y + 14.5);
+      y += 17;   // le bloc de mentions compte désormais quatre lignes
 
       const cellW = (pageWidth - 2 * margin - 8) / 3;
       const totalSurfaceCalc = surfaceDistincte(parcelles);
