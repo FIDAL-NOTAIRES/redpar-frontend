@@ -470,6 +470,11 @@ export default function App() {
     sujetCell.alignment = { horizontal: 'center', vertical: 'middle' };
     ws.getRow(2).height = 18;
 
+    // Hauteur de l'en-tête calculée depuis le repli de chaque intitulé dans sa
+    // colonne : à 24 points figés, « Nature culture » ou « Lot (bât./entrée/
+    // niv./porte) » se renvoyaient à la ligne puis se faisaient rogner.
+    const lignesEntete = Math.max(...headers.map((h, i) =>
+      Math.ceil(String(h).length / Math.max(widths[i] - 1, 4))));
     const headerRow = ws.getRow(3);
     headers.forEach((h, i) => {
       const cell = headerRow.getCell(i + 1);
@@ -479,7 +484,7 @@ export default function App() {
       cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
       cell.border = { bottom: { style: 'medium', color: { argb: 'FFE3CC7A' } } };
     });
-    headerRow.height = 24;
+    headerRow.height = Math.max(24, lignesEntete * 14 + 10);
 
     const navy = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
     lignes.forEach((item, i) => {
@@ -502,6 +507,11 @@ export default function App() {
   // Lien cartographique : par coordonnées si la parcelle est géocodée, sinon
   // par adresse. Sans repli, la colonne resterait vide pour les 3 % de
   // parcelles absentes du plan cadastral.
+  // Distinguer « sans objet » de « non renseigné » : un local n'a pas de nature
+  // de culture, une parcelle n'a pas de numéro de lot. Un blanc laisserait
+  // croire à une donnée manquante.
+  const SANS_OBJET = '—';
+
   const lienCarte = (o) => buildSatelliteLink(o.coordonnees)
     || (o.adresse && o.commune
       ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${o.adresse} ${o.commune}`)}`
@@ -522,7 +532,86 @@ export default function App() {
         + `  |  Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime}`
         + ` — Licence Ouverte 2.0  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
 
-      // --- Onglet 1 : le non bâti ---
+      // --- Onglet 1 : tous les biens, bâti et non bâti confondus ---
+      // Placé EN PREMIER : c'est la vue d'ensemble, celle qu'on ouvre pour
+      // instruire un dossier. Les deux onglets de détail suivent.
+      // Tri par commune puis référence cadastrale : l'ordre dans lequel on
+      // instruit un dossier. Le code INSEE départage les communes homonymes de
+      // départements différents.
+      const tousBiens = [
+        ...parcelles.map((o) => ({ ...o, _bati: false })),
+        ...locaux.map((o) => ({ ...o, _bati: true })),
+      ].sort((a, b) =>
+        (a.commune || '').localeCompare(b.commune || '', 'fr')
+        || (a.codeInsee || '').localeCompare(b.codeInsee || '')
+        || (a.codeParcelle || '').localeCompare(b.codeParcelle || '')
+        || (a._bati ? 1 : 0) - (b._bati ? 1 : 0)
+        || `${a.batiment || ''}${a.entree || ''}${a.niveau || ''}${a.porte || ''}`
+          .localeCompare(`${b.batiment || ''}${b.entree || ''}${b.niveau || ''}${b.porte || ''}`));
+
+      // Surface à sommer : renseignée UNE SEULE FOIS par parcelle. Une parcelle
+      // revient autant de fois qu'elle a de titulaires de droits — la SNCF
+      // compte 315 234 lignes pour 159 723 parcelles — donc totaliser la
+      // contenance répétée surévaluerait la surface de près du double.
+      const dejaComptee = new Set();
+      tousBiens.forEach((o) => {
+        o._surfaceASommer = (!o._bati && o.codeParcelle && !dejaComptee.has(o.codeParcelle)
+          && o.contenance) ? o.contenance : null;
+        if (o._surfaceASommer) dejaComptee.add(o.codeParcelle);
+      });
+
+      if (tousBiens.length) {
+        // Fonds CLAIRS : sur un dossier où 15 451 lignes sur 17 087 sont du
+        // bâti, des aplats saturés écrasent la lecture. Le beige et le cyan
+        // pâle de la charte suffisent, le symbole et le mot portant le reste.
+        const BEIGE_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5EDD3' } };
+        const CYAN_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDFF1F3' } };
+        const NAVY_TEXTE = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF0F2238' } };
+        ajouterOnglet(wb, {
+          nom: 'Tous les biens',
+          headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
+            'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Nature culture',
+            'Lot (bât./entrée/niv./porte)', 'Droit', 'Carte'],
+          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 16, 24, 26, 16],
+          sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
+          lignes: tousBiens,
+          aligner: (c) => ({ centre: c === 1 || c === 10 || c === 11,
+            nombre: c === 8 || c === 9, styleLibre: c === 2 || c === 13 }),
+          remplir: (row, o, i) => {
+            row.getCell(1).value = i + 1;
+            // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
+            // reste lisible imprimé en noir et blanc, ou par un daltonien.
+            const nat = row.getCell(2);
+            nat.value = o._bati ? '■ BÂTI' : '● NON BÂTI';
+            nat.fill = o._bati ? CYAN_FILL : BEIGE_FILL;
+            nat.font = NAVY_TEXTE;
+            nat.alignment = { horizontal: 'center', vertical: 'middle' };
+            row.getCell(3).value = o.codeParcelle || '';
+            row.getCell(4).value = o.commune || '';
+            row.getCell(5).value = o.departement || '';
+            row.getCell(6).value = o.region || '';
+            row.getCell(7).value = o.adresse || '';
+            // Un tiret marque le SANS OBJET ; une cellule vide en colonne 9
+            // signifie « surface déjà comptée sur une ligne précédente ».
+            row.getCell(8).value = o._bati ? SANS_OBJET : (o.contenance || 0);
+            row.getCell(9).value = o._bati ? SANS_OBJET : (o._surfaceASommer || '');
+            row.getCell(10).value = o._bati ? SANS_OBJET : (o.natureCulture || '');
+            row.getCell(11).value = o._bati
+              ? [o.batiment, o.entree, o.niveau, o.porte].filter(Boolean).join(' / ')
+              : SANS_OBJET;
+            row.getCell(12).value = o.codeDroit || '';
+            const lien = lienCarte(o);
+            const cell = row.getCell(13);
+            if (lien) {
+              cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
+              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
+              cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cell.value = '';
+          },
+        });
+      }
+
+      // --- Onglet 2 : le non bâti seul ---
       ajouterOnglet(wb, {
         nom: 'Parcelles',
         headers: ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Droit', 'Carte'],
@@ -550,7 +639,7 @@ export default function App() {
         },
       });
 
-      // --- Onglet 2 : le bâti. Ni surface ni invariant dans la source : un lot
+      // --- Onglet 3 : le bâti seul. Ni surface ni invariant dans la source : un lot
       // s'identifie par bâtiment / entrée / niveau / porte sur sa parcelle. ---
       if (locaux.length) {
         ajouterOnglet(wb, {
@@ -583,78 +672,6 @@ export default function App() {
         });
       }
 
-      // --- Onglet 3 : tous les biens, bâti et non bâti confondus ---
-      // Tri par commune puis référence cadastrale : l'ordre dans lequel on
-      // instruit un dossier. Le code INSEE départage les communes homonymes de
-      // départements différents.
-      const tousBiens = [
-        ...parcelles.map((o) => ({ ...o, _bati: false })),
-        ...locaux.map((o) => ({ ...o, _bati: true })),
-      ].sort((a, b) =>
-        (a.commune || '').localeCompare(b.commune || '', 'fr')
-        || (a.codeInsee || '').localeCompare(b.codeInsee || '')
-        || (a.codeParcelle || '').localeCompare(b.codeParcelle || '')
-        || (a._bati ? 1 : 0) - (b._bati ? 1 : 0)
-        || `${a.batiment || ''}${a.entree || ''}${a.niveau || ''}${a.porte || ''}`
-          .localeCompare(`${b.batiment || ''}${b.entree || ''}${b.niveau || ''}${b.porte || ''}`));
-
-      // Surface à sommer : renseignée UNE SEULE FOIS par parcelle. Une parcelle
-      // revient autant de fois qu'elle a de titulaires de droits — la SNCF
-      // compte 315 234 lignes pour 159 723 parcelles — donc totaliser la
-      // contenance répétée surévaluerait la surface de près du double.
-      const dejaComptee = new Set();
-      tousBiens.forEach((o) => {
-        o._surfaceASommer = (!o._bati && o.codeParcelle && !dejaComptee.has(o.codeParcelle)
-          && o.contenance) ? o.contenance : null;
-        if (o._surfaceASommer) dejaComptee.add(o.codeParcelle);
-      });
-
-      if (tousBiens.length) {
-        const NAVY_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F2238' } };
-        const CANARD_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF33838B' } };
-        const BLANC = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
-        ajouterOnglet(wb, {
-          nom: 'Tous les biens',
-          headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
-            'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Nature culture',
-            'Lot (bât./entrée/niv./porte)', 'Droit', 'Carte'],
-          widths: [5, 16, 18, 22, 18, 20, 32, 15, 17, 14, 22, 26, 16],
-          sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
-          lignes: tousBiens,
-          aligner: (c) => ({ centre: c === 1 || c === 10 || c === 11,
-            nombre: c === 8 || c === 9, styleLibre: c === 2 || c === 13 }),
-          remplir: (row, o, i) => {
-            row.getCell(1).value = i + 1;
-            // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
-            // reste lisible imprimé en noir et blanc, ou par un daltonien.
-            const nat = row.getCell(2);
-            nat.value = o._bati ? '■ BÂTI' : '● NON BÂTI';
-            nat.fill = o._bati ? CANARD_FILL : NAVY_FILL;
-            nat.font = BLANC;
-            nat.alignment = { horizontal: 'center', vertical: 'middle' };
-            row.getCell(3).value = o.codeParcelle || '';
-            row.getCell(4).value = o.commune || '';
-            row.getCell(5).value = o.departement || '';
-            row.getCell(6).value = o.region || '';
-            row.getCell(7).value = o.adresse || '';
-            row.getCell(8).value = o._bati ? '' : (o.contenance || 0);
-            row.getCell(9).value = o._surfaceASommer || '';
-            row.getCell(10).value = o._bati ? '' : (o.natureCulture || '');
-            row.getCell(11).value = o._bati
-              ? [o.batiment, o.entree, o.niveau, o.porte].filter(Boolean).join(' / ')
-              : '';
-            row.getCell(12).value = o.codeDroit || '';
-            const lien = lienCarte(o);
-            const cell = row.getCell(13);
-            if (lien) {
-              cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
-              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
-              cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cell.value = '';
-          },
-        });
-      }
-
       // --- Onglet 4 : mentions, à conserver dans tout livrable ---
       const wsM = wb.addWorksheet('Sources et limites');
       wsM.columns = [{ width: 120 }];
@@ -665,7 +682,7 @@ export default function App() {
         ['Portée', "Donnée de pré-contrôle. Seul le relevé de propriété ou l'état hypothécaire fait foi."],
         ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
-        ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur."],
+        ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
         ['Liens cartographiques', (() => {
           const tousDont = [...parcelles, ...locaux];
