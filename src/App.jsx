@@ -576,6 +576,14 @@ export default function App() {
         ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
+        ['Liens cartographiques', (() => {
+          const tousDont = [...parcelles, ...locaux];
+          const localises = tousDont.filter((o) => o.coordonnees).length;
+          const base = `${localises.toLocaleString('fr-FR')} enregistrement(s) sur ${tousDont.length.toLocaleString('fr-FR')} pointent le centroïde de la parcelle ; les autres pointent l'adresse.`;
+          return geoStatus && !geoStatus.termine
+            ? `${base} ATTENTION : ce classeur a été produit AVANT la fin du géocodage. Réexporter une fois la localisation terminée pour obtenir des liens à la parcelle.`
+            : base;
+        })()],
       ].forEach(([titre, texte], i) => {
         const r = wsM.getRow(i + 1);
         r.getCell(1).value = `${titre} — ${texte}`;
@@ -1008,6 +1016,12 @@ export default function App() {
                 {parcellesLoading ? 'Recherche dans les fichiers DGFiP...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
+                {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
+                  <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    localisation en cours — attendez pour des liens à la parcelle
+                  </span>
+                )}
                 {!parcellesLoading && parcelles.length > 0 && (
                   <>
                     <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
