@@ -1760,28 +1760,38 @@ export default function App() {
                     <MapIcon className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950">Carte interactive</h3>
                     <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
-                    {geoStatus && !geoStatus.termine && (
-                      <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-700">
-                        <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
-                      </span>
-                    )}
-                    {geoStatus?.termine && !contours && !contoursEtat && (
-                      <button onClick={chargerContours}
-                        className="ml-auto px-3 py-1.5 text-xs rounded-lg border border-stone-300 text-blue-950 hover:border-blue-900 hover:text-blue-900">
-                        Afficher les contours cadastraux
-                      </button>
-                    )}
-                    {contoursEtat && !contoursEtat.termine && (
-                      <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-700">
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                        contours : commune {contoursEtat.faites}/{contoursEtat.total}
-                      </span>
-                    )}
-                    {contoursEtat?.termine && (
-                      <span className="ml-auto text-xs text-stone-500">
-                        {contoursEtat.geometries.toLocaleString('fr-FR')} contour(s) tracé(s)
-                      </span>
-                    )}
+                    <div className="ml-auto flex items-center gap-3">
+                      {geoStatus && !geoStatus.termine && (
+                        <span className="flex items-center gap-1.5 text-xs text-amber-700">
+                          <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
+                        </span>
+                      )}
+                      {/* Le tracé des contours ne dépend PAS du géocodage : ce sont deux
+                          appels distincts. Ne pas reconditionner ce bouton à
+                          geoStatus.termine, sinon il n'apparaît jamais quand la
+                          localisation traîne ou échoue. */}
+                      {!contours && !contoursEtat && (
+                        <button onClick={chargerContours}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium rounded-lg text-white shadow-sm"
+                          style={{ backgroundColor: '#A01040' }}>
+                          <MapIcon className="w-4 h-4" />Tracer les contours cadastraux
+                        </button>
+                      )}
+                      {contoursEtat && !contoursEtat.termine && (
+                        <span className="flex items-center gap-1.5 text-xs text-amber-700">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          contours : lot {contoursEtat.faites}/{contoursEtat.total}
+                        </span>
+                      )}
+                      {contoursEtat?.termine && (
+                        <span className="flex items-center gap-2 text-xs text-stone-600">
+                          <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: '#A01040', opacity: 0.55 }} />
+                          {contoursEtat.geometries.toLocaleString('fr-FR')} contour(s) tracé(s) sur {parcelles.length.toLocaleString('fr-FR')}
+                          <button onClick={() => { setContours(null); setContoursEtat(null); }}
+                            className="underline hover:text-blue-900">retirer</button>
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
                   <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
