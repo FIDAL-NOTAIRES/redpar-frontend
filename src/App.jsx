@@ -449,7 +449,18 @@ export default function App() {
     const bannerH = 150;
     ws.getRow(1).height = bannerH * 0.75;   // px -> points
     const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
-    ws.addImage(imgId, { tl: { col: 0, row: 0 }, br: { col: numCols, row: 1 } });
+    // editAs: 'twoCell' est INDISPENSABLE. Par défaut ExcelJS écrit
+    // editAs="oneCell", qui signifie « déplacer l'image avec les cellules mais
+    // ne pas la redimensionner » : Excel conserve alors la taille propre de
+    // l'image et ignore le coin inférieur droit de l'ancrage, si bien que le
+    // bandeau s'arrêtait avant le bord du tableau. Avec 'twoCell', l'image est
+    // dimensionnée sur la zone ancrée, donc de A1 au bord de la dernière
+    // colonne, quelles que soient les largeurs choisies.
+    ws.addImage(imgId, {
+      tl: { col: 0, row: 0 },
+      br: { col: numCols, row: 1 },
+      editAs: 'twoCell',
+    });
 
     ws.mergeCells(2, 1, 2, numCols);
     const sujetCell = ws.getCell(2, 1);
