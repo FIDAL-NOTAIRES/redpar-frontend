@@ -956,12 +956,12 @@ export default function App() {
           nom: 'Tous les biens',
           headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
             'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
-            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit', 'Carte', 'Extrait cadastral'],
-          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 16, 18],
+            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit', 'Carte', 'Extrait DGFiP', 'Plan colorisé'],
+          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 16, 16, 16],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
           aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13,
-            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c === 15 || c === 16 }),
+            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c === 15 || c === 16 || c === 17 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
@@ -997,6 +997,10 @@ export default function App() {
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
               cell.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cell.value = '';
+            // Deux liens, deux usages. « Extrait DGFiP » livre le PDF brut, pièce
+            // autonome qu'on peut joindre à un dossier. « Plan colorisé » ouvre
+            // PAINT, qui génère l'extrait ET colorie la parcelle en carmin — c'est
+            // l'outil de travail, et c'est de là que part l'utilisateur en pratique.
             const extrait = lienExtraitCadastral(o.codeParcelle);
             const cellEx = row.getCell(16);
             if (extrait) {
@@ -1004,6 +1008,13 @@ export default function App() {
               cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
               cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cellEx.value = '';
+            const colorise = lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle));
+            const cellCo = row.getCell(17);
+            if (colorise) {
+              cellCo.value = { text: 'Colorier', hyperlink: colorise };
+              cellCo.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
+              cellCo.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cellCo.value = '';
           },
         });
       }
@@ -1016,13 +1027,13 @@ export default function App() {
           nom: 'Écarts de contenance',
           headers: ['#', 'Ampleur', 'Référence cadastrale', 'Commune', 'Département',
             'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Carte',
-            'Extrait cadastral'],
-          widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16, 18],
+            'Extrait DGFiP', 'Plan colorisé'],
+          widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16, 16, 16],
           sujet: `${selectedCompany?.nom || ''}  |  ${coherence.ecarts.length} écart(s) sur `
             + `${coherence.controlees} parcelle(s) contrôlée(s)  |  ${coherence.concordantes} concordante(s)`
             + `  |  Matrice DGFiP contre plan cadastral (version Etalab)  |  Écart notable au-delà de 2 m² ou 1 %`,
           lignes: coherence.ecarts,
-          aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c === 12 || c === 13 }),
+          aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c >= 12 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             row.getCell(2).value = o._classe === 'notable' ? 'NOTABLE' : 'mineur';
@@ -1050,6 +1061,13 @@ export default function App() {
               cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
               cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cellEx.value = '';
+            const colorise = lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle));
+            const cellCo = row.getCell(14);
+            if (colorise) {
+              cellCo.value = { text: 'Colorier', hyperlink: colorise };
+              cellCo.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
+              cellCo.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cellCo.value = '';
           },
         });
       }
@@ -1127,7 +1145,7 @@ export default function App() {
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
-        ['Extraits cadastraux', "La colonne « Extrait cadastral » ouvre le PDF de l'extrait officiel du plan (DGFiP) pour la parcelle, généré à la demande. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. Depuis l'application, le lien « Plan » ouvre en outre PAINT avec la parcelle déjà coloriée."],
+        ['Plans cadastraux — deux liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin, prêt à annoter et à exporter. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export."],
         ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
           ? "Société CESSÉE au répertoire Sirene, et pourtant encore inscrite à la documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation postérieure au 1er janvier " + millesime + ". À instruire avant toute reprise."
           : "Société active au répertoire Sirene à la date de génération du présent document."} Source du statut : API Recherche d'Entreprises (gouv.fr), distincte des fichiers cadastraux.`],
@@ -1879,7 +1897,7 @@ export default function App() {
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Écart</th>
                             <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Ampleur</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Extrait</th>
+                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Colorier</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1906,7 +1924,7 @@ export default function App() {
                                   {lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle)) && (
                                     <a href={lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle))} target="_blank" rel="noreferrer"
                                       title="Ouvre PAINT pour confronter l'écart au plan, parcelle déjà coloriée"
-                                      className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
+                                      className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
                                   )}
                                 </td>
                               </tr>
@@ -1968,7 +1986,7 @@ export default function App() {
                                 {lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle)) && (
                                   <a href={lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle))} target="_blank" rel="noreferrer"
                                     title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
-                                    className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
+                                    className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
                                 )}
                               </td>
                             </tr>
@@ -2069,7 +2087,7 @@ export default function App() {
                                     {lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle)) && (
                                       <a href={lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle))} target="_blank" rel="noreferrer"
                                         title="Ouvre PAINT : extrait généré et parcelle coloriée"
-                                        className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
+                                        className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
                                     )}
                                   </td>
                                 </tr>
