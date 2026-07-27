@@ -167,10 +167,10 @@ export default function App() {
   const [pappersError, setPappersError] = useState(null);
   const [parcellesLoading, setParcellesLoading] = useState(false);
   const [parcellesError, setParcellesError] = useState(null);
-  const [parcelles, setParcelles] = useState([]);
+  const [parcellesBrutes, setParcellesBrutes] = useState([]);
   const [totalParcelles, setTotalParcelles] = useState(0);
   const [truncated, setTruncated] = useState(false);
-  const [locaux, setLocaux] = useState([]);
+  const [locauxBruts, setLocauxBruts] = useState([]);
   const [totalLocaux, setTotalLocaux] = useState(0);
   const [locauxLoading, setLocauxLoading] = useState(false);
   const [locauxError, setLocauxError] = useState(null);
@@ -178,6 +178,49 @@ export default function App() {
   const [geoStatus, setGeoStatus] = useState(null);
   // Millésime annoncé par le backend, jamais codé en dur côté interface.
   const [millesime, setMillesime] = useState('2025');
+
+  // ----------------------------------------------------------------------
+  // FILTRE PAR TITRE DE DROIT
+  // Le fichier DGFiP ne recense pas que des propriétaires : 8,5 % des lignes
+  // portent un autre titre — gérant, gestionnaire d'un bien de l'État, syndic,
+  // emphytéote, nu-propriétaire, usufruitier... Confondre les deux fausse la
+  // lecture : l'ONF apparaît avec 5,85 millions d'hectares alors qu'il n'en
+  // possède que 216 250, et le Ministère des Armées avec 188 162 hectares pour
+  // 23 parcelles en propriété. Les agrégats ne portent donc que sur les titres
+  // RETENUS, la propriété étant sélectionnée par défaut.
+  // Le nu-propriétaire, l'emphytéote ou le preneur à construction détiennent
+  // aussi des droits réels : c'est au notaire de décider s'il les inclut, d'où
+  // un sélecteur plutôt qu'une règle figée.
+  // ----------------------------------------------------------------------
+  const [droitsChoisis, setDroitsChoisis] = useState(null);
+
+  const droitsPresents = (() => {
+    const m = new Map();
+    [...parcellesBrutes, ...locauxBruts].forEach((o) => {
+      const d = o.codeDroit || '(non renseigné)';
+      m.set(d, (m.get(d) || 0) + 1);
+    });
+    return [...m.entries()].sort((a, b) => b[1] - a[1]);
+  })();
+
+  const propriete = droitsPresents.filter(([d]) => d.startsWith('P')).map(([d]) => d);
+  // Si aucun titre de propriété n'existe dans le relevé, tout retenir plutôt
+  // que d'afficher une page vide.
+  const droitsActifs = droitsChoisis
+    ?? (propriete.length ? propriete : droitsPresents.map(([d]) => d));
+
+  const retenu = (o) => droitsActifs.includes(o.codeDroit || '(non renseigné)');
+  const parcelles = parcellesBrutes.filter(retenu);
+  const locaux = locauxBruts.filter(retenu);
+  const ecartesParcelles = parcellesBrutes.length - parcelles.length;
+  const ecartesLocaux = locauxBruts.length - locaux.length;
+  const filtreActif = ecartesParcelles + ecartesLocaux > 0;
+  const libelleFiltre = droitsActifs.length === droitsPresents.length
+    ? 'tous titres de droit'
+    : `titres retenus : ${droitsActifs.join(', ')}`;
+
+  const basculerDroit = (d) => setDroitsChoisis(
+    droitsActifs.includes(d) ? droitsActifs.filter((x) => x !== d) : [...droitsActifs, d]);
   const [exportingExcel, setExportingExcel] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const recognitionRef = useRef(null);
@@ -273,19 +316,19 @@ export default function App() {
 
     const poser = (o) => (coords.has(o.codeParcelle)
       ? { ...o, coordonnees: coords.get(o.codeParcelle) } : o);
-    setParcelles((prev) => prev.map(poser));
-    setLocaux((prev) => prev.map(poser));
+    setParcellesBrutes((prev) => prev.map(poser));
+    setLocauxBruts((prev) => prev.map(poser));
     setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees, termine: true });
   };
 
   const fetchParcelles = async (siren) => {
-    setParcellesLoading(true); setParcellesError(null); setParcelles([]); setTotalParcelles(0); setTruncated(false); setGeoStatus(null);
+    setParcellesLoading(true); setParcellesError(null); setParcellesBrutes([]); setTotalParcelles(0); setTruncated(false); setGeoStatus(null);
     try {
       const r = await fetch(`${BACKEND_URL}/api/parcelles?siren=${encodeURIComponent(siren)}&maxResults=10000`);
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
       const data = await r.json();
       const liste = data.parcelles || [];
-      setParcelles(liste);
+      setParcellesBrutes(liste);
       setTotalParcelles(data.total || 0);
       setTruncated(data.truncated || false);
       setMillesime(data.millesime || '2025');
@@ -298,13 +341,13 @@ export default function App() {
 
   // Volet bâti, inexistant avant le passage aux fichiers DGFiP 2025.
   const fetchLocaux = async (siren) => {
-    setLocauxLoading(true); setLocauxError(null); setLocaux([]); setTotalLocaux(0);
+    setLocauxLoading(true); setLocauxError(null); setLocauxBruts([]); setTotalLocaux(0);
     try {
       const r = await fetch(`${BACKEND_URL}/api/locaux?siren=${encodeURIComponent(siren)}&maxResults=20000`);
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
       const data = await r.json();
       const liste = data.locaux || [];
-      setLocaux(liste);
+      setLocauxBruts(liste);
       setTotalLocaux(data.total || 0);
       setLocauxTronque(!!data.tronque);
       return liste;
@@ -318,6 +361,7 @@ export default function App() {
   const confirmCompany = () => {
     if (!selectedCompany) return;
     setStep(3);
+    setDroitsChoisis(null);
     // Les deux relevés partent ensemble ; le géocodage attend les deux pour
     // n'interroger chaque commune qu'une fois.
     Promise.all([
@@ -328,8 +372,9 @@ export default function App() {
 
   const resetAll = () => {
     setStep(1); setCompanyName(''); setPappersResults([]); setSelectedCompany(null);
-    setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
-    setLocaux([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null); setLocauxTronque(false);
+    setPappersError(null); setParcellesBrutes([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
+    setLocauxBruts([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null); setLocauxTronque(false);
+    setDroitsChoisis(null);
   };
 
   // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
@@ -530,7 +575,8 @@ export default function App() {
       const sujet = (quoi, n) => `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}`
         + `  |  ${fj}  |  ${n.toLocaleString('fr-FR')} ${quoi}`
         + `  |  Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime}`
-        + ` — Licence Ouverte 2.0  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
+        + ` — Licence Ouverte 2.0  |  ${libelleFiltre}`
+        + `  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
 
       // --- Onglet 1 : tous les biens, bâti et non bâti confondus ---
       // Placé EN PREMIER : c'est la vue d'ensemble, celle qu'on ouvre pour
@@ -684,6 +730,7 @@ export default function App() {
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
+        ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
         ['Liens cartographiques', (() => {
           const tousDont = [...parcelles, ...locaux];
           const localises = tousDont.filter((o) => o.coordonnees).length;
@@ -807,10 +854,15 @@ export default function App() {
       doc.setFontSize(8);
       doc.setTextColor(...GREYBLUE);
       doc.text(`SIREN : ${selectedCompany?.siren} • ${formeJuridiqueAffichee()}`, margin, bandH + 18);
+      doc.setFontSize(7.5);
+      doc.text(libelleFiltre.charAt(0).toUpperCase() + libelleFiltre.slice(1), margin, bandH + 23);
+      doc.setFontSize(9);
       doc.setTextColor(...NAVY);
       doc.text(dateStr, pageWidth - margin, bandH + 18, { align: 'right' });
 
-      let y = bandH + 26;
+      // + 31 et non + 26 : la mention des titres de droit occupe la ligne
+      // bandH + 23, le cadre beige doit démarrer sous elle.
+      let y = bandH + 31;
 
       // Le cadre doit couvrir le titre PLUS les quatre lignes de mentions, qui
       // descendent jusqu'à y + 14,5. Sous-dimensionné, il laissait les mentions
@@ -1182,12 +1234,52 @@ export default function App() {
               </div>
             )}
 
+            {!parcellesLoading && droitsPresents.length > 0 && (
+              <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-sm">
+                <div className="flex items-baseline gap-2 flex-wrap mb-3">
+                  <h3 className="font-semibold text-blue-950 text-sm">Titres de droit retenus</h3>
+                  <span className="text-xs text-stone-500">
+                    les indicateurs, la carte et les exports ne portent que sur les titres cochés
+                  </span>
+                  {droitsChoisis && (
+                    <button onClick={() => setDroitsChoisis(null)} className="ml-auto text-xs text-blue-900 underline hover:text-blue-700">
+                      revenir à la propriété seule
+                    </button>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {droitsPresents.map(([d, n]) => {
+                    const actif = droitsActifs.includes(d);
+                    return (
+                      <button key={d} onClick={() => basculerDroit(d)}
+                        className={`px-2.5 py-1 rounded-lg text-xs border transition ${actif
+                          ? 'bg-blue-950 text-amber-400 border-blue-950 font-medium'
+                          : 'bg-white text-stone-500 border-stone-300 hover:border-stone-400'}`}>
+                        {actif ? '✓ ' : ''}{d} <span className="opacity-70">({n.toLocaleString('fr-FR')})</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {filtreActif && (
+                  <div className="mt-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    {ecartesParcelles.toLocaleString('fr-FR')} parcelle(s) et {ecartesLocaux.toLocaleString('fr-FR')} local(aux) écartés par ce filtre : la société y figure à un autre titre que ceux retenus.
+                  </div>
+                )}
+                {droitsActifs.length === 0 && (
+                  <div className="mt-3 text-xs text-red-700">Aucun titre retenu : cochez-en au moins un.</div>
+                )}
+              </div>
+            )}
+
             {!parcellesLoading && parcelles.length > 0 && (
               <>
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Parcelles</div>
-                    <div className="text-2xl font-semibold text-blue-950">{totalParcelles.toLocaleString('fr-FR')}</div>
+                    <div className="text-2xl font-semibold text-blue-950">{parcelles.length.toLocaleString('fr-FR')}</div>
+                    {ecartesParcelles > 0 && (
+                      <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
+                    )}
                     {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
@@ -1204,10 +1296,13 @@ export default function App() {
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
                     <div className="text-2xl font-semibold text-blue-950">
-                      {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : totalLocaux.toLocaleString('fr-FR')}
+                      {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : locaux.length.toLocaleString('fr-FR')}
                     </div>
                     {!locauxLoading && totalLocaux > 0 && (
                       <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
+                    )}
+                    {ecartesLocaux > 0 && (
+                      <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
                     )}
                     {locauxTronque && (
                       <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
