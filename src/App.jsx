@@ -290,7 +290,12 @@ export default function App() {
     }
     setGeoStatus({ communes: parCommune.size, faites: 0, trouvees: 0, demandees: 0 });
 
-    const coords = new Map();
+    // On mémorise aussi la contenance renvoyée par le PLAN cadastral : comparée
+    // à celle de la MATRICE, elle alimente le contrôle de cohérence. Les deux
+    // sources sont mises à jour par des chaînes distinctes, un écart signale
+    // donc une parcelle qui a bougé — division, réunion, remembrement,
+    // arpentage — et qu'il faut instruire.
+    const infos = new Map();
     let faites = 0, trouvees = 0, demandees = 0;
     let curseur = 0;
     const travailleur = async () => {
@@ -303,7 +308,10 @@ export default function App() {
           if (r.ok) {
             const d = await r.json();
             Object.entries(d.geo || {}).forEach(([ref, g]) => {
-              coords.set(ref, `${g.lat}, ${g.lng}`);
+              infos.set(ref, {
+                coordonnees: `${g.lat}, ${g.lng}`,
+                contenanceCadastre: g.contenance_cadastre ?? null,
+              });
               trouvees++;
             });
           }
@@ -314,8 +322,9 @@ export default function App() {
     };
     await Promise.all(Array.from({ length: Math.min(6, taches.length) }, travailleur));
 
-    const poser = (o) => (coords.has(o.codeParcelle)
-      ? { ...o, coordonnees: coords.get(o.codeParcelle) } : o);
+    const poser = (o) => (infos.has(o.codeParcelle)
+      ? { ...o, ...infos.get(o.codeParcelle), _planLu: true }
+      : { ...o, _planLu: true, _absenteDuPlan: true });
     setParcellesBrutes((prev) => prev.map(poser));
     setLocauxBruts((prev) => prev.map(poser));
     setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees, termine: true });
@@ -376,6 +385,60 @@ export default function App() {
     setLocauxBruts([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null); setLocauxTronque(false);
     setDroitsChoisis(null);
   };
+
+  // ----------------------------------------------------------------------
+  // CONTRÔLE DE COHÉRENCE MATRICE / PLAN CADASTRAL
+  // La contenance figure dans deux produits DGFiP distincts : la matrice, qui
+  // porte la propriété, et le plan, qui porte la géométrie. Ils sont mis à jour
+  // par des chaînes différentes et à des rythmes différents. Un écart sur une
+  // même référence signale donc que la parcelle a bougé — division, réunion,
+  // remembrement, document d'arpentage — et que la désignation qu'on s'apprête
+  // à reprendre ne décrit peut-être plus le même objet.
+  // Utilité : sur un portefeuille de mille six cents parcelles, personne ne
+  // demande mille six cents relevés de propriété. Ce contrôle produit la liste
+  // COURTE de celles qui méritent qu'on s'y arrête.
+  // ----------------------------------------------------------------------
+  const TOLERANCE_M2 = 2;          // en deçà, arrondi ou précision géométrique
+  const TOLERANCE_PCT = 0.01;      // 1 %
+
+  const ecartDe = (o) => {
+    if (o.contenanceCadastre == null || o.contenance == null) return null;
+    return Number(o.contenance) - Number(o.contenanceCadastre);
+  };
+
+  const classerEcart = (o) => {
+    if (!o._planLu) return 'attente';
+    if (o._absenteDuPlan || o.contenanceCadastre == null) return 'absente';
+    const m = Number(o.contenance || 0);
+    const pl = Number(o.contenanceCadastre);
+    const e = m - pl;
+    if (e === 0) return 'concordante';
+    return Math.abs(e) <= Math.max(TOLERANCE_M2, m * TOLERANCE_PCT) ? 'mineur' : 'notable';
+  };
+
+  // Une parcelle détenue à deux titres apparaît deux fois : on ne la contrôle
+  // et ne la compte qu'une seule fois.
+  const coherence = (() => {
+    const vues = new Map();
+    parcelles.forEach((o) => {
+      if (!o.codeParcelle || vues.has(o.codeParcelle)) return;
+      vues.set(o.codeParcelle, { ...o, _classe: classerEcart(o) });
+    });
+    const tout = [...vues.values()];
+    const parClasse = (c) => tout.filter((o) => o._classe === c);
+    const ecarts = [...parClasse('notable'), ...parClasse('mineur')]
+      .map((o) => ({ ...o, _ecart: Number(o.contenance || 0) - Number(o.contenanceCadastre) }))
+      .sort((a, b) => Math.abs(b._ecart) - Math.abs(a._ecart));
+    return {
+      controlees: tout.length,
+      concordantes: parClasse('concordante').length,
+      mineurs: parClasse('mineur').length,
+      notables: parClasse('notable').length,
+      absentes: parClasse('absente').length,
+      attente: parClasse('attente').length,
+      ecarts,
+    };
+  })();
 
   // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
   // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
@@ -616,13 +679,13 @@ export default function App() {
         ajouterOnglet(wb, {
           nom: 'Tous les biens',
           headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
-            'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Nature culture',
-            'Lot bât./ent./niv./porte', 'Droit', 'Carte'],
-          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 16, 27, 26, 16],
+            'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
+            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit', 'Carte'],
+          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 16],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
-          aligner: (c) => ({ centre: c === 1 || c === 10 || c === 11,
-            nombre: c === 8 || c === 9, styleLibre: c === 2 || c === 13 }),
+          aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13,
+            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c === 15 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
@@ -641,13 +704,18 @@ export default function App() {
             // signifie « surface déjà comptée sur une ligne précédente ».
             row.getCell(8).value = o._bati ? SANS_OBJET : (o.contenance || 0);
             row.getCell(9).value = o._bati ? SANS_OBJET : (o._surfaceASommer || '');
-            row.getCell(10).value = o._bati ? SANS_OBJET : (o.natureCulture || '');
-            row.getCell(11).value = o._bati
+            // Contrôle de cohérence : contenance du PLAN et écart avec la matrice.
+            const ec = o._bati ? null : ecartDe(o);
+            row.getCell(10).value = o._bati ? SANS_OBJET
+              : (o.contenanceCadastre != null ? Number(o.contenanceCadastre) : '');
+            row.getCell(11).value = ec == null ? (o._bati ? SANS_OBJET : '') : ec;
+            row.getCell(12).value = o._bati ? SANS_OBJET : (o.natureCulture || '');
+            row.getCell(13).value = o._bati
               ? [o.batiment, o.entree, o.niveau, o.porte].filter(Boolean).join(' / ')
               : SANS_OBJET;
-            row.getCell(12).value = o.codeDroit || '';
+            row.getCell(14).value = o.codeDroit || '';
             const lien = lienCarte(o);
-            const cell = row.getCell(13);
+            const cell = row.getCell(15);
             if (lien) {
               cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
@@ -657,7 +725,45 @@ export default function App() {
         });
       }
 
-      // --- Onglet 2 : le non bâti seul ---
+      // --- Onglet 2 : la liste courte des écarts de contenance ---
+      // C'est la feuille qu'on emporte : les parcelles à instruire, et elles
+      // seules. Absente du classeur s'il n'y a rien à signaler.
+      if (coherence.ecarts.length) {
+        ajouterOnglet(wb, {
+          nom: 'Écarts de contenance',
+          headers: ['#', 'Ampleur', 'Référence cadastrale', 'Commune', 'Département',
+            'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Carte'],
+          widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16],
+          sujet: `${selectedCompany?.nom || ''}  |  ${coherence.ecarts.length} écart(s) sur `
+            + `${coherence.controlees} parcelle(s) contrôlée(s)  |  ${coherence.concordantes} concordante(s)`
+            + `  |  Matrice DGFiP contre plan cadastral (version Etalab)  |  Écart notable au-delà de 2 m² ou 1 %`,
+          lignes: coherence.ecarts,
+          aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c === 12 }),
+          remplir: (row, o, i) => {
+            row.getCell(1).value = i + 1;
+            row.getCell(2).value = o._classe === 'notable' ? 'NOTABLE' : 'mineur';
+            row.getCell(3).value = o.codeParcelle || '';
+            row.getCell(4).value = o.commune || '';
+            row.getCell(5).value = o.departement || '';
+            row.getCell(6).value = o.adresse || '';
+            row.getCell(7).value = Number(o.contenance || 0);
+            row.getCell(8).value = Number(o.contenanceCadastre || 0);
+            row.getCell(9).value = o._ecart;
+            row.getCell(10).value = o.contenance
+              ? Math.round(1000 * o._ecart / Number(o.contenance)) / 10 : '';
+            row.getCell(11).value = o.codeDroit || '';
+            const lien = lienCarte(o);
+            const cell = row.getCell(12);
+            if (lien) {
+              cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
+              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
+              cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cell.value = '';
+          },
+        });
+      }
+
+      // --- Onglet 3 : le non bâti seul ---
       ajouterOnglet(wb, {
         nom: 'Parcelles',
         headers: ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Droit', 'Carte'],
@@ -685,7 +791,7 @@ export default function App() {
         },
       });
 
-      // --- Onglet 3 : le bâti seul. Ni surface ni invariant dans la source : un lot
+      // --- Onglet 4 : le bâti seul. Ni surface ni invariant dans la source : un lot
       // s'identifie par bâtiment / entrée / niveau / porte sur sa parcelle. ---
       if (locaux.length) {
         ajouterOnglet(wb, {
@@ -718,7 +824,7 @@ export default function App() {
         });
       }
 
-      // --- Onglet 4 : mentions, à conserver dans tout livrable ---
+      // --- Onglet 5 : mentions, à conserver dans tout livrable ---
       const wsM = wb.addWorksheet('Sources et limites');
       wsM.columns = [{ width: 120 }];
       [
@@ -730,6 +836,7 @@ export default function App() {
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
+        ['Contrôle de cohérence', `La contenance figure dans deux produits DGFiP distincts, mis à jour par des chaînes différentes : la matrice, qui porte la propriété, et le plan cadastral, qui porte la géométrie. Résultat sur ce relevé : ${coherence.concordantes} parcelle(s) concordante(s), ${coherence.notables} écart(s) notable(s), ${coherence.mineurs} écart(s) mineur(s), ${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s). Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Rappel : la contenance cadastrale n'est qu'indicative, seul un arpentage fait foi.`],
         ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
         ['Liens cartographiques', (() => {
           const tousDont = [...parcelles, ...locaux];
@@ -867,7 +974,7 @@ export default function App() {
       // Le cadre doit couvrir le titre PLUS les quatre lignes de mentions, qui
       // descendent jusqu'à y + 14,5. Sous-dimensionné, il laissait les mentions
       // déborder sur le fond blanc.
-      const hMentions = 22;
+      const hMentions = 26;   // cinq lignes de mentions
       doc.setFillColor(...BEIGE);
       doc.rect(margin, y - 4, pageWidth - 2 * margin, hMentions, 'F');
       doc.setDrawColor(...GOLD);
@@ -886,7 +993,11 @@ export default function App() {
       doc.text('Géolocalisation : plan cadastral informatisé (DGFiP, version Etalab), position au centroïde de la parcelle.', margin + 3, y + 7.5);
       doc.text('Donnée de pré-contrôle : seul le relevé de propriété ou l\'état hypothécaire fait foi. Personnes physiques,', margin + 3, y + 11);
       doc.text('entreprises individuelles et sociétés unipersonnelles hors périmètre ; simples locataires absents.', margin + 3, y + 14.5);
-      y += 17;   // le bloc de mentions compte désormais quatre lignes
+      doc.text(`Cohérence matrice / plan cadastral : ${coherence.concordantes} concordante(s), `
+        + `${coherence.notables} écart(s) notable(s), ${coherence.mineurs} mineur(s), `
+        + `${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s).`,
+        margin + 3, y + 18);
+      y += 21;   // le bloc de mentions compte désormais cinq lignes
 
       const cellW = (pageWidth - 2 * margin - 8) / 3;
       const totalSurfaceCalc = surfaceDistincte(parcelles);
@@ -1309,6 +1420,20 @@ export default function App() {
                     )}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
+                    <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
+                    <div className="text-2xl font-semibold text-blue-950">
+                      {coherence.attente > 0 ? '—' : (coherence.notables + coherence.mineurs).toLocaleString('fr-FR')}
+                    </div>
+                    <div className="text-xs text-stone-500 mt-1">
+                      {coherence.attente > 0
+                        ? 'en attente du géocodage'
+                        : `écart(s) sur ${coherence.controlees.toLocaleString('fr-FR')} parcelles · ${coherence.concordantes.toLocaleString('fr-FR')} concordantes`}
+                    </div>
+                    {coherence.absentes > 0 && coherence.attente === 0 && (
+                      <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
+                    )}
+                  </div>
+                  <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Géocodage</div>
                     <div className="text-2xl font-semibold text-blue-950">
                       {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
@@ -1401,6 +1526,58 @@ export default function App() {
                     </div>
                   </div>
                 </div>
+
+                {coherence.ecarts.length > 0 && (
+                  <div className="bg-white border border-amber-300 rounded-xl shadow-sm overflow-hidden">
+                    <div className="px-6 py-4 border-b border-amber-200 bg-amber-50 flex items-center gap-2 flex-wrap">
+                      <AlertCircle className="w-4 h-4 text-amber-700" />
+                      <h3 className="font-semibold text-blue-950">Écarts de contenance entre matrice et plan cadastral</h3>
+                      <span className="text-xs text-amber-800">— {coherence.ecarts.length.toLocaleString('fr-FR')} parcelle(s) à instruire</span>
+                    </div>
+                    <div className="px-6 py-3 text-xs text-stone-600 border-b border-stone-200">
+                      Les deux sources DGFiP ne se synchronisent pas au même rythme. Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Écart qualifié de notable au-delà de 2 m² ou de 1 % de la contenance.
+                    </div>
+                    <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Référence</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Matrice</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Écart</th>
+                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Ampleur</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {coherence.ecarts.map((o) => {
+                            const pct = o.contenance ? (100 * o._ecart / Number(o.contenance)) : 0;
+                            return (
+                              <tr key={o.codeParcelle} className="border-b border-stone-100 hover:bg-stone-50">
+                                <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{o.codeParcelle}</td>
+                                <td className="px-4 py-3 text-blue-950">{o.commune}</td>
+                                <td className="px-4 py-3 text-blue-950 text-xs">{o.adresse}</td>
+                                <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{Number(o.contenance || 0).toLocaleString('fr-FR')} m²</td>
+                                <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{Number(o.contenanceCadastre || 0).toLocaleString('fr-FR')} m²</td>
+                                <td className={`px-4 py-3 text-right whitespace-nowrap font-medium ${o._classe === 'notable' ? 'text-amber-800' : 'text-stone-500'}`}>
+                                  {o._ecart > 0 ? '+' : ''}{o._ecart.toLocaleString('fr-FR')} m²
+                                </td>
+                                <td className="px-4 py-3 text-center text-xs">
+                                  <span className={`px-2 py-0.5 rounded border ${o._classe === 'notable'
+                                    ? 'bg-amber-50 text-amber-800 border-amber-300'
+                                    : 'bg-stone-50 text-stone-600 border-stone-300'}`}>
+                                    {o._classe === 'notable' ? 'notable' : 'mineur'} · {pct > 0 ? '+' : ''}{pct.toFixed(1)} %
+                                  </span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
 
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
