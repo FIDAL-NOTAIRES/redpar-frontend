@@ -18,7 +18,44 @@ const PAINT_URL = 'https://paint-blue.vercel.app';
 // à annoter et à exporter — c'est l'outil de travail.
 // Dans le classeur : on pointe le PDF brut, parce qu'un tableur remis à un tiers
 // doit livrer une pièce, pas ouvrir une application du cabinet.
-const lienPaintColorise = (codeParcelle, nomCommune) => {
+// Descripteurs métriques d'une parcelle, calculés sur son contour cadastral.
+// Ils permettent à PAINT de PRÉDIRE la taille attendue de la parcelle en pixels
+// au lieu de la deviner : un extrait A4 à 1/1000 couvre 210 m de largeur, donc
+// connaissant la largeur du rendu on connaît l'échelle pixels par mètre.
+// Projection locale équirectangulaire : suffisante à l'échelle d'une parcelle,
+// et sans dépendance à une bibliothèque de projection.
+const descripteursForme = (geom) => {
+  if (!geom) return null;
+  const anneaux = geom.type === 'Polygon' ? [geom.coordinates[0]]
+    : geom.type === 'MultiPolygon' ? geom.coordinates.map((p) => p[0]) : [];
+  if (!anneaux.length) return null;
+  // Anneau extérieur le plus vaste, comme côté serveur pour le centroïde.
+  const aireBrute = (a) => {
+    let s2 = 0;
+    for (let i = 0; i < a.length - 1; i++) s2 += a[i][0] * a[i + 1][1] - a[i + 1][0] * a[i][1];
+    return Math.abs(s2 / 2);
+  };
+  const anneau = anneaux.reduce((m, a) => (aireBrute(a) > aireBrute(m) ? a : m));
+  if (anneau.length < 4) return null;
+  const lat0 = anneau.reduce((t, pt) => t + pt[1], 0) / anneau.length;
+  const mx = 111320 * Math.cos(lat0 * Math.PI / 180), my = 110540;
+  const xy = anneau.map(([lo, la]) => [lo * mx, la * my]);
+  let a2 = 0;
+  for (let i = 0; i < xy.length - 1; i++) a2 += xy[i][0] * xy[i + 1][1] - xy[i + 1][0] * xy[i][1];
+  const aire = Math.abs(a2 / 2);
+  const xs = xy.map((q) => q[0]), ys = xy.map((q) => q[1]);
+  const largeur = Math.max(...xs) - Math.min(...xs);
+  const hauteur = Math.max(...ys) - Math.min(...ys);
+  if (!(largeur > 0) || !(hauteur > 0)) return null;
+  return {
+    largeur: Math.round(largeur * 10) / 10,
+    hauteur: Math.round(hauteur * 10) / 10,
+    aire: Math.round(aire),
+    remplissage: Math.round(100 * aire / (largeur * hauteur)) / 100,
+  };
+};
+
+const lienPaintColorise = (codeParcelle, nomCommune, geom) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
   const qs = new URLSearchParams({
@@ -39,6 +76,14 @@ const lienPaintColorise = (codeParcelle, nomCommune) => {
     couleur: '#A01040',
     auto: '1',
   });
+  // Dimensions réelles de la parcelle, en mètres, quand le contour est connu :
+  // PAINT en déduit la taille attendue en pixels et cesse de deviner.
+  const f = descripteursForme(geom);
+  if (f) {
+    qs.set('dim', `${f.largeur}x${f.hauteur}`);
+    qs.set('surface', String(f.aire));
+    qs.set('remplissage', String(f.remplissage));
+  }
   return `${PAINT_URL}/?${qs.toString()}`;
 };
 
@@ -1858,8 +1903,8 @@ export default function App() {
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-center">
-                                  {lienPaintColorise(o.codeParcelle, o.commune) && (
-                                    <a href={lienPaintColorise(o.codeParcelle, o.commune)} target="_blank" rel="noreferrer"
+                                  {lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle)) && (
+                                    <a href={lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle))} target="_blank" rel="noreferrer"
                                       title="Ouvre PAINT pour confronter l'écart au plan, parcelle déjà coloriée"
                                       className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                   )}
@@ -1920,8 +1965,8 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienPaintColorise(p.codeParcelle, p.commune) && (
-                                  <a href={lienPaintColorise(p.codeParcelle, p.commune)} target="_blank" rel="noreferrer"
+                                {lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle)) && (
+                                  <a href={lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle))} target="_blank" rel="noreferrer"
                                     title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
                                     className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                 )}
@@ -2021,8 +2066,8 @@ export default function App() {
                                   <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
                                   <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
                                   <td className="px-4 py-3 text-center">
-                                    {lienPaintColorise(im.codeParcelle, im.commune) && (
-                                      <a href={lienPaintColorise(im.codeParcelle, im.commune)} target="_blank" rel="noreferrer"
+                                    {lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle)) && (
+                                      <a href={lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle))} target="_blank" rel="noreferrer"
                                         title="Ouvre PAINT : extrait généré et parcelle coloriée"
                                         className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                     )}
