@@ -29,7 +29,7 @@ const parseCoords = (coords) => {
   return [lat, lng];
 };
 
-function ParcellesMap({ parcelles, companyName }) {
+function ParcellesMap({ parcelles, locaux = [], companyName }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
 
@@ -41,7 +41,16 @@ function ParcellesMap({ parcelles, companyName }) {
     }
     const L = window.L;
     const validParcelles = parcelles.filter(p => parseCoords(p.coordonnees));
-    if (validParcelles.length === 0) return;
+    // Les locaux sont regroupés par parcelle : plusieurs milliers de lots sur
+    // le même immeuble donneraient autant de marqueurs superposés, illisibles.
+    const immeublesMap = new Map();
+    locaux.forEach((l) => {
+      if (!parseCoords(l.coordonnees) || !l.codeParcelle) return;
+      if (!immeublesMap.has(l.codeParcelle)) immeublesMap.set(l.codeParcelle, { ...l, lots: 0 });
+      immeublesMap.get(l.codeParcelle).lots += 1;
+    });
+    const validImmeubles = [...immeublesMap.values()];
+    if (validParcelles.length === 0 && validImmeubles.length === 0) return;
 
     const map = L.map(mapRef.current).setView([46.5, 2.5], 6);
     mapInstanceRef.current = map;
@@ -54,6 +63,15 @@ function ParcellesMap({ parcelles, companyName }) {
     const fidalIcon = L.divIcon({
       className: 'custom-fidal-icon',
       html: '<div style="background:#1e2952;color:#fbbf24;width:24px;height:24px;border-radius:50%;border:2px solid white;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;box-shadow:0 2px 4px rgba(0,0,0,0.3)">●</div>',
+      iconSize: [24, 24],
+      iconAnchor: [12, 12],
+    });
+
+    // Bâti en bleu canard de la charte, non bâti en navy : la distinction doit
+    // être lisible sans cliquer.
+    const batiIcon = L.divIcon({
+      className: 'custom-bati-icon',
+      html: '<div style="background:#33838B;color:#fff;width:24px;height:24px;border-radius:4px;border:2px solid white;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;box-shadow:0 2px 4px rgba(0,0,0,0.3)">■</div>',
       iconSize: [24, 24],
       iconAnchor: [12, 12],
     });
@@ -92,6 +110,37 @@ function ParcellesMap({ parcelles, companyName }) {
     });
     map.addLayer(markers);
 
+    if (validImmeubles.length > 0) {
+      const groupeBati = L.markerClusterGroup({
+        chunkedLoading: true,
+        iconCreateFunction: (cluster) => L.divIcon({
+          html: `<div style="background:#33838B;color:#fff;width:40px;height:40px;border-radius:6px;border:3px solid #6DD5DC;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,0.3)">${cluster.getChildCount()}</div>`,
+          className: 'custom-cluster-bati',
+          iconSize: [40, 40],
+        }),
+      });
+      validImmeubles.forEach((im) => {
+        const c = parseCoords(im.coordonnees);
+        if (!c) return;
+        bounds.push(c);
+        const m = L.marker(c, { icon: batiIcon });
+        m.bindPopup(`
+          <div style="font-family:system-ui;min-width:220px">
+            <div style="font-weight:700;color:#33838B;margin-bottom:6px;border-bottom:2px solid #6DD5DC;padding-bottom:4px">Immeuble bâti</div>
+            <div style="font-size:12px;color:#1e2952;margin-bottom:3px"><strong>📍 ${im.adresse || ''}</strong></div>
+            <div style="font-size:12px;color:#475569;margin-bottom:3px">${im.commune || ''} (${im.departement || ''})</div>
+            <div style="font-size:12px;color:#475569;margin-bottom:3px">🏢 ${im.lots.toLocaleString('fr-FR')} lot(s) au nom de la société</div>
+            <div style="font-family:monospace;font-size:10px;color:#94a3b8">${im.codeParcelle || ''}</div>
+          </div>`);
+        groupeBati.addLayer(m);
+      });
+      map.addLayer(groupeBati);
+      L.control.layers(null, {
+        'Parcelles (non bâti)': markers,
+        'Immeubles (bâti)': groupeBati,
+      }, { collapsed: false }).addTo(map);
+    }
+
     if (bounds.length > 0) {
       map.fitBounds(bounds, { padding: [30, 30], maxZoom: 14 });
     }
@@ -102,7 +151,7 @@ function ParcellesMap({ parcelles, companyName }) {
         mapInstanceRef.current = null;
       }
     };
-  }, [parcelles, companyName]);
+  }, [parcelles, locaux, companyName]);
 
   return <div ref={mapRef} style={{ height: '500px', width: '100%' }} />;
 }
@@ -125,7 +174,10 @@ export default function App() {
   const [totalLocaux, setTotalLocaux] = useState(0);
   const [locauxLoading, setLocauxLoading] = useState(false);
   const [locauxError, setLocauxError] = useState(null);
+  const [locauxTronque, setLocauxTronque] = useState(false);
   const [geoStatus, setGeoStatus] = useState(null);
+  // Millésime annoncé par le backend, jamais codé en dur côté interface.
+  const [millesime, setMillesime] = useState('2025');
   const [exportingExcel, setExportingExcel] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
   const recognitionRef = useRef(null);
@@ -175,32 +227,33 @@ export default function App() {
   };
 
   // Géocodage à la parcelle. Les fichiers DGFiP ne portent aucune coordonnée :
-  // on les obtient du plan cadastral, commune par commune, via /api/geo.
-  // Les parcelles s'affichent immédiatement, la carte se remplit ensuite.
-  const geocoderParcelles = async (liste) => {
+  // on les obtient du plan cadastral via /api/geo, commune par commune.
+  // Une SEULE passe couvre les deux volets : un local et une parcelle peuvent
+  // partager la même référence cadastrale, il serait absurde de la demander
+  // deux fois. Les listes s'affichent d'abord, la carte se remplit ensuite.
+  const geocoderTout = async (listeParcelles, listeLocaux) => {
     const parCommune = new Map();
-    liste.forEach((p) => {
-      if (!p.codeInsee || !p.codeParcelle) return;
-      if (!parCommune.has(p.codeInsee)) parCommune.set(p.codeInsee, []);
-      parCommune.get(p.codeInsee).push(p.codeParcelle);
+    [...listeParcelles, ...listeLocaux].forEach((o) => {
+      if (!o.codeInsee || !o.codeParcelle) return;
+      if (!parCommune.has(o.codeInsee)) parCommune.set(o.codeInsee, new Set());
+      parCommune.get(o.codeInsee).add(o.codeParcelle);
     });
     if (parCommune.size === 0) return;
-    setGeoStatus({ communes: parCommune.size, faites: 0, trouvees: 0 });
 
-    const coords = new Map();
-    let faites = 0, trouvees = 0;
     const taches = [];
     for (const [insee, refs] of parCommune) {
-      // L'endpoint plafonne à 400 références par appel : on découpe.
-      for (let i = 0; i < refs.length; i += 400) {
-        taches.push([insee, refs.slice(i, i + 400)]);
-      }
+      const liste = [...refs];
+      for (let i = 0; i < liste.length; i += 400) taches.push([insee, liste.slice(i, i + 400)]);
     }
-    const CONCURRENCE = 6;
+    setGeoStatus({ communes: parCommune.size, faites: 0, trouvees: 0, demandees: 0 });
+
+    const coords = new Map();
+    let faites = 0, trouvees = 0, demandees = 0;
     let curseur = 0;
     const travailleur = async () => {
       while (curseur < taches.length) {
         const [insee, refs] = taches[curseur++];
+        demandees += refs.length;
         try {
           const suffixes = refs.map((r) => r.slice(5)).join(',');
           const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}`);
@@ -211,15 +264,18 @@ export default function App() {
               trouvees++;
             });
           }
-        } catch { /* une commune manquante ne doit pas casser la carte */ }
+        } catch { /* une commune absente du plan ne doit pas casser la carte */ }
         faites++;
-        setGeoStatus({ communes: parCommune.size, faites, trouvees });
+        setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees });
       }
     };
-    await Promise.all(Array.from({ length: Math.min(CONCURRENCE, taches.length) }, travailleur));
-    setParcelles((prev) => prev.map((p) => (coords.has(p.codeParcelle)
-      ? { ...p, coordonnees: coords.get(p.codeParcelle) } : p)));
-    setGeoStatus({ communes: parCommune.size, faites, trouvees, termine: true });
+    await Promise.all(Array.from({ length: Math.min(6, taches.length) }, travailleur));
+
+    const poser = (o) => (coords.has(o.codeParcelle)
+      ? { ...o, coordonnees: coords.get(o.codeParcelle) } : o);
+    setParcelles((prev) => prev.map(poser));
+    setLocaux((prev) => prev.map(poser));
+    setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees, termine: true });
   };
 
   const fetchParcelles = async (siren) => {
@@ -232,9 +288,12 @@ export default function App() {
       setParcelles(liste);
       setTotalParcelles(data.total || 0);
       setTruncated(data.truncated || false);
+      setMillesime(data.millesime || '2025');
       setParcellesLoading(false);
-      geocoderParcelles(liste);
-    } catch (e) { setParcellesError(`Erreur : ${e.message}`); setParcellesLoading(false); }
+      return liste;
+    } catch (e) {
+      setParcellesError(`Erreur : ${e.message}`); setParcellesLoading(false); return [];
+    }
   };
 
   // Volet bâti, inexistant avant le passage aux fichiers DGFiP 2025.
@@ -244,9 +303,12 @@ export default function App() {
       const r = await fetch(`${BACKEND_URL}/api/locaux?siren=${encodeURIComponent(siren)}&maxResults=20000`);
       if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
       const data = await r.json();
-      setLocaux(data.locaux || []);
+      const liste = data.locaux || [];
+      setLocaux(liste);
       setTotalLocaux(data.total || 0);
-    } catch (e) { setLocauxError(`Erreur : ${e.message}`); }
+      setLocauxTronque(!!data.tronque);
+      return liste;
+    } catch (e) { setLocauxError(`Erreur : ${e.message}`); return []; }
     finally { setLocauxLoading(false); }
   };
 
@@ -256,42 +318,23 @@ export default function App() {
   const confirmCompany = () => {
     if (!selectedCompany) return;
     setStep(3);
-    fetchParcelles(selectedCompany.siren);
-    fetchLocaux(selectedCompany.siren);
+    // Les deux relevés partent ensemble ; le géocodage attend les deux pour
+    // n'interroger chaque commune qu'une fois.
+    Promise.all([
+      fetchParcelles(selectedCompany.siren),
+      fetchLocaux(selectedCompany.siren),
+    ]).then(([lp, ll]) => geocoderTout(lp, ll));
   };
 
   const resetAll = () => {
     setStep(1); setCompanyName(''); setPappersResults([]); setSelectedCompany(null);
     setPappersError(null); setParcelles([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
-    setLocaux([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null);
+    setLocaux([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null); setLocauxTronque(false);
   };
 
   // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
   // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
   const immeubles = new Set(locaux.map((l) => l.codeParcelle).filter(Boolean)).size;
-
-  // Export des locaux. L'Excel à la charte reste à faire ; ce CSV permet déjà
-  // d'exploiter le volet bâti dans un tableur.
-  const exportLocauxCsv = () => {
-    const sep = ';';
-    const entetes = ['#', 'Reference parcelle', 'Commune', 'Departement', 'Region',
-      'Adresse', 'Batiment', 'Entree', 'Niveau', 'Porte', 'Droit'];
-    const echap = (v) => {
-      const t = String(v ?? '');
-      return /[";\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
-    };
-    const lignes = [entetes.join(sep)].concat(locaux.map((l, i) => [
-      i + 1, l.codeParcelle, l.commune, l.departement, l.region, l.adresse,
-      l.batiment, l.entree, l.niveau, l.porte, l.codeDroit,
-    ].map(echap).join(sep)));
-    // BOM pour qu'Excel reconnaisse l'UTF-8 sans manipulation.
-    const blob = new Blob(['\uFEFF' + lignes.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `REDPAR-locaux-${(selectedCompany?.nom || 'societe').replace(/[^A-Za-z0-9]+/g, '-')}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
 
   const computeStats = () => {
     const byDept = {};
@@ -375,6 +418,64 @@ export default function App() {
     return cv.toDataURL('image/png');
   };
 
+  // Fabrique d'onglet à la charte FIDAL, partagée par les deux volets : même
+  // bandeau, même ligne de sujet, mêmes en-têtes navy et or, même filtre
+  // automatique. Un seul endroit à corriger le jour où la charte bouge.
+  const ajouterOnglet = (wb, { nom, headers, widths, sujet, lignes, remplir, aligner }) => {
+    const numCols = headers.length;
+    const ws = wb.addWorksheet(nom, { views: [{ state: 'frozen', ySplit: 3 }] });
+    ws.columns = widths.map((w) => ({ width: w }));
+
+    const bannerW = 1240, bannerH = 150;
+    ws.getRow(1).height = bannerH * 0.75;
+    const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
+    ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: bannerW, height: bannerH } });
+
+    ws.mergeCells(2, 1, 2, numCols);
+    const sujetCell = ws.getCell(2, 1);
+    sujetCell.value = sujet;
+    sujetCell.font = { name: 'Calibri', size: 9.5, italic: true, color: { argb: 'FF0F2238' } };
+    sujetCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F4E0' } };
+    sujetCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    ws.getRow(2).height = 18;
+
+    const headerRow = ws.getRow(3);
+    headers.forEach((h, i) => {
+      const cell = headerRow.getCell(i + 1);
+      cell.value = h;
+      cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFE3CC7A' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F2238' } };
+      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+      cell.border = { bottom: { style: 'medium', color: { argb: 'FFE3CC7A' } } };
+    });
+    headerRow.height = 24;
+
+    const navy = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
+    lignes.forEach((item, i) => {
+      const row = ws.getRow(i + 4);
+      remplir(row, item, i);
+      for (let c = 1; c <= numCols; c++) {
+        const cell = row.getCell(c);
+        const a = aligner(c);
+        if (!a.lien) cell.font = navy;
+        if (a.nombre) { cell.alignment = { horizontal: 'right', vertical: 'middle' }; cell.numFmt = '#,##0'; }
+        else if (a.centre) cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        else cell.alignment = { vertical: 'middle' };
+      }
+    });
+
+    ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + lignes.length, column: numCols } };
+    return ws;
+  };
+
+  // Lien cartographique : par coordonnées si la parcelle est géocodée, sinon
+  // par adresse. Sans repli, la colonne resterait vide pour les 3 % de
+  // parcelles absentes du plan cadastral.
+  const lienCarte = (o) => buildSatelliteLink(o.coordonnees)
+    || (o.adresse && o.commune
+      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${o.adresse} ${o.commune}`)}`
+      : null);
+
   const exportExcel = async () => {
     if (!parcelles.length || !window.ExcelJS) {
       if (!window.ExcelJS) alert("Librairie Excel (ExcelJS) non chargée");
@@ -383,74 +484,92 @@ export default function App() {
     setExportingExcel(true);
     try {
       const ExcelJS = window.ExcelJS;
-      const headers = ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Google Maps'];
-      const numCols = headers.length;
-      const widths = [5, 18, 22, 18, 22, 35, 12, 14, 18];
-
       const wb = new ExcelJS.Workbook();
-      const ws = wb.addWorksheet('Parcelles', { views: [{ state: 'frozen', ySplit: 3 }] });
-      ws.columns = widths.map(w => ({ width: w }));
+      const fj = selectedCompany?.formeJuridique || parcelles[0]?.formeJuridiqueLibelle || '';
+      const sujet = (quoi, n) => `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}`
+        + `  |  ${fj}  |  ${n.toLocaleString('fr-FR')} ${quoi}`
+        + `  |  Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime}`
+        + ` — Licence Ouverte 2.0  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
 
-      // --- Ligne 1 : bandeau image ---
-      const bannerW = 1240, bannerH = 150;
-      ws.getRow(1).height = bannerH * 0.75; // px -> points
-      const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
-      ws.addImage(imgId, { tl: { col: 0, row: 0 }, ext: { width: bannerW, height: bannerH } });
-
-      // --- Ligne 2 : sujet du rapport ---
-      const subjectText = `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}  |  ${selectedCompany?.formeJuridique || ''}  |  ${totalParcelles.toLocaleString('fr-FR')} parcelle(s)  |  Source : fichiers des parcelles des personnes morales (DGFiP), situation au 1er janvier 2025 — Licence Ouverte 2.0  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
-      ws.mergeCells(2, 1, 2, numCols);
-      const subjectCell = ws.getCell(2, 1);
-      subjectCell.value = subjectText;
-      subjectCell.font = { name: 'Calibri', size: 9.5, italic: true, color: { argb: 'FF0F2238' } };
-      subjectCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F4E0' } };
-      subjectCell.alignment = { horizontal: 'center', vertical: 'middle' };
-      ws.getRow(2).height = 18;
-
-      // --- Ligne 3 : en-têtes de colonnes ---
-      const headerRow = ws.getRow(3);
-      headers.forEach((h, i) => {
-        const cell = headerRow.getCell(i + 1);
-        cell.value = h;
-        cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFE3CC7A' } };
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F2238' } };
-        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-        cell.border = { bottom: { style: 'medium', color: { argb: 'FFE3CC7A' } } };
-      });
-      headerRow.height = 24;
-
-      // --- Données ---
-      parcelles.forEach((p, i) => {
-        const r = i + 4;
-        const link = buildSatelliteLink(p.coordonnees);
-        const row = ws.getRow(r);
-        const navy = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
-        row.getCell(1).value = i + 1;
-        row.getCell(2).value = p.codeParcelle || '';
-        row.getCell(3).value = p.commune || '';
-        row.getCell(4).value = p.departement || '';
-        row.getCell(5).value = p.region || '';
-        row.getCell(6).value = p.adresse || '';
-        row.getCell(7).value = p.contenance || 0;
-        row.getCell(8).value = p.natureCulture || '';
-        const linkCell = row.getCell(9);
-        if (link) {
-          linkCell.value = { text: 'Voir (satellite)', hyperlink: link };
-          linkCell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
-        } else {
-          linkCell.value = '';
-        }
-        for (let c = 1; c <= numCols; c++) {
-          const cell = row.getCell(c);
-          if (c !== 9) cell.font = navy;
-          if (c === 1 || c === 8) cell.alignment = { horizontal: 'center', vertical: 'middle' };
-          else if (c === 7) { cell.alignment = { horizontal: 'right', vertical: 'middle' }; cell.numFmt = '#,##0'; }
-          else if (c === 9) cell.alignment = { horizontal: 'center', vertical: 'middle' };
-          else cell.alignment = { vertical: 'middle' };
-        }
+      // --- Onglet 1 : le non bâti ---
+      ajouterOnglet(wb, {
+        nom: 'Parcelles',
+        headers: ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Droit', 'Carte'],
+        widths: [5, 18, 22, 18, 22, 35, 12, 14, 26, 18],
+        sujet: sujet('parcelle(s)', totalParcelles),
+        lignes: parcelles,
+        aligner: (c) => ({ centre: c === 1 || c === 8, nombre: c === 7, lien: c === 10 }),
+        remplir: (row, p, i) => {
+          row.getCell(1).value = i + 1;
+          row.getCell(2).value = p.codeParcelle || '';
+          row.getCell(3).value = p.commune || '';
+          row.getCell(4).value = p.departement || '';
+          row.getCell(5).value = p.region || '';
+          row.getCell(6).value = p.adresse || '';
+          row.getCell(7).value = p.contenance || 0;
+          row.getCell(8).value = p.natureCulture || '';
+          row.getCell(9).value = p.codeDroit || '';
+          const lien = lienCarte(p);
+          const cell = row.getCell(10);
+          if (lien) {
+            cell.value = { text: p.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
+            cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          } else cell.value = '';
+        },
       });
 
-      ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + parcelles.length, column: numCols } };
+      // --- Onglet 2 : le bâti. Ni surface ni invariant dans la source : un lot
+      // s'identifie par bâtiment / entrée / niveau / porte sur sa parcelle. ---
+      if (locaux.length) {
+        ajouterOnglet(wb, {
+          nom: 'Locaux',
+          headers: ['#', 'Référence parcelle', 'Commune', 'Département', 'Région', 'Adresse', 'Bâtiment', 'Entrée', 'Niveau', 'Porte', 'Droit', 'Carte'],
+          widths: [5, 18, 22, 18, 22, 35, 10, 8, 8, 10, 26, 18],
+          sujet: sujet('local(aux)', totalLocaux),
+          lignes: locaux,
+          aligner: (c) => ({ centre: c === 1 || (c >= 7 && c <= 10), nombre: false, lien: c === 12 }),
+          remplir: (row, l, i) => {
+            row.getCell(1).value = i + 1;
+            row.getCell(2).value = l.codeParcelle || '';
+            row.getCell(3).value = l.commune || '';
+            row.getCell(4).value = l.departement || '';
+            row.getCell(5).value = l.region || '';
+            row.getCell(6).value = l.adresse || '';
+            row.getCell(7).value = l.batiment || '';
+            row.getCell(8).value = l.entree || '';
+            row.getCell(9).value = l.niveau || '';
+            row.getCell(10).value = l.porte || '';
+            row.getCell(11).value = l.codeDroit || '';
+            const lien = lienCarte(l);
+            const cell = row.getCell(12);
+            if (lien) {
+              cell.value = { text: l.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
+              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
+              cell.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cell.value = '';
+          },
+        });
+      }
+
+      // --- Onglet 3 : mentions, à conserver dans tout livrable ---
+      const wsM = wb.addWorksheet('Sources et limites');
+      wsM.columns = [{ width: 120 }];
+      [
+        ['Source', `Fichiers des locaux et des parcelles des personnes morales (DGFiP), situation au 1er janvier ${millesime}.`],
+        ['Licence', 'Licence Ouverte 2.0 (Etalab). Attribution requise.'],
+        ['Géolocalisation', 'Plan cadastral informatisé (DGFiP, version Etalab). Position au centroïde de la parcelle.'],
+        ['Portée', "Donnée de pré-contrôle. Seul le relevé de propriété ou l'état hypothécaire fait foi."],
+        ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
+        ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits."],
+        ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
+      ].forEach(([titre, texte], i) => {
+        const r = wsM.getRow(i + 1);
+        r.getCell(1).value = `${titre} — ${texte}`;
+        r.getCell(1).font = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
+        r.getCell(1).alignment = { vertical: 'top', wrapText: true };
+        r.height = 30;
+      });
 
       const buf = await wb.xlsx.writeBuffer();
       const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
@@ -887,7 +1006,18 @@ export default function App() {
               <div className="p-6">
                 <div className="flex items-center gap-2 text-xs text-amber-400 mb-2"><FileText className="w-3.5 h-3.5" />RAPPORT REDPAR</div>
                 <h2 className="text-2xl font-semibold mb-1">{selectedCompany?.nom}</h2>
-                <div className="text-sm text-blue-200">SIREN : <span className="font-mono text-white">{selectedCompany?.siren}</span> • {selectedCompany?.formeJuridique}</div>
+                <div className="text-sm text-blue-200">
+                  SIREN : <span className="font-mono text-white">{selectedCompany?.siren}</span>
+                  {' • '}
+                  {/* L'API Recherche d'Entreprises ne renvoie pas toujours la forme
+                      juridique (« N/C ») : on retombe alors sur celle des fichiers
+                      DGFiP, avec son code entre parenthèses pour rester vérifiable. */}
+                  {selectedCompany?.formeJuridique && selectedCompany.formeJuridique !== 'N/C'
+                    ? selectedCompany.formeJuridique
+                    : (parcelles[0]?.formeJuridiqueLibelle || locaux[0]?.formeJuridiqueLibelle)
+                      ? `${parcelles[0]?.formeJuridiqueLibelle || locaux[0]?.formeJuridiqueLibelle} (${parcelles[0]?.formeJuridique || locaux[0]?.formeJuridique})`
+                      : 'forme juridique non communiquée'}
+                </div>
               </div>
             </div>
 
@@ -919,7 +1049,7 @@ export default function App() {
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Parcelles</div>
                     <div className="text-2xl font-semibold text-blue-950">{totalParcelles.toLocaleString('fr-FR')}</div>
-                    {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées (limite 10 000)</div>}
+                    {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Surface totale</div>
@@ -940,6 +1070,9 @@ export default function App() {
                     {!locauxLoading && totalLocaux > 0 && (
                       <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
                     )}
+                    {locauxTronque && (
+                      <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
+                    )}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Géocodage</div>
@@ -949,7 +1082,7 @@ export default function App() {
                     <div className="text-xs text-stone-500 mt-1">
                       {!geoStatus ? 'en attente'
                         : geoStatus.termine
-                          ? `parcelles localisées sur ${parcelles.length.toLocaleString('fr-FR')}`
+                          ? `parcelles localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} demandées`
                           : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
                     </div>
                   </div>
@@ -966,11 +1099,12 @@ export default function App() {
                       </span>
                     )}
                   </div>
-                  <ParcellesMap parcelles={parcelles} companyName={selectedCompany?.nom} />
+                  <ParcellesMap parcelles={parcelles} locaux={locaux} companyName={selectedCompany?.nom} />
                   <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
                     Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
-                    {geoStatus?.termine && geoStatus.trouvees < parcelles.length && (
-                      <span className="text-amber-700"> {(parcelles.length - geoStatus.trouvees).toLocaleString('fr-FR')} parcelle(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
+                    {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les lots détenus sur la parcelle.
+                    {geoStatus?.termine && geoStatus.trouvees < (geoStatus.demandees || 0) && (
+                      <span className="text-amber-700"> {((geoStatus.demandees || 0) - geoStatus.trouvees).toLocaleString('fr-FR')} référence(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
                     )}
                   </div>
                 </div>
@@ -1085,9 +1219,7 @@ export default function App() {
                     <h3 className="font-semibold text-blue-950">Détail des locaux</h3>
                     <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Volet bâti — millésime 2025</span>
                     {!locauxLoading && locaux.length > 0 && (
-                      <button onClick={exportLocauxCsv} className="ml-auto flex items-center gap-1.5 px-3 py-1.5 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm">
-                        <Download className="w-4 h-4" />CSV
-                      </button>
+                      <span className="ml-auto text-xs text-stone-500">Inclus dans l'export Excel, onglet « Locaux »</span>
                     )}
                   </div>
 
