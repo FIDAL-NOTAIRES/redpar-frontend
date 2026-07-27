@@ -3,6 +3,30 @@ import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Building
 
 const BACKEND_URL = 'https://redpar-backend.vercel.app';
 
+// PAINT expose un endpoint qui renvoie directement le PDF de l'extrait
+// cadastral officiel. Il attend commune, préfixe, section et numéro : or notre
+// référence à quatorze caractères les contient exactement, dans cet ordre.
+// REDPAR est même mieux placé que l'interface de PAINT, qui doit deviner le
+// préfixe via l'IGN quand la saisie est manuelle.
+// ⚠ Ce service interroge le service de consultation du plan cadastral par un
+// procédé non officiel, sujet à limitation de débit : un lien à la demande,
+// jamais de génération en masse.
+const PAINT_URL = 'https://paint-blue.vercel.app';
+
+const lienExtraitCadastral = (codeParcelle) => {
+  const r = String(codeParcelle || '');
+  if (r.length !== 14) return null;
+  const qs = new URLSearchParams({
+    commune: r.slice(0, 5),
+    prefixe: r.slice(5, 8),
+    section: r.slice(8, 10),
+    parcelle: r.slice(10, 14),
+    echelle: '1000',
+    taille: 'A4',
+  });
+  return `${PAINT_URL}/api/extrait?${qs.toString()}`;
+};
+
 // Formatage des nombres pour le PDF (espace simple compatible avec les polices PDF)
 const formatNumberForPdf = (n) => {
   if (n === null || n === undefined || n === '') return '';
@@ -36,6 +60,49 @@ const parseCoords = (coords) => {
 // Fonction déclarée hors du composant : hissée, donc utilisable avant sa
 // position dans le fichier, et pure, donc sans raison d'être recréée à chaque
 // rendu.
+// ----------------------------------------------------------------------
+// RECHERCHE ET TRI DES TABLEAUX
+// Un relevé de quinze mille lots sans filtre ni tri est inexploitable : on
+// cherche « la parcelle de la rue Jean-Jaurès » ou « les plus grandes
+// surfaces », pas la ligne numéro 8 412.
+// ----------------------------------------------------------------------
+const normTexte = (v) => String(v ?? '')
+  .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+// Tous les mots saisis doivent être présents, dans n'importe quel ordre et
+// n'importe quelle colonne : « jaures anstaing » trouve la ligne.
+function filtrerTexte(liste, q, champs) {
+  const t = normTexte(q).trim();
+  if (!t) return liste;
+  const mots = t.split(/\s+/);
+  return liste.filter((o) => {
+    const blob = champs.map((c) => normTexte(o[c])).join(' ');
+    return mots.every((m) => blob.includes(m));
+  });
+}
+
+function trierListe(liste, tri) {
+  if (!tri || !tri.champ) return liste;
+  const sens = tri.sens === 'desc' ? -1 : 1;
+  return [...liste].sort((a, b) => {
+    const va = a[tri.champ], vb = b[tri.champ];
+    const na = Number(va), nb = Number(vb);
+    if (Number.isFinite(na) && Number.isFinite(nb)) return sens * (na - nb);
+    return sens * String(va ?? '').localeCompare(String(vb ?? ''), 'fr', { numeric: true });
+  });
+}
+
+// En-tête cliquable : premier clic croissant, deuxième décroissant.
+function EnTete({ label, champ, tri, onTri, align = 'text-left' }) {
+  const actif = tri.champ === champ;
+  return (
+    <th className={`px-4 py-3 ${align} text-xs font-semibold uppercase select-none ${champ ? 'cursor-pointer hover:text-blue-900' : ''} ${actif ? 'text-blue-900' : 'text-stone-600'}`}
+      onClick={champ ? () => onTri({ champ, sens: actif && tri.sens === 'asc' ? 'desc' : 'asc' }) : undefined}>
+      {label}{actif ? (tri.sens === 'asc' ? ' ▲' : ' ▼') : ''}
+    </th>
+  );
+}
+
 function surfaceDistincte(liste) {
   const vues = new Set();
   let m2 = 0;
@@ -211,6 +278,11 @@ export default function App() {
   // un sélecteur plutôt qu'une règle figée.
   // ----------------------------------------------------------------------
   const [droitsChoisis, setDroitsChoisis] = useState(null);
+  const [qParcelles, setQParcelles] = useState('');
+  const [triParcelles, setTriParcelles] = useState({ champ: '', sens: 'asc' });
+  const [qLocaux, setQLocaux] = useState('');
+  const [triLocaux, setTriLocaux] = useState({ champ: '', sens: 'asc' });
+  const [locauxGroupes, setLocauxGroupes] = useState(true);
 
   const droitsPresents = (() => {
     const m = new Map();
@@ -402,6 +474,8 @@ export default function App() {
     if (!selectedCompany) return;
     setStep(3);
     setDroitsChoisis(null);
+    setQParcelles(''); setQLocaux('');
+    setTriParcelles({ champ: '', sens: 'asc' }); setTriLocaux({ champ: '', sens: 'asc' });
     // Les deux relevés partent ensemble ; le géocodage attend les deux pour
     // n'interroger chaque commune qu'une fois.
     Promise.all([
@@ -470,6 +544,45 @@ export default function App() {
       ecarts,
     };
   })();
+
+  // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
+  // exports continuent de porter sur l'ensemble — seul l'affichage est réduit,
+  // sans quoi un filtre de lecture fausserait un livrable.
+  const parcellesAffichees = trierListe(
+    filtrerTexte(parcelles, qParcelles,
+      ['codeParcelle', 'commune', 'departement', 'region', 'adresse', 'natureCulture', 'codeDroit']),
+    triParcelles);
+
+  // Vue par immeuble : un lot par ligne devient illisible passé quelques
+  // centaines. On regroupe par parcelle en comptant les lots.
+  const immeublesListe = (() => {
+    const m = new Map();
+    locaux.forEach((l) => {
+      const k = l.codeParcelle || '(sans référence)';
+      if (!m.has(k)) {
+        m.set(k, { ...l, nbLots: 0, titres: new Set(), batiments: new Set() });
+      }
+      const e = m.get(k);
+      e.nbLots += 1;
+      if (l.codeDroit) e.titres.add(l.codeDroit);
+      if (l.batiment) e.batiments.add(l.batiment);
+      return e;
+    });
+    return [...m.values()].map((e) => ({
+      ...e,
+      titresTxt: [...e.titres].join(' ; '),
+      batimentsTxt: [...e.batiments].sort().join(', '),
+    }));
+  })();
+
+  const locauxAffiches = trierListe(
+    filtrerTexte(locaux, qLocaux,
+      ['codeParcelle', 'commune', 'departement', 'adresse', 'batiment', 'entree', 'niveau', 'porte', 'codeDroit']),
+    triLocaux);
+  const immeublesAffiches = trierListe(
+    filtrerTexte(immeublesListe, qLocaux,
+      ['codeParcelle', 'commune', 'departement', 'adresse', 'batimentsTxt', 'titresTxt']),
+    triLocaux);
 
   // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
   // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
@@ -667,6 +780,7 @@ export default function App() {
       const wb = new ExcelJS.Workbook();
       const fj = formeJuridiqueAffichee();
       const sujet = (quoi, n) => `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}`
+        + `  |  ${selectedCompany?.statut === 'Cessée' ? 'SOCIÉTÉ CESSÉE' : 'société active'}`
         + `  |  ${fj}  |  ${n.toLocaleString('fr-FR')} ${quoi}`
         + `  |  Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime}`
         + ` — Licence Ouverte 2.0  |  ${libelleFiltre}`
@@ -711,12 +825,12 @@ export default function App() {
           nom: 'Tous les biens',
           headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
             'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
-            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit', 'Carte'],
-          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 16],
+            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit', 'Carte', 'Extrait cadastral'],
+          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 16, 18],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
           aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13,
-            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c === 15 }),
+            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c === 15 || c === 16 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
@@ -752,6 +866,13 @@ export default function App() {
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
               cell.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cell.value = '';
+            const extrait = lienExtraitCadastral(o.codeParcelle);
+            const cellEx = row.getCell(16);
+            if (extrait) {
+              cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
+              cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
+              cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cellEx.value = '';
           },
         });
       }
@@ -763,13 +884,14 @@ export default function App() {
         ajouterOnglet(wb, {
           nom: 'Écarts de contenance',
           headers: ['#', 'Ampleur', 'Référence cadastrale', 'Commune', 'Département',
-            'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Carte'],
-          widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16],
+            'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Carte',
+            'Extrait cadastral'],
+          widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16, 18],
           sujet: `${selectedCompany?.nom || ''}  |  ${coherence.ecarts.length} écart(s) sur `
             + `${coherence.controlees} parcelle(s) contrôlée(s)  |  ${coherence.concordantes} concordante(s)`
             + `  |  Matrice DGFiP contre plan cadastral (version Etalab)  |  Écart notable au-delà de 2 m² ou 1 %`,
           lignes: coherence.ecarts,
-          aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c === 12 }),
+          aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c === 12 || c === 13 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             row.getCell(2).value = o._classe === 'notable' ? 'NOTABLE' : 'mineur';
@@ -790,6 +912,13 @@ export default function App() {
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
               cell.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cell.value = '';
+            const extrait = lienExtraitCadastral(o.codeParcelle);
+            const cellEx = row.getCell(13);
+            if (extrait) {
+              cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
+              cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
+              cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
+            } else cellEx.value = '';
           },
         });
       }
@@ -867,6 +996,10 @@ export default function App() {
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
+        ['Extraits cadastraux', "La colonne « Extrait cadastral » ouvre l'extrait officiel du plan (DGFiP) pour la parcelle, généré à la demande par l'application PAINT du cabinet. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée."],
+        ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
+          ? "Société CESSÉE au répertoire Sirene, et pourtant encore inscrite à la documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation postérieure au 1er janvier " + millesime + ". À instruire avant toute reprise."
+          : "Société active au répertoire Sirene à la date de génération du présent document."} Source du statut : API Recherche d'Entreprises (gouv.fr), distincte des fichiers cadastraux.`],
         ['Contrôle de cohérence', `La contenance figure dans deux produits DGFiP distincts, mis à jour par des chaînes différentes : la matrice, qui porte la propriété, et le plan cadastral, qui porte la géométrie. Résultat sur ce relevé : ${coherence.concordantes} parcelle(s) concordante(s), ${coherence.notables} écart(s) notable(s), ${coherence.mineurs} écart(s) mineur(s), ${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s). Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Rappel : la contenance cadastrale n'est qu'indicative, seul un arpentage fait foi.`],
         ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
         ['Liens cartographiques', (() => {
@@ -993,7 +1126,10 @@ export default function App() {
       doc.setTextColor(...GREYBLUE);
       doc.text(`SIREN : ${selectedCompany?.siren} • ${formeJuridiqueAffichee()}`, margin, bandH + 18);
       doc.setFontSize(7.5);
-      doc.text(libelleFiltre.charAt(0).toUpperCase() + libelleFiltre.slice(1), margin, bandH + 23);
+      doc.text(libelleFiltre.charAt(0).toUpperCase() + libelleFiltre.slice(1)
+        + (selectedCompany?.statut === 'Cessée'
+          ? ' — SOCIÉTÉ CESSÉE au répertoire Sirene, encore inscrite à la documentation cadastrale'
+          : ''), margin, bandH + 23);
       doc.setFontSize(9);
       doc.setTextColor(...NAVY);
       doc.text(dateStr, pageWidth - margin, bandH + 18, { align: 'right' });
@@ -1329,14 +1465,28 @@ export default function App() {
               <div className="p-6">
                 <div className="flex items-center gap-2 text-xs text-amber-400 mb-2"><FileText className="w-3.5 h-3.5" />RAPPORT REDPAR</div>
                 <h2 className="text-2xl font-semibold mb-1">{selectedCompany?.nom}</h2>
-                <div className="text-sm text-blue-200">
-                  SIREN : <span className="font-mono text-white">{selectedCompany?.siren}</span>
-                  {' • '}
+                <div className="text-sm text-blue-200 flex items-center gap-2 flex-wrap">
+                  <span>SIREN : <span className="font-mono text-white">{selectedCompany?.siren}</span></span>
+                  {selectedCompany?.statut && (
+                    <span className={`text-xs px-2 py-0.5 rounded border ${selectedCompany.statut === 'Active'
+                      ? 'bg-green-900/40 text-green-200 border-green-700'
+                      : 'bg-amber-400 text-blue-950 border-amber-300 font-semibold'}`}>
+                      {selectedCompany.statut}
+                    </span>
+                  )}
+                  <span>{' • '}</span>
                   {/* L'API Recherche d'Entreprises ne renvoie pas toujours la forme
                       juridique (« N/C ») : on retombe alors sur celle des fichiers
                       DGFiP, avec son code entre parenthèses pour rester vérifiable. */}
-                  {formeJuridiqueAffichee()}
+                  <span>{formeJuridiqueAffichee()}</span>
                 </div>
+                {selectedCompany?.statut === 'Cessée' && (
+                  <div className="mt-3 text-xs bg-amber-400 text-blue-950 rounded-lg px-3 py-2">
+                    <strong>Société cessée</strong> au répertoire Sirene, et pourtant encore inscrite à la
+                    documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation
+                    postérieure au 1er janvier {millesime}. À instruire avant toute reprise.
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1586,6 +1736,7 @@ export default function App() {
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Écart</th>
                             <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Ampleur</th>
+                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Extrait</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -1608,6 +1759,13 @@ export default function App() {
                                     {o._classe === 'notable' ? 'notable' : 'mineur'} · {pct > 0 ? '+' : ''}{pct.toFixed(1)} %
                                   </span>
                                 </td>
+                                <td className="px-4 py-3 text-center">
+                                  {lienExtraitCadastral(o.codeParcelle) && (
+                                    <a href={lienExtraitCadastral(o.codeParcelle)} target="_blank" rel="noreferrer"
+                                      title="Extrait cadastral officiel (DGFiP), pour vérifier l'écart sur le plan"
+                                      className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
+                                  )}
+                                </td>
                               </tr>
                             );
                           })}
@@ -1621,24 +1779,32 @@ export default function App() {
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <MapPin className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950">Détail des parcelles</h3>
+                    <input value={qParcelles} onChange={(e) => setQParcelles(e.target.value)}
+                      placeholder="Rechercher : commune, adresse, référence, droit..."
+                      className="ml-2 px-3 py-1.5 text-sm border border-stone-300 rounded-lg w-72 focus:outline-none focus:border-blue-900" />
+                    {qParcelles && (
+                      <span className="text-xs text-stone-500">{parcellesAffichees.length.toLocaleString('fr-FR')} sur {parcelles.length.toLocaleString('fr-FR')}</span>
+                    )}
                     <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Fichiers DGFiP des personnes morales — millésime 2025</span>
                   </div>
                   <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
                         <tr>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">#</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Référence</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Département</th>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
-                          <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Surface</th>
-                          <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Nature</th>
-                          <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Carte</th>
+                          <EnTete label="#" champ="" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Référence" champ="codeParcelle" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Commune" champ="commune" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Département" champ="departement" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Adresse" champ="adresse" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Surface" champ="contenance" tri={triParcelles} onTri={setTriParcelles} align="text-right" />
+                          <EnTete label="Nature" champ="natureCulture" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
+                          <EnTete label="Droit" champ="codeDroit" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Carte" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
+                          <EnTete label="Extrait" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                         </tr>
                       </thead>
                       <tbody>
-                        {parcelles.map((p, i) => {
+                        {parcellesAffichees.map((p, i) => {
                           const link = buildSatelliteLink(p.coordonnees);
                           return (
                             <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
@@ -1649,9 +1815,17 @@ export default function App() {
                               <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
                               <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
                               <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
+                              <td className="px-4 py-3 text-stone-600 text-xs">{p.codeDroit}</td>
                               <td className="px-4 py-3 text-center">
                                 {link && (
                                   <a href={link} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 underline text-xs font-medium">Voir</a>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {lienExtraitCadastral(p.codeParcelle) && (
+                                  <a href={lienExtraitCadastral(p.codeParcelle)} target="_blank" rel="noreferrer"
+                                    title="Extrait cadastral officiel (DGFiP), généré à la demande"
+                                    className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                 )}
                               </td>
                             </tr>
@@ -1666,7 +1840,20 @@ export default function App() {
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <Building2 className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950">Détail des locaux</h3>
-                    <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Volet bâti — millésime 2025</span>
+                    <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Volet bâti — millésime {millesime}</span>
+                    <input value={qLocaux} onChange={(e) => setQLocaux(e.target.value)}
+                      placeholder="Rechercher : commune, adresse, référence..."
+                      className="ml-2 px-3 py-1.5 text-sm border border-stone-300 rounded-lg w-64 focus:outline-none focus:border-blue-900" />
+                    <div className="flex rounded-lg overflow-hidden border border-stone-300 text-xs">
+                      <button onClick={() => setLocauxGroupes(true)}
+                        className={`px-3 py-1.5 ${locauxGroupes ? 'bg-blue-950 text-amber-400 font-medium' : 'bg-white text-stone-600'}`}>
+                        par immeuble
+                      </button>
+                      <button onClick={() => setLocauxGroupes(false)}
+                        className={`px-3 py-1.5 ${!locauxGroupes ? 'bg-blue-950 text-amber-400 font-medium' : 'bg-white text-stone-600'}`}>
+                        lot par lot
+                      </button>
+                    </div>
                     {!locauxLoading && locaux.length > 0 && (
                       <span className="ml-auto text-xs text-stone-500">Inclus dans l'export Excel, onglet « Locaux »</span>
                     )}
@@ -1692,37 +1879,70 @@ export default function App() {
                   {!locauxLoading && locaux.length > 0 && (
                     <>
                       <div className="px-6 py-3 border-b border-stone-200 text-xs text-stone-500">
-                        {totalLocaux.toLocaleString('fr-FR')} lot{totalLocaux > 1 ? 's' : ''} sur {immeubles.toLocaleString('fr-FR')} parcelle{immeubles > 1 ? 's' : ''} bâtie{immeubles > 1 ? 's' : ''}. Un même lot peut figurer deux fois à des titres de droit différents.
+                        {locaux.length.toLocaleString('fr-FR')} lot{locaux.length > 1 ? 's' : ''} sur {immeubles.toLocaleString('fr-FR')} parcelle{immeubles > 1 ? 's' : ''} bâtie{immeubles > 1 ? 's' : ''}.
+                        {qLocaux && ` Filtre actif : ${(locauxGroupes ? immeublesAffiches.length : locauxAffiches.length).toLocaleString('fr-FR')} ligne(s) affichée(s).`}
+                        {' '}Un même lot peut figurer deux fois à des titres de droit différents.
                       </div>
                       <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                         <table className="w-full text-sm">
                           <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
-                            <tr>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">#</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Parcelle</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
-                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Bât.</th>
-                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Entrée</th>
-                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Niv.</th>
-                              <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Porte</th>
-                              <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Droit</th>
-                            </tr>
+                            {locauxGroupes ? (
+                              <tr>
+                                <EnTete label="#" champ="" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Lots" champ="nbLots" tri={triLocaux} onTri={setTriLocaux} align="text-right" />
+                                <EnTete label="Bâtiments" champ="batimentsTxt" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
+                                <EnTete label="Titres" champ="titresTxt" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Extrait" champ="" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
+                              </tr>
+                            ) : (
+                              <tr>
+                                <EnTete label="#" champ="" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Bât." champ="batiment" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
+                                <EnTete label="Entrée" champ="entree" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
+                                <EnTete label="Niv." champ="niveau" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
+                                <EnTete label="Porte" champ="porte" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
+                                <EnTete label="Droit" champ="codeDroit" tri={triLocaux} onTri={setTriLocaux} />
+                              </tr>
+                            )}
                           </thead>
                           <tbody>
-                            {locaux.map((l, i) => (
-                              <tr key={(l.codeParcelle || '') + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
-                                <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                                <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
-                                <td className="px-4 py-3 text-blue-950">{l.commune}</td>
-                                <td className="px-4 py-3 text-blue-950 text-xs">{l.adresse}</td>
-                                <td className="px-4 py-3 text-center text-blue-950">{l.batiment}</td>
-                                <td className="px-4 py-3 text-center text-blue-950">{l.entree}</td>
-                                <td className="px-4 py-3 text-center text-blue-950">{l.niveau}</td>
-                                <td className="px-4 py-3 text-center text-blue-950">{l.porte}</td>
-                                <td className="px-4 py-3 text-stone-600 text-xs">{l.codeDroit}</td>
-                              </tr>
-                            ))}
+                            {locauxGroupes
+                              ? immeublesAffiches.map((im, i) => (
+                                <tr key={(im.codeParcelle || '') + '-g' + i} className="border-b border-stone-100 hover:bg-stone-50">
+                                  <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
+                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{im.codeParcelle}</td>
+                                  <td className="px-4 py-3 text-blue-950">{im.commune}</td>
+                                  <td className="px-4 py-3 text-blue-950 text-xs">{im.adresse}</td>
+                                  <td className="px-4 py-3 text-right text-blue-950 font-medium whitespace-nowrap">{im.nbLots.toLocaleString('fr-FR')}</td>
+                                  <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
+                                  <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
+                                  <td className="px-4 py-3 text-center">
+                                    {lienExtraitCadastral(im.codeParcelle) && (
+                                      <a href={lienExtraitCadastral(im.codeParcelle)} target="_blank" rel="noreferrer"
+                                        className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
+                                    )}
+                                  </td>
+                                </tr>
+                              ))
+                              : locauxAffiches.map((l, i) => (
+                                <tr key={(l.codeParcelle || '') + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
+                                  <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
+                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
+                                  <td className="px-4 py-3 text-blue-950">{l.commune}</td>
+                                  <td className="px-4 py-3 text-blue-950 text-xs">{l.adresse}</td>
+                                  <td className="px-4 py-3 text-center text-blue-950">{l.batiment}</td>
+                                  <td className="px-4 py-3 text-center text-blue-950">{l.entree}</td>
+                                  <td className="px-4 py-3 text-center text-blue-950">{l.niveau}</td>
+                                  <td className="px-4 py-3 text-center text-blue-950">{l.porte}</td>
+                                  <td className="px-4 py-3 text-stone-600 text-xs">{l.codeDroit}</td>
+                                </tr>
+                              ))}
                           </tbody>
                         </table>
                       </div>
