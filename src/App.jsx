@@ -18,24 +18,7 @@ const PAINT_URL = 'https://paint-blue.vercel.app';
 // à annoter et à exporter — c'est l'outil de travail.
 // Dans le classeur : on pointe le PDF brut, parce qu'un tableur remis à un tiers
 // doit livrer une pièce, pas ouvrir une application du cabinet.
-// Échelle choisie d'après la CONTENANCE, que REDPAR connaît. C'est décisif : à
-// 1/1000, une parcelle de 45 m² en centre-ville est minuscule, son numéro est
-// collé aux voisins, et le remplissage automatique part dans la rue. Une échelle
-// rapprochée agrandit la parcelle et fiabilise le repérage.
-// Un extrait A4 couvre environ 17 cm de largeur utile, soit 17 × N centimètres
-// sur le terrain ; on vise une parcelle occupant une part lisible du cadre.
-// Valeurs limitées à celles que propose PAINT : 200, 500, 1000, 2000, 5000.
-const echellePourContenance = (m2) => {
-  const a = Number(m2 || 0);
-  if (!a) return '1000';
-  if (a < 300) return '200';        // largeur du cadre ~34 m
-  if (a < 3000) return '500';       // ~85 m
-  if (a < 30000) return '1000';     // ~170 m
-  if (a < 300000) return '2000';    // ~340 m
-  return '5000';                    // ~850 m
-};
-
-const lienPaintColorise = (codeParcelle, nomCommune, contenance) => {
+const lienPaintColorise = (codeParcelle, nomCommune) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
   const qs = new URLSearchParams({
@@ -44,7 +27,9 @@ const lienPaintColorise = (codeParcelle, nomCommune, contenance) => {
     prefixe: r.slice(5, 8),
     section: r.slice(8, 10),
     parcelle: r.slice(10, 14),
-    echelle: echellePourContenance(contenance),
+    // Échelle FIXE à 1/1000 : c'est le standard des éditions du cabinet, et
+  // l'homogénéité d'un dossier primait sur le confort de détection.
+  echelle: '1000',
     format: 'A4|portrait',
     auto: '1',
   });
@@ -1798,8 +1783,8 @@ export default function App() {
                                   </span>
                                 </td>
                                 <td className="px-4 py-3 text-center">
-                                  {lienPaintColorise(o.codeParcelle, o.commune, o.contenance) && (
-                                    <a href={lienPaintColorise(o.codeParcelle, o.commune, o.contenance)} target="_blank" rel="noreferrer"
+                                  {lienPaintColorise(o.codeParcelle, o.commune) && (
+                                    <a href={lienPaintColorise(o.codeParcelle, o.commune)} target="_blank" rel="noreferrer"
                                       title="Ouvre PAINT pour confronter l'écart au plan, parcelle déjà coloriée"
                                       className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                   )}
@@ -1860,8 +1845,8 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienPaintColorise(p.codeParcelle, p.commune, p.contenance) && (
-                                  <a href={lienPaintColorise(p.codeParcelle, p.commune, p.contenance)} target="_blank" rel="noreferrer"
+                                {lienPaintColorise(p.codeParcelle, p.commune) && (
+                                  <a href={lienPaintColorise(p.codeParcelle, p.commune)} target="_blank" rel="noreferrer"
                                     title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
                                     className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                 )}
@@ -1961,8 +1946,8 @@ export default function App() {
                                   <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
                                   <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
                                   <td className="px-4 py-3 text-center">
-                                    {lienPaintColorise(im.codeParcelle, im.commune, im.contenance) && (
-                                      <a href={lienPaintColorise(im.codeParcelle, im.commune, im.contenance)} target="_blank" rel="noreferrer"
+                                    {lienPaintColorise(im.codeParcelle, im.commune) && (
+                                      <a href={lienPaintColorise(im.codeParcelle, im.commune)} target="_blank" rel="noreferrer"
                                         title="Ouvre PAINT : extrait généré et parcelle coloriée"
                                         className="text-teal-700 hover:text-teal-600 underline text-xs font-medium">Plan</a>
                                     )}
