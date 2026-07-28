@@ -66,6 +66,37 @@ const versConiqueConforme = (lat, lon) => {
   return { zone: z, X: X0 + r * Math.sin(theta), Y: Y0 + r0 - r * Math.cos(theta) };
 };
 
+// Simplification de Douglas-Peucker. Nécessaire parce que le contour voyage dans
+// une URL, et qu'Excel plafonne ses liens hypertexte à environ 2 000 caractères :
+// on ne peut pas y mettre deux cents sommets. Une tolérance d'un demi-mètre est
+// insensible à l'échelle d'un extrait cadastral, et l'on plafonne à 40 points.
+const simplifier = (pts, tol) => {
+  if (pts.length <= 2) return pts;
+  const dist2 = (p, a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    if (dx === 0 && dy === 0) return (p[0] - a[0]) ** 2 + (p[1] - a[1]) ** 2;
+    let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy);
+    t = Math.max(0, Math.min(1, t));
+    return (p[0] - (a[0] + t * dx)) ** 2 + (p[1] - (a[1] + t * dy)) ** 2;
+  };
+  const garder = new Array(pts.length).fill(false);
+  garder[0] = garder[pts.length - 1] = true;
+  const pile = [[0, pts.length - 1]];
+  while (pile.length) {
+    const [i, j] = pile.pop();
+    let pire = -1, dPire = 0;
+    for (let k = i + 1; k < j; k++) {
+      const d = dist2(pts[k], pts[i], pts[j]);
+      if (d > dPire) { dPire = d; pire = k; }
+    }
+    if (pire > 0 && dPire > tol * tol) {
+      garder[pire] = true;
+      pile.push([i, pire], [pire, j]);
+    }
+  }
+  return pts.filter((_, i) => garder[i]);
+};
+
 // Point GARANTI INTÉRIEUR au polygone. Le centroïde suffit dans la plupart des
 // cas, mais il tombe hors d'une parcelle concave ou en L : on le teste, et à
 // défaut on balaie la boîte englobante pour trouver un point intérieur.
@@ -130,16 +161,40 @@ const descripteursForme = (geom) => {
   const largeur = Math.max(...xs) - Math.min(...xs);
   const hauteur = Math.max(...ys) - Math.min(...ys);
   if (!(largeur > 0) || !(hauteur > 0)) return null;
-  // Point intérieur, projeté en conique conforme : c'est lui qui rend la
-  // colorisation déterministe côté PAINT.
+  // Point intérieur, projeté en conique conforme.
   const pi = pointInterieur(anneau);
   const cc = pi ? versConiqueConforme(pi[1], pi[0]) : null;
+
+  // CONTOUR PROJETÉ, sommet par sommet. C'est lui qui permet à PAINT de PEINDRE
+  // le polygone au lieu de le tracer par remplissage. Décisif en rural : les
+  // limites y sont dessinées en traits d'axe interrompus — tirets et points —
+  // qu'un remplissage traverse. Observé à Pusey : 42 % du plan atteint.
+  // Simplifié à 40 sommets au plus, contrainte des liens hypertexte d'Excel.
+  let poly = null;
+  if (cc) {
+    const projetes = [];
+    for (const [lo, la] of anneau) {
+      const q = versConiqueConforme(la, lo);
+      if (!q || q.zone !== cc.zone) { projetes.length = 0; break; }
+      projetes.push([q.X, q.Y]);
+    }
+    if (projetes.length >= 4) {
+      let reduit = simplifier(projetes, 0.5);
+      // Si la tolérance d'un demi-mètre ne suffit pas, on la desserre par paliers
+      // jusqu'à tenir dans quarante sommets.
+      for (let tol = 1; reduit.length > 40 && tol <= 32; tol *= 2) {
+        reduit = simplifier(projetes, tol);
+      }
+      poly = reduit.slice(0, 40);
+    }
+  }
   return {
     largeur: Math.round(largeur * 10) / 10,
     hauteur: Math.round(hauteur * 10) / 10,
     aire: Math.round(aire),
     remplissage: Math.round(100 * aire / (largeur * hauteur)) / 100,
     cc,
+    poly,
   };
 };
 
@@ -249,6 +304,11 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom) => {
     if (f.cc) {
       qs.set('pt', `${f.cc.X.toFixed(1)},${f.cc.Y.toFixed(1)}`);
       qs.set('crs', `CC${f.cc.zone}`);
+      // Contour projeté : PAINT peint le polygone plutôt que de le tracer par
+      // remplissage, ce qui le rend insensible aux traits de limite interrompus.
+      if (f.poly) {
+        qs.set('poly', f.poly.map(([X, Y]) => `${X.toFixed(1)},${Y.toFixed(1)}`).join(';'));
+      }
     }
   }
   return `${PAINT_URL}/?${qs.toString()}`;
