@@ -18,6 +18,89 @@ const PAINT_URL = 'https://paint-blue.vercel.app';
 // à annoter et à exporter — c'est l'outil de travail.
 // Dans le classeur : on pointe le PDF brut, parce qu'un tableur remis à un tiers
 // doit livrer une pièce, pas ouvrir une application du cabinet.
+// ----------------------------------------------------------------------
+// PROJECTION CONIQUE CONFORME DE LAMBERT — méthode EPSG 9802, ellipsoïde GRS80
+// Les extraits DGFiP portent leurs coordonnées en projection conique conforme
+// (RGF93CC50 pour Saint-Omer). Convertir le contour dans cette projection
+// permet à PAINT de savoir EXACTEMENT quels pixels appartiennent à la parcelle,
+// par simple application du géoréférencement qu'il lit en marge du plan.
+// Neuf zones : CC42 à CC50. Parallèle d'origine = numéro de zone, parallèles
+// automécoïques à ±0,75°, méridien central 3° Est, constante en X 1 700 000 m,
+// constante en Y (zone − 41) millions + 200 000.
+// Vérifié contre le géoréférencement mesuré sur la planche de Saint-Omer : le
+// centroïde d'AV 1 se projette en X 1 647 577 / Y 9 283 388, soit exactement
+// entre les étiquettes 1647500-1647600 et 9283300-9283400, et au centre du
+// cadre — là où l'extrait est effectivement centré.
+// ⚠ LIMITE : cette projection ne couvre que la métropole et la Corse. Appliquée
+// à Pointe-à-Pitre elle donne X = −5 170 838, valeur absurde. D'où la garde de
+// latitude ci-dessous ; les départements d'outre-mer emploient d'autres
+// projections et retomberont sur la détection par taille.
+// ----------------------------------------------------------------------
+const LAMBERT_A = 6378137.0;
+const LAMBERT_APLAT = 1 / 298.257222101;
+const LAMBERT_E2 = 2 * LAMBERT_APLAT - LAMBERT_APLAT * LAMBERT_APLAT;
+const LAMBERT_E = Math.sqrt(LAMBERT_E2);
+const enRad = (d) => d * Math.PI / 180;
+const tIsometrique = (phi) => {
+  const s = Math.sin(phi);
+  return Math.tan(Math.PI / 4 - phi / 2)
+    / Math.pow((1 - LAMBERT_E * s) / (1 + LAMBERT_E * s), LAMBERT_E / 2);
+};
+const mParallele = (phi) =>
+  Math.cos(phi) / Math.sqrt(1 - LAMBERT_E2 * Math.sin(phi) ** 2);
+
+const versConiqueConforme = (lat, lon) => {
+  if (!(lat > 41 && lat < 52)) return null;          // hors métropole et Corse
+  const z = Math.min(50, Math.max(42, Math.round(lat)));
+  const phi0 = enRad(z), phi1 = enRad(z - 0.75), phi2 = enRad(z + 0.75), lam0 = enRad(3);
+  const X0 = 1700000, Y0 = (z - 41) * 1000000 + 200000;
+  const phi = enRad(lat), lam = enRad(lon);
+  const m1 = mParallele(phi1), m2 = mParallele(phi2);
+  const t1 = tIsometrique(phi1), t2 = tIsometrique(phi2);
+  const t0 = tIsometrique(phi0), t = tIsometrique(phi);
+  const n = (Math.log(m1) - Math.log(m2)) / (Math.log(t1) - Math.log(t2));
+  const Fc = m1 / (n * Math.pow(t1, n));
+  const r0 = LAMBERT_A * Fc * Math.pow(t0, n);
+  const r = LAMBERT_A * Fc * Math.pow(t, n);
+  const theta = n * (lam - lam0);
+  return { zone: z, X: X0 + r * Math.sin(theta), Y: Y0 + r0 - r * Math.cos(theta) };
+};
+
+// Point GARANTI INTÉRIEUR au polygone. Le centroïde suffit dans la plupart des
+// cas, mais il tombe hors d'une parcelle concave ou en L : on le teste, et à
+// défaut on balaie la boîte englobante pour trouver un point intérieur.
+const dansPolygone = (x, y, anneau) => {
+  let dedans = false;
+  for (let i = 0, j = anneau.length - 2; i < anneau.length - 1; j = i++) {
+    const [xi, yi] = anneau[i], [xj, yj] = anneau[j];
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) dedans = !dedans;
+  }
+  return dedans;
+};
+
+const pointInterieur = (anneau) => {
+  let a = 0, cx = 0, cy = 0;
+  for (let i = 0; i < anneau.length - 1; i++) {
+    const [x0, y0] = anneau[i], [x1, y1] = anneau[i + 1];
+    const f = x0 * y1 - x1 * y0;
+    a += f; cx += (x0 + x1) * f; cy += (y0 + y1) * f;
+  }
+  if (a !== 0) {
+    const c = [cx / (3 * a), cy / (3 * a)];
+    if (dansPolygone(c[0], c[1], anneau)) return c;
+  }
+  const xs = anneau.map((q) => q[0]), ys = anneau.map((q) => q[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  for (let i = 1; i < 8; i++) {
+    for (let j = 1; j < 8; j++) {
+      const x = x0 + (x1 - x0) * i / 8, y = y0 + (y1 - y0) * j / 8;
+      if (dansPolygone(x, y, anneau)) return [x, y];
+    }
+  }
+  return null;
+};
+
 // Descripteurs métriques d'une parcelle, calculés sur son contour cadastral.
 // Ils permettent à PAINT de PRÉDIRE la taille attendue de la parcelle en pixels
 // au lieu de la deviner : un extrait A4 à 1/1000 couvre 210 m de largeur, donc
@@ -47,11 +130,16 @@ const descripteursForme = (geom) => {
   const largeur = Math.max(...xs) - Math.min(...xs);
   const hauteur = Math.max(...ys) - Math.min(...ys);
   if (!(largeur > 0) || !(hauteur > 0)) return null;
+  // Point intérieur, projeté en conique conforme : c'est lui qui rend la
+  // colorisation déterministe côté PAINT.
+  const pi = pointInterieur(anneau);
+  const cc = pi ? versConiqueConforme(pi[1], pi[0]) : null;
   return {
     largeur: Math.round(largeur * 10) / 10,
     hauteur: Math.round(hauteur * 10) / 10,
     aire: Math.round(aire),
     remplissage: Math.round(100 * aire / (largeur * hauteur)) / 100,
+    cc,
   };
 };
 
@@ -83,6 +171,13 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom) => {
     qs.set('dim', `${f.largeur}x${f.hauteur}`);
     qs.set('surface', String(f.aire));
     qs.set('remplissage', String(f.remplissage));
+    // Point intérieur en coordonnées projetées : PAINT le confronte au
+    // géoréférencement qu'il lit en marge de l'extrait, et sait alors
+    // exactement où amorcer le remplissage.
+    if (f.cc) {
+      qs.set('pt', `${f.cc.X.toFixed(1)},${f.cc.Y.toFixed(1)}`);
+      qs.set('crs', `CC${f.cc.zone}`);
+    }
   }
   return `${PAINT_URL}/?${qs.toString()}`;
 };
