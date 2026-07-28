@@ -1077,6 +1077,14 @@ export default function App() {
     };
   })();
 
+  // Unités foncières, calculées sur les parcelles AFFICHÉES — donc dans le
+  // périmètre des titres de droit retenus, ce qui est cohérent avec l'exigence
+  // d'identité de propriétaire.
+  // DÉCLARÉE ICI, ET NON PLUS BAS : les vues des tableaux joignent le numéro
+  // d'unité à chaque ligne, donc elles la consomment. Une constante lue avant son
+  // initialisation lève une exception et laisse un écran blanc.
+  const unitesF = calculerUnites(parcelles, contours);
+
   // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
   // exports continuent de porter sur l'ensemble — seul l'affichage est réduit,
   // sans quoi un filtre de lecture fausserait un livrable.
@@ -1117,11 +1125,6 @@ export default function App() {
     filtrerTexte(immeublesListe, qLocaux,
       ['codeParcelle', 'commune', 'departement', 'adresse', 'batimentsTxt', 'titresTxt']),
     triLocaux);
-
-  // Unités foncières, calculées sur les parcelles AFFICHÉES — donc dans le
-  // périmètre des titres de droit retenus, ce qui est cohérent avec l'exigence
-  // d'identité de propriétaire.
-  const unitesF = calculerUnites(parcelles, contours);
 
   // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
   // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
@@ -1369,8 +1372,8 @@ export default function App() {
           widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
-          aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13,
-            centre2: c === 15, nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
+          aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13 || c === 15,
+            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
