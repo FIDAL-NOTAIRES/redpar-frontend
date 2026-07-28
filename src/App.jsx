@@ -299,6 +299,101 @@ const designationCadastrale = (codeParcelle) => {
     + `Section ${section} — Parcelle n° ${numero}`;
 };
 
+// ----------------------------------------------------------------------
+// LIEN D'UNITÉ FONCIÈRE : un plan, toutes les parcelles de l'unité
+// Trois différences avec le lien d'une parcelle seule :
+//  — plusieurs contours sont transmis, séparés par une barre verticale ;
+//  — l'échelle est choisie sur l'emprise de l'UNITÉ ENTIÈRE ;
+//  — l'extrait est RECENTRÉ sur l'unité par les paramètres x et y, que
+//    api/extrait.js substitue au centre de la parcelle demandée. Sans cela une
+//    unité vaste sortirait du cadre, puisque le service centre sur la parcelle.
+// Le budget de sommets est GLOBAL et réparti entre les parcelles : à 1/5000 un
+// pixel vaut 0,6 m, donc une tolérance d'un demi-pixel est visuellement sans
+// perte, et l'on desserre par paliers jusqu'à tenir dans le budget.
+// CE LIEN EST RÉSERVÉ À L'ÉCRAN : un contour d'unité peut représenter plusieurs
+// milliers de caractères, ce qu'un navigateur accepte mais qu'Excel plafonne
+// autour de deux mille. Le classeur garde donc ses liens par parcelle.
+// ----------------------------------------------------------------------
+// 250 sommets et non 400 : un sommet coûte une vingtaine de caractères d'URL, et
+// une unité de douze parcelles atteignait huit mille caractères — au-delà de ce
+// que certains serveurs acceptent dans une ligne de requête. À 250, on reste sous
+// cinq mille, ce qui laisse de la marge tout en conservant un tracé fidèle.
+const BUDGET_SOMMETS = 250;
+
+const lienPaintUnite = (membres, parParcelle, contours, nomCommune) => {
+  if (!membres || membres.length < 2 || !contours) return null;
+  const geoms = membres.map((r) => contours.get(r)).filter(Boolean);
+  if (geoms.length < 2) return null;
+
+  let zone = null, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const projetes = [];
+  for (const g of geoms) {
+    const anneaux = anneauxDe(g);
+    if (!anneaux.length) return null;
+    const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
+    const pts = [];
+    for (const [lo, la] of ext) {
+      const q = versConiqueConforme(la, lo);
+      if (!q) return null;
+      if (zone === null) zone = q.zone;
+      if (q.zone !== zone) return null;      // unité à cheval sur deux zones
+      pts.push([q.X, q.Y]);
+      if (q.X < minX) minX = q.X;
+      if (q.X > maxX) maxX = q.X;
+      if (q.Y < minY) minY = q.Y;
+      if (q.Y > maxY) maxY = q.Y;
+    }
+    projetes.push(pts);
+  }
+  const largeur = Math.round((maxX - minX) * 10) / 10;
+  const hauteur = Math.round((maxY - minY) * 10) / 10;
+  const ef = choisirEchelle(largeur, hauteur);
+
+  const mParPixel = (/paysage/.test(ef.format) ? 0.297 : 0.210) * Number(ef.echelle) / 1700;
+  let tol = Math.max(0.2, mParPixel / 2);
+  let reduits = projetes.map((pts) => simplifier(pts, tol));
+  for (let i = 0; i < 8 && reduits.reduce((t, a) => t + a.length, 0) > BUDGET_SOMMETS; i++) {
+    tol *= 2;
+    reduits = projetes.map((pts) => simplifier(pts, tol));
+  }
+
+  const membre = membres.find((r) => contours.get(r)) || membres[0];
+  const r = String(membre);
+  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
+  const qs = new URLSearchParams({
+    commune: r.slice(0, 5),
+    nomCommune: nomCommune || '',
+    prefixe: r.slice(5, 8),
+    section: r.slice(8, 10),
+    parcelle: r.slice(10, 14),
+    echelle: ef.echelle,
+    format: ef.format,
+    couleur: '#A01040',
+    x: cx.toFixed(1),
+    y: cy.toFixed(1),
+    pt: `${cx.toFixed(1)},${cy.toFixed(1)}`,
+    crs: `CC${zone}`,
+    dim: `${largeur}x${hauteur}`,
+    poly: reduits.map((pts) => pts.map(([X, Y]) => `${X.toFixed(1)},${Y.toFixed(1)}`).join(';')).join('|'),
+  });
+  if (!ef.deborde) qs.set('auto', '1');
+
+  const rangs = [];
+  let somme = 0;
+  membres.forEach((ref) => {
+    const sn = sectionEtNumero(ref);
+    if (!sn) return;
+    const m2 = Number(parParcelle.get(ref)) || 0;
+    somme += m2;
+    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''}`);
+  });
+  if (rangs.length) {
+    qs.set('tab', rangs.join(';'));
+    if (somme > 0) qs.set('total', contenanceNotariale(somme));
+  }
+  return `${PAINT_URL}/?${qs.toString()}`;
+};
+
 const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
@@ -1084,6 +1179,14 @@ export default function App() {
   // d'unité à chaque ligne, donc elles la consomment. Une constante lue avant son
   // initialisation lève une exception et laisse un écran blanc.
   const unitesF = calculerUnites(parcelles, contours);
+  // Contenance de la matrice par référence : alimente le tableau de l'unité.
+  const surfaceParRef = (() => {
+    const m = new Map();
+    parcelles.forEach((o) => {
+      if (o.codeParcelle && !m.has(o.codeParcelle)) m.set(o.codeParcelle, Number(o.contenance) || 0);
+    });
+    return m;
+  })();
 
   // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
   // exports continuent de porter sur l'ensemble — seul l'affichage est réduit,
@@ -2262,6 +2365,7 @@ export default function App() {
                     Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
                     {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les lots détenus sur la parcelle.
                     {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
+                    {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
                     {geoStatus?.termine && geoStatus.trouvees < (geoStatus.demandees || 0) && (
                       <span className="text-amber-700"> {((geoStatus.demandees || 0) - geoStatus.trouvees).toLocaleString('fr-FR')} référence(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
                     )}
@@ -2436,14 +2540,30 @@ export default function App() {
                                   if (!n) return <span className="text-stone-400">—</span>;
                                   const u = unitesF.unites[n - 1];
                                   const groupe = u.membres.length > 1;
-                                  return (
-                                    <span title={groupe
-                                      ? `Unité de ${u.membres.length} parcelles d'un seul tenant : ${u.membres.join(', ')}`
-                                      : 'Parcelle isolée, sans mitoyenneté dans ce portefeuille'}
-                                      className={groupe ? 'px-1.5 py-0.5 rounded border font-medium' : 'text-stone-500'}
+                                  const lienU = groupe
+                                    ? lienPaintUnite(u.membres, surfaceParRef, contours, p.commune)
+                                    : null;
+                                  const pastille = (
+                                    <span className={groupe ? 'px-1.5 py-0.5 rounded border font-medium' : 'text-stone-500'}
                                       style={groupe ? { backgroundColor: '#FDF2F6', color: '#A01040', borderColor: '#E8B9CB' } : undefined}>
                                       {n}{groupe ? ` · ${u.membres.length} p.` : ''}
                                     </span>
+                                  );
+                                  if (!lienU) {
+                                    return (
+                                      <span title={groupe
+                                        ? `Unité de ${u.membres.length} parcelles : ${u.membres.join(', ')}`
+                                        : 'Parcelle isolée, sans mitoyenneté dans ce portefeuille'}>
+                                        {pastille}
+                                      </span>
+                                    );
+                                  }
+                                  return (
+                                    <a href={lienU} target="_blank" rel="noreferrer"
+                                      title={`Éditer le plan de l'unité entière : ${u.membres.length} parcelles coloriées, `
+                                        + `désignation et total au cartouche — ${u.membres.join(', ')}`}>
+                                      {pastille}
+                                    </a>
                                   );
                                 })()}
                               </td>
