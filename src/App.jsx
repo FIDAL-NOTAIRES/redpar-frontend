@@ -274,6 +274,19 @@ const contenanceNotariale = (m2) => {
   return `${ha} ha ${deuxChiffres(ares)} a ${deuxChiffres(ca)} ca`;
 };
 
+// Section et numéro, extraits de la référence à 14 caractères, pour alimenter les
+// colonnes du tableau d'annotation. Les zéros de tête sont retirés, comme sur le
+// plan. Le préfixe est joint à la section quand il n'est pas 000, cas des communes
+// issues de fusion où il identifie l'ancienne commune.
+const sectionEtNumero = (codeParcelle) => {
+  const r = String(codeParcelle || '');
+  if (r.length !== 14) return null;
+  const prefixe = r.slice(5, 8);
+  const section = r.slice(8, 10).replace(/^0+/, '') || r.slice(8, 10);
+  const numero = r.slice(10, 14).replace(/^0+/, '') || '0';
+  return { section: prefixe !== '000' ? `${prefixe} ${section}` : section, numero };
+};
+
 // Désignation cadastrale lisible, à partir de la référence à 14 caractères.
 // Le préfixe n'est mentionné que s'il n'est pas 000 : il ne l'est que dans les
 // communes issues de fusion, où il identifie l'ancienne commune.
@@ -342,14 +355,30 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
   return `${PAINT_URL}/?${qs.toString()}`;
 };
 
-// Variante annotée : mêmes traitements, plus deux lignes portées sous le titre de
-// l'extrait — la désignation cadastrale, puis la contenance de la matrice.
-const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance) => {
-  const d = designationCadastrale(codeParcelle);
-  const c = Number(contenance) > 0
-    ? `Contenance cadastrale : ${contenanceNotariale(contenance)}`
-    : '';
-  return lienPaintColorise(codeParcelle, nomCommune, geom, [d, c]);
+// Variante annotée : mêmes traitements, plus un TABLEAU porté sous le titre de
+// l'extrait — une ligne par parcelle avec section, numéro et contenance, et une
+// ligne de total quand il y en a plusieurs.
+// Signature prévue pour les UNITÉS FONCIÈRES : elle accepte déjà une liste de
+// parcelles, même si l'interface n'en passe qu'une pour l'instant.
+const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres) => {
+  const liste = (autres && autres.length ? autres
+    : [{ codeParcelle, contenance }]).filter((o) => o && o.codeParcelle);
+  const rangs = [];
+  let somme = 0;
+  liste.forEach((o) => {
+    const sn = sectionEtNumero(o.codeParcelle);
+    if (!sn) return;
+    const m2 = Number(o.contenance) || 0;
+    somme += m2;
+    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''}`);
+  });
+  if (!rangs.length) return lienPaintColorise(codeParcelle, nomCommune, geom);
+  const sup = new URLSearchParams();
+  sup.set('tab', rangs.join(';'));
+  // Pas de ligne de total pour une parcelle seule : elle ferait doublon.
+  if (rangs.length > 1 && somme > 0) sup.set('total', contenanceNotariale(somme));
+  const base = lienPaintColorise(codeParcelle, nomCommune, geom);
+  return base + '&' + sup.toString();
 };
 
 const lienExtraitCadastral = (codeParcelle) => {
