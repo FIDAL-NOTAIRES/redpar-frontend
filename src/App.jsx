@@ -163,10 +163,11 @@ const descripteursForme = (geom) => {
 //  3. on n'offre d'abord à la parcelle que 60 % du cadre, pour qu'on voie son
 //     voisinage ; ce n'est qu'en dernier recours qu'on la laisse le remplir.
 //
-// Mesuré sur la base : 88,3 % des parcelles tiennent à 1/1000. Au-delà de
-// 1/5000 en A4 paysage il ne reste que 0,067 % des parcelles, et 0,002 %
-// au-delà d'un A3 à 1/25000 — pour l'essentiel des emprises forestières de
-// Guyane de 100 000 hectares, qui relèvent de la carte et non de l'extrait.
+// Mesuré sur la base : 88,3 % des parcelles tiennent à 1/1000. La couverture
+// maximale atteignable est l'A3 paysage à 1/5000, soit 1 580 × 1 415 m ; au-delà
+// il reste 0,025 % des parcelles, soit 4 649 sur 18,7 millions, pour l'essentiel
+// des emprises forestières de Guyane de 100 000 hectares — qui relèvent de la
+// carte et non de l'extrait cadastral.
 // ----------------------------------------------------------------------
 const CARTES = {
   'A4|portrait': { l: 195.5, h: 211.0, a3: false },
@@ -174,9 +175,14 @@ const CARTES = {
   'A3|portrait': { l: 281.5, h: 301.0, a3: true },
   'A3|paysage': { l: 316.0, h: 283.0, a3: true },
 };
-// 10000 et 25000 ne figurent pas dans le menu de PAINT mais l'endpoint ne borne
-// pas l'échelle : il la transmet telle quelle au service du cadastre.
-const ECHELLES = [1000, 1250, 1500, 2000, 2500, 4000, 5000, 10000, 25000];
+// PLAFOND À 1/5000, VÉRIFIÉ EXPÉRIMENTALEMENT le 28/07/2026 : une demande à
+// 1/10000 est SILENCIEUSEMENT SERVIE À 1/1000 par le service du cadastre. Pas de
+// refus, pas de message — le cartouche indique 1/1000 et le plan couvre dix fois
+// moins de terrain que demandé. Ne pas rétablir 10000 ni 25000 sans avoir
+// revérifié : la substitution est invisible et produirait un plan faux sur une
+// pièce de dossier. PAINT contrôle désormais l'échelle réellement délivrée en la
+// mesurant sur les étiquettes de coordonnées.
+const ECHELLES = [1000, 1250, 1500, 2000, 2500, 4000, 5000];
 
 const choisirEchelle = (largeurM, hauteurM) => {
   const L = Number(largeurM) || 0, H = Number(hauteurM) || 0;
