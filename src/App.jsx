@@ -262,7 +262,31 @@ const choisirEchelle = (largeurM, hauteurM) => {
   return { echelle: '25000', format: 'A3|paysage', occupation: 1, deborde: true };
 };
 
-const lienPaintColorise = (codeParcelle, nomCommune, geom) => {
+// Contenance dans la forme notariale : hectares, ares, centiares. Un are vaut
+// cent mètres carrés, un centiare un mètre carré. C'est la forme attendue dans
+// une désignation, et non le mètre carré brut.
+const contenanceNotariale = (m2) => {
+  const a = Math.max(0, Math.round(Number(m2) || 0));
+  const ha = Math.floor(a / 10000);
+  const ares = Math.floor((a % 10000) / 100);
+  const ca = a % 100;
+  const deuxChiffres = (n) => String(n).padStart(2, '0');
+  return `${ha} ha ${deuxChiffres(ares)} a ${deuxChiffres(ca)} ca`;
+};
+
+// Désignation cadastrale lisible, à partir de la référence à 14 caractères.
+// Le préfixe n'est mentionné que s'il n'est pas 000 : il ne l'est que dans les
+// communes issues de fusion, où il identifie l'ancienne commune.
+const designationCadastrale = (codeParcelle) => {
+  const r = String(codeParcelle || '');
+  if (r.length !== 14) return '';
+  const prefixe = r.slice(5, 8), section = r.slice(8, 10).replace(/^0+/, '') || r.slice(8, 10);
+  const numero = r.slice(10, 14).replace(/^0+/, '') || '0';
+  return (prefixe !== '000' ? `Préfixe ${prefixe} — ` : '')
+    + `Section ${section} — Parcelle n° ${numero}`;
+};
+
+const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
   const qs = new URLSearchParams({
@@ -311,7 +335,21 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom) => {
       }
     }
   }
+  // Annotations à porter sous le titre de l'extrait, séparées par une barre.
+  if (annotations && annotations.length) {
+    qs.set('annot', annotations.filter(Boolean).join('|'));
+  }
   return `${PAINT_URL}/?${qs.toString()}`;
+};
+
+// Variante annotée : mêmes traitements, plus deux lignes portées sous le titre de
+// l'extrait — la désignation cadastrale, puis la contenance de la matrice.
+const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance) => {
+  const d = designationCadastrale(codeParcelle);
+  const c = Number(contenance) > 0
+    ? `Contenance cadastrale : ${contenanceNotariale(contenance)}`
+    : '';
+  return lienPaintColorise(codeParcelle, nomCommune, geom, [d, c]);
 };
 
 const lienExtraitCadastral = (codeParcelle) => {
@@ -2188,7 +2226,8 @@ export default function App() {
                           <EnTete label="Nature" champ="natureCulture" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Droit" champ="codeDroit" tri={triParcelles} onTri={setTriParcelles} />
                           <EnTete label="Carte" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Extrait" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
+                          <EnTete label="Colorier" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
+                          <EnTete label="Annoté" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                         </tr>
                       </thead>
                       <tbody>
@@ -2214,6 +2253,13 @@ export default function App() {
                                   <a href={lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle))} target="_blank" rel="noreferrer"
                                     title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
                                     className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance) && (
+                                  <a href={lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance)} target="_blank" rel="noreferrer"
+                                    title="Plan colorié ET annoté : désignation cadastrale et contenance en hectares, ares, centiares portées sous le titre"
+                                    className="underline text-xs font-semibold" style={{ color: '#0F2238' }}>Annoté</a>
                                 )}
                               </td>
                             </tr>
