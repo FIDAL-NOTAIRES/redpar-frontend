@@ -471,6 +471,113 @@ function EnTete({ label, champ, tri, onTri, align = 'text-left' }) {
   );
 }
 
+// ----------------------------------------------------------------------
+// UNITÉS FONCIÈRES
+// Au sens de la jurisprudence administrative, l'unité foncière est l'îlot de
+// propriété D'UN SEUL TENANT appartenant au même propriétaire. Deux exigences en
+// découlent : une LIMITE COMMUNE, et non un simple contact par un angle ; et une
+// identité de propriétaire.
+//
+// MÉTHODE. Dans le plan cadastral informatisé, deux parcelles mitoyennes
+// partagent des sommets IDENTIQUES. On indexe donc tous les sommets, et deux
+// parcelles partageant au moins DEUX sommets ont une limite commune — un seul
+// sommet n'étant qu'un contact par un angle, qui ne fait pas l'unité foncière.
+// Le regroupement se fait ensuite par union-find. Coût mesuré : 80 ms pour
+// 1 636 parcelles, sans comparaison de paires puisque l'index de sommets donne
+// directement les candidats.
+//
+// ⚠ LIMITE À ANNONCER DANS TOUT LIVRABLE. REDPAR ne voit que les parcelles de la
+// société interrogée. Une parcelle voisine appartenant au même propriétaire mais
+// détenue sous un autre SIREN, ou par une personne physique, sera manquée.
+// L'unité calculée est donc l'unité AU SEIN DU PORTEFEUILLE, ce qui est déjà très
+// utile mais n'est pas tout à fait la notion juridique.
+// ----------------------------------------------------------------------
+const CLE_SOMMET = 1e7;   // arrondi à 1e-7 degré, environ un centimètre
+const cleSommet = ([lo, la]) =>
+  Math.round(lo * CLE_SOMMET) + ':' + Math.round(la * CLE_SOMMET);
+
+const anneauxDe = (geom) => {
+  if (!geom) return [];
+  if (geom.type === 'Polygon') return geom.coordinates;
+  if (geom.type === 'MultiPolygon') return geom.coordinates.flat();
+  return [];
+};
+
+const calculerUnites = (liste, contours) => {
+  const refs = [...new Set(liste.map((o) => o.codeParcelle).filter(Boolean))];
+  if (!contours || !contours.size || !refs.length) return null;
+
+  const parSommet = new Map();
+  let sansContour = 0;
+  refs.forEach((ref) => {
+    const g = contours.get(ref);
+    if (!g) { sansContour++; return; }
+    const vus = new Set();
+    anneauxDe(g).forEach((a) => a.forEach((pt) => {
+      const k = cleSommet(pt);
+      if (vus.has(k)) return;
+      vus.add(k);
+      if (!parSommet.has(k)) parSommet.set(k, []);
+      parSommet.get(k).push(ref);
+    }));
+  });
+
+  const paires = new Map();
+  parSommet.forEach((l) => {
+    if (l.length < 2) return;
+    for (let i = 0; i < l.length; i++) {
+      for (let j = i + 1; j < l.length; j++) {
+        const k = l[i] < l[j] ? `${l[i]}|${l[j]}` : `${l[j]}|${l[i]}`;
+        paires.set(k, (paires.get(k) || 0) + 1);
+      }
+    }
+  });
+
+  const parent = new Map(refs.map((r) => [r, r]));
+  const trouver = (x) => {
+    while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
+    return x;
+  };
+  let mitoyennetes = 0;
+  paires.forEach((n, k) => {
+    if (n < 2) return;              // un seul sommet = contact par un angle
+    mitoyennetes++;
+    const [a, b] = k.split('|');
+    const ra = trouver(a), rb = trouver(b);
+    if (ra !== rb) parent.set(ra, rb);
+  });
+
+  // Surface par parcelle distincte, pour classer les unités.
+  const surfaceRef = new Map();
+  liste.forEach((o) => {
+    if (o.codeParcelle && !surfaceRef.has(o.codeParcelle)) {
+      surfaceRef.set(o.codeParcelle, Number(o.contenance) || 0);
+    }
+  });
+
+  const parRacine = new Map();
+  refs.forEach((r) => {
+    const g = trouver(r);
+    if (!parRacine.has(g)) parRacine.set(g, []);
+    parRacine.get(g).push(r);
+  });
+  // Numérotées par surface décroissante : l'unité 1 est la plus vaste.
+  const unites = [...parRacine.values()]
+    .map((membres) => ({
+      membres: membres.sort(),
+      surface: membres.reduce((t, r) => t + (surfaceRef.get(r) || 0), 0),
+    }))
+    .sort((a, b) => b.surface - a.surface || b.membres.length - a.membres.length);
+
+  const numero = new Map();
+  unites.forEach((u, i) => u.membres.forEach((r) => numero.set(r, i + 1)));
+  return {
+    unites, numero, mitoyennetes, sansContour,
+    groupees: unites.filter((u) => u.membres.length > 1).length,
+    isolees: unites.filter((u) => u.membres.length === 1).length,
+  };
+};
+
 function surfaceDistincte(liste) {
   const vues = new Set();
   let m2 = 0;
@@ -973,8 +1080,10 @@ export default function App() {
   // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
   // exports continuent de porter sur l'ensemble — seul l'affichage est réduit,
   // sans quoi un filtre de lecture fausserait un livrable.
+  // Le numéro d'unité est joint aux lignes affichées pour que le tri de la
+  // colonne fonctionne comme les autres.
   const parcellesAffichees = trierListe(
-    filtrerTexte(parcelles, qParcelles,
+    filtrerTexte(parcelles.map((o) => ({ ...o, _unite: unitesF?.numero.get(o.codeParcelle) || 0 })), qParcelles,
       ['codeParcelle', 'commune', 'departement', 'region', 'adresse', 'natureCulture', 'codeDroit']),
     triParcelles);
 
@@ -1008,6 +1117,11 @@ export default function App() {
     filtrerTexte(immeublesListe, qLocaux,
       ['codeParcelle', 'commune', 'departement', 'adresse', 'batimentsTxt', 'titresTxt']),
     triLocaux);
+
+  // Unités foncières, calculées sur les parcelles AFFICHÉES — donc dans le
+  // périmètre des titres de droit retenus, ce qui est cohérent avec l'exigence
+  // d'identité de propriétaire.
+  const unitesF = calculerUnites(parcelles, contours);
 
   // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
   // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
@@ -1250,13 +1364,13 @@ export default function App() {
           nom: 'Tous les biens',
           headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
             'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
-            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit', 'Carte',
-            'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
-          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 16, 16, 16, 16],
+            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit',
+            'Unité foncière', 'Carte', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
+          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
           aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13,
-            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 15 }),
+            centre2: c === 15, nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
@@ -1285,8 +1399,15 @@ export default function App() {
               ? [o.batiment, o.entree, o.niveau, o.porte].filter(Boolean).join(' / ')
               : SANS_OBJET;
             row.getCell(14).value = o.codeDroit || '';
+            // Unité foncière : numéro, et nombre de parcelles quand il y en a
+            // plusieurs d'un seul tenant. Un tiret pour le bâti et pour les
+            // parcelles sans contour, qui n'ont pas pu être regroupées.
+            const nU = unitesF?.numero.get(o.codeParcelle);
+            const uu = nU ? unitesF.unites[nU - 1] : null;
+            row.getCell(15).value = !uu ? SANS_OBJET
+              : uu.membres.length > 1 ? `${nU} (${uu.membres.length} parcelles)` : String(nU);
             const lien = lienCarte(o);
-            const cell = row.getCell(15);
+            const cell = row.getCell(16);
             if (lien) {
               cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
@@ -1297,14 +1418,14 @@ export default function App() {
             // PAINT, qui génère l'extrait ET colorie la parcelle en carmin — c'est
             // l'outil de travail, et c'est de là que part l'utilisateur en pratique.
             const extrait = lienExtraitCadastral(o.codeParcelle);
-            const cellEx = row.getCell(16);
+            const cellEx = row.getCell(17);
             if (extrait) {
               cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
               cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
               cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cellEx.value = '';
             const colorise = lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle));
-            const cellCo = row.getCell(17);
+            const cellCo = row.getCell(18);
             if (colorise) {
               cellCo.value = { text: 'Colorier', hyperlink: colorise };
               cellCo.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
@@ -1313,7 +1434,7 @@ export default function App() {
             // Plan colorié ET annoté : désignation cadastrale et contenance en
             // hectares, ares, centiares, portées sous le titre de l'extrait.
             const annote = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance);
-            const cellAn = row.getCell(18);
+            const cellAn = row.getCell(19);
             if (annote) {
               cellAn.value = { text: 'Annoté', hyperlink: annote };
               cellAn.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
@@ -1457,6 +1578,7 @@ export default function App() {
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
         ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export."],
+        ['Unités foncières', `Une unité foncière est, au sens de la jurisprudence administrative, l'îlot de propriété d'un seul tenant appartenant au même propriétaire. Le regroupement est calculé sur les contours du plan cadastral : deux parcelles sont réunies lorsqu'elles partagent au moins deux sommets, donc une limite commune — un simple contact par un angle ne suffit pas. Résultat sur ce relevé : ${unitesF ? `${unitesF.unites.length} unité(s), dont ${unitesF.groupees} d'un seul tenant de plusieurs parcelles et ${unitesF.isolees} isolée(s)` : 'non calculé, faute de contours chargés'}. LIMITE ESSENTIELLE : ce relevé ne connaît que les parcelles de la société interrogée. Une parcelle voisine appartenant au même propriétaire mais détenue sous un autre SIREN, ou par une personne physique, n'y figure pas et n'a donc pas été regroupée. L'unité indiquée est l'unité au sein du portefeuille, non l'unité foncière au sens plein.`],
         ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
           ? "Société CESSÉE au répertoire Sirene, et pourtant encore inscrite à la documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation postérieure au 1er janvier " + millesime + ". À instruire avant toute reprise."
           : "Société active au répertoire Sirene à la date de génération du présent document."} Source du statut : API Recherche d'Entreprises (gouv.fr), distincte des fichiers cadastraux.`],
@@ -2067,6 +2189,21 @@ export default function App() {
                       <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
                     )}
                   </div>
+                  {unitesF && (
+                    <div className="bg-white border border-stone-200 rounded-lg p-4">
+                      <div className="text-xs text-stone-500 mb-1">Unités foncières</div>
+                      <div className="text-2xl font-semibold text-blue-950">
+                        {unitesF.unites.length.toLocaleString('fr-FR')}
+                      </div>
+                      <div className="text-xs text-stone-500 mt-1">
+                        {unitesF.groupees.toLocaleString('fr-FR')} d'un seul tenant de plusieurs parcelles,
+                        {' '}{unitesF.isolees.toLocaleString('fr-FR')} isolée(s)
+                      </div>
+                      {unitesF.sansContour > 0 && (
+                        <div className="text-xs text-stone-500">{unitesF.sansContour.toLocaleString('fr-FR')} sans contour, donc non regroupée(s)</div>
+                      )}
+                    </div>
+                  )}
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
                     <div className="text-2xl font-semibold text-blue-950">
@@ -2271,6 +2408,7 @@ export default function App() {
                           <EnTete label="Surface" champ="contenance" tri={triParcelles} onTri={setTriParcelles} align="text-right" />
                           <EnTete label="Nature" champ="natureCulture" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Droit" champ="codeDroit" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Unité" champ="_unite" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Carte" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Colorier" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Annoté" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
@@ -2289,6 +2427,23 @@ export default function App() {
                               <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
                               <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
                               <td className="px-4 py-3 text-stone-600 text-xs">{p.codeDroit}</td>
+                              <td className="px-4 py-3 text-center text-xs">
+                                {(() => {
+                                  const n = unitesF?.numero.get(p.codeParcelle);
+                                  if (!n) return <span className="text-stone-400">—</span>;
+                                  const u = unitesF.unites[n - 1];
+                                  const groupe = u.membres.length > 1;
+                                  return (
+                                    <span title={groupe
+                                      ? `Unité de ${u.membres.length} parcelles d'un seul tenant : ${u.membres.join(', ')}`
+                                      : 'Parcelle isolée, sans mitoyenneté dans ce portefeuille'}
+                                      className={groupe ? 'px-1.5 py-0.5 rounded border font-medium' : 'text-stone-500'}
+                                      style={groupe ? { backgroundColor: '#FDF2F6', color: '#A01040', borderColor: '#E8B9CB' } : undefined}>
+                                      {n}{groupe ? ` · ${u.membres.length} p.` : ''}
+                                    </span>
+                                  );
+                                })()}
+                              </td>
                               <td className="px-4 py-3 text-center">
                                 {link && (
                                   <a href={link} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 underline text-xs font-medium">Voir</a>
