@@ -248,13 +248,36 @@ const orientationDe = (f) => (f && f.poly ? choisirOrientation(f.poly) : null);
 //     A3 portrait 281,5 × 301,0 mm      A3 paysage 316,0 × 283,0 mm
 // À 1/1000, un A4 portrait couvre donc 195,5 × 211,0 m de terrain.
 //
-// TROIS PRINCIPES, dans cet ordre :
-//  1. l'ORIENTATION change avant l'ÉCHELLE — passer en paysage préserve le
-//     1/1000, ce qu'une échelle plus lâche ne fait pas ;
-//  2. le FORMAT A4 est préservé aussi longtemps que possible : un A3 ne
-//     s'imprime pas au cabinet aussi facilement ;
-//  3. on n'offre d'abord à la parcelle que 60 % du cadre, pour qu'on voie son
-//     voisinage ; ce n'est qu'en dernier recours qu'on la laisse le remplir.
+// TROIS PRINCIPES, dans l'ORDRE OÙ LES BOUCLES LES APPLIQUENT — et cet ordre est
+// un CHOIX D'ÉDITION, arbitré par JFD le 29/07/2026 (option « A ») :
+//  1. LE CONFORT D'ABORD. La passe est la boucle EXTÉRIEURE : toutes les échelles
+//     sont essayées à 60 % d'occupation avant qu'on n'envisage de laisser la
+//     parcelle remplir le cadre. On voit donc son voisinage — parcelles
+//     riveraines, voie d'accès, alignements —, ce qu'exige une désignation
+//     contextuelle ou l'examen d'une servitude ;
+//  2. puis l'ÉCHELLE, de la plus fine à la plus lâche ;
+//  3. puis le FORMAT, A4 avant A3 : un A3 ne s'imprime pas au cabinet aussi
+//     facilement. À échelle et passe égales, l'orientation paysage est essayée
+//     avant de desserrer l'échelle.
+//
+// ⚠ CE QUE CE CHOIX COÛTE, ASSUMÉ ET NON IGNORÉ. Le confort passant avant
+// l'échelle, une parcelle de 150 × 160 m sort au 1/1500 avec de la marge blanche
+// alors qu'elle tiendrait au 1/1000 en occupant 95 % du cadre (150 ≤ 185,7 et
+// 160 ≤ 200,5). On perd un facteur 1,5 sur l'échelle pour gagner du vide. C'est
+// délibéré. Une version antérieure de ce commentaire affirmait l'inverse —
+// « l'ORIENTATION change avant l'ÉCHELLE » — et NE DÉCRIVAIT PAS LE CODE : elle
+// est corrigée ici. Ne pas rétablir cette formulation sans changer les boucles.
+//
+// ⚠ ASYMÉTRIE DÉLIBÉRÉE AVEC LE RANG DE choisirOrientation — NE PAS L'« ALIGNER ».
+// Le rang, lui, classe par ÉCHELLE D'ABORD, et c'est correct : les deux
+// mécanismes ne répondent pas à la même question. Cette fonction demande
+// « quelle édition produire ? », où le confort a sa place. Le rang demande
+// « vaut-il la peine de TOURNER LA PAGE ? » — et tourner est un COÛT, la flèche
+// du nord n'étant plus verticale. On ne l'accepte que pour un gain d'échelle réel ;
+// gagner du blanc ne justifie pas de tourner une pièce de dossier. Un rang classant
+// par confort d'abord a été essayé le 29/07/2026 et retiré : sur un rectangle de
+// 600 × 300 m incliné à 30°, il faisait tourner le plan POUR PASSER DU 1/4000 AU
+// 1/5000, donc un plan tourné ET moins précis. Voir l'addendum REDPAR v4, § 4.
 //
 // Mesuré sur la base : 88,3 % des parcelles tiennent à 1/1000. La couverture
 // maximale atteignable est l'A3 paysage à 1/5000, soit 1 580 × 1 415 m ; au-delà
