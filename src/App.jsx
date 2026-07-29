@@ -628,8 +628,16 @@ const mesurerSelection = (refs, contours) => {
   // deçà desquels un aplat de couleur ne se distingue plus du trait de limite.
   // On AVERTIT sans bloquer : c'est un jugement de lisibilité, qui appartient au
   // rédacteur de l'acte, non une erreur.
+  // ⚠ EN CAS DE DÉBORDEMENT, ON NE DÉPISTE RIEN. choisirEchelle rend alors la
+  // SENTINELLE 25000, qui n'est pas une échelle du service : une demande à
+  // 1/25000 est silencieusement servie à 1/1000. Calculer des millimètres
+  // dessus produirait des tailles cinq fois trop petites et signalerait des
+  // parcelles qui, à l'échelle réellement retenue après scission, tiendraient
+  // largement au-dessus du seuil. Constaté le 29/07/2026 sur Saint-Omer : ZH 186
+  // annoncée à 0,4 mm alors qu'elle en fait 2,0 au 1/5000. L'utilisateur doit
+  // d'abord scinder ; le dépistage reprendra sur une échelle vraie.
   const SEUIL_MM = 2;
-  const minuscules = cotes
+  const minuscules = ef.deborde ? [] : cotes
     .filter((c) => c.cote / Number(ef.echelle) * 1000 < SEUIL_MM)
     .map((c) => ({ ...c, mm: c.cote / Number(ef.echelle) * 1000 }));
   return { mesurable: true, largeur, hauteur, sansContour, horsZone, zone, minuscules, seuilMm: SEUIL_MM, ...ef };
