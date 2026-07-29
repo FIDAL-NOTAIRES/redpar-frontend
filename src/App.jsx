@@ -198,6 +198,12 @@ const descripteursForme = (geom) => {
   };
 };
 
+// Rotation optimale de la zone d'impression, calculée sur le contour projeté.
+// Séparée de descripteursForme parce que choisirOrientation dépend de
+// choisirEchelle, défini plus bas : ce n'est appelé qu'à la construction des
+// liens, jamais pendant le calcul des descripteurs.
+const orientationDe = (f) => (f && f.poly ? choisirOrientation(f.poly) : null);
+
 // ----------------------------------------------------------------------
 // CHOIX DE L'ÉCHELLE ET DU FORMAT
 // Le 1/1000 est la norme des éditions du cabinet et le reste : on ne s'en écarte
@@ -239,27 +245,168 @@ const CARTES = {
 // mesurant sur les étiquettes de coordonnées.
 const ECHELLES = [1000, 1250, 1500, 2000, 2500, 4000, 5000];
 
+// Le RANG rend deux résultats comparables entre eux, ce dont on a besoin pour
+// choisir une orientation de zone d'impression (voir choisirOrientation) : plus
+// il est bas, meilleur est le résultat.
+// ⚠ IL NE RECOPIE PAS L'ORDRE DES BOUCLES CI-DESSOUS, et c'est délibéré. Les
+// boucles placent la passe en premier, donc le confort de 60 % avant l'échelle :
+// un 1/5000 avec de la marge y est préféré à un 1/4000 serré. Pour arbitrer une
+// ROTATION, ce classement conduit à des absurdités — sur un rectangle de
+// 600 × 300 m incliné à 30°, il faisait choisir de tourner le plan pour passer
+// du 1/4000 au 1/5000, soit un plan tourné ET moins précis. Le rang classe donc
+// par ÉCHELLE d'abord, puis A4 avant A3, puis le confort. Il ne sert qu'à cette
+// comparaison : le choix rendu par la fonction, lui, est inchangé.
 const choisirEchelle = (largeurM, hauteurM) => {
   const L = Number(largeurM) || 0, H = Number(hauteurM) || 0;
-  if (!L || !H) return { echelle: '1000', format: 'A4|portrait', occupation: 0.6, deborde: false };
+  if (!L || !H) return { echelle: '1000', format: 'A4|portrait', occupation: 0.6, deborde: false, rang: 99999 };
   // Trois passes de plus en plus permissives, pour n'élargir qu'à contrecœur.
   const passes = [
     { occ: 0.60, a3: false },   // confortable, A4
     { occ: 0.95, a3: false },   // la parcelle remplit le cadre, A4
     { occ: 0.95, a3: true },    // dernier recours : A3
   ];
-  for (const passe of passes) {
-    for (const ech of ECHELLES) {
+  for (let ip = 0; ip < passes.length; ip++) {
+    const passe = passes[ip];
+    for (let ie = 0; ie < ECHELLES.length; ie++) {
+      const ech = ECHELLES[ie];
       for (const [nom, c] of Object.entries(CARTES)) {
         if (c.a3 && !passe.a3) continue;
         if (L <= c.l * ech / 1000 * passe.occ && H <= c.h * ech / 1000 * passe.occ) {
-          return { echelle: String(ech), format: nom, occupation: passe.occ, deborde: false };
+          return { echelle: String(ech), format: nom, occupation: passe.occ, deborde: false,
+            rang: ie * 100 + (c.a3 ? 10 : 0) + ip };
         }
       }
     }
   }
   // Aucune combinaison ne suffit : l'extrait cadastral n'est pas le bon document.
-  return { echelle: '25000', format: 'A3|paysage', occupation: 1, deborde: true };
+  return { echelle: '25000', format: 'A3|paysage', occupation: 1, deborde: true, rang: 99999 };
+};
+
+// ----------------------------------------------------------------------
+// ROTATION DE LA ZONE D'IMPRESSION
+// Le service du cadastre accepte un champ MAPROTATION que PAINT laissait à zéro.
+// CONVENTION ÉTABLIE EXPÉRIMENTALEMENT le 29/07/2026, par la direction de la
+// flèche du nord sur cinq extraits de contrôle à Saint-Omer : la valeur est en
+// DEGRÉS, et une valeur POSITIVE fait tourner le contenu du plan dans le SENS
+// DES AIGUILLES sur la page — +45° amène la flèche du nord à 1 h 30, −45° à
+// 10 h 30. D'où la transformation ci-dessous : un vecteur terrain (x vers l'Est,
+// y vers le Nord) apparaît sur la page en
+//     u =  x·cos θ + y·sin θ        (vers la droite de la page)
+//     v = −x·sin θ + y·cos θ        (vers le haut de la page)
+//
+// À QUOI CELA SERT. L'emprise au sol de la page est INVARIANTE — mesuré sur les
+// extraits de contrôle : 100 m de terrain occupent 100 mm de papier au 1/1000,
+// que le plan soit droit ou tourné. La rotation ne donne donc pas plus de place,
+// elle l'ORIENTE. Tout le gain est là : une lanière de 300 m orientée à 45°
+// présente une boîte droite de 212 × 212 m, qui ne tient pas en A4 au 1/1000 ;
+// tournée dans son axe elle occupe 300 × 15 m et tient en A4 paysage.
+//
+// ON NE TOURNE QUE SI L'ON Y GAGNE : à rang égal, l'angle nul est conservé. Un
+// plan incliné se lit moins bien qu'un plan nord en haut, et le basculement
+// portrait/paysage — que choisirEchelle essaie déjà — doit rester le premier
+// recours. C'est aussi ce qui garantit que 88,3 % des parcelles, celles qui
+// tiennent déjà à 1/1000, sortiront exactement comme avant.
+//
+// ⚠ RÉSERVÉ AU LIEN « EXTRAIT DGFiP ». Les liens « Colorier » et « Annoté »
+// passent par le frontend de PAINT, dont le géoréférencement lit les étiquettes
+// de coordonnées en supposant les abscisses en haut et en bas, les ordonnées à
+// gauche et à droite. Sur un plan tourné cette hypothèse tombe : il faudrait une
+// transformation affine complète, et transmettre la rotation en l'état peindrait
+// le polygone de travers. Ne pas propager avant d'avoir traité ce point.
+// ----------------------------------------------------------------------
+
+// Enveloppe convexe par chaîne monotone d'Andrew. Le rectangle englobant d'aire
+// minimale d'un ensemble de points est toujours aligné sur une arête de son
+// enveloppe convexe : les directions de ces arêtes forment donc l'ensemble
+// complet des angles à examiner, et il est petit — au plus quarante ici.
+const enveloppeConvexe = (pts) => {
+  if (pts.length < 4) return pts.slice();
+  const p = pts.slice().sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+  const croix = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const bas = [];
+  for (const q of p) {
+    while (bas.length >= 2 && croix(bas[bas.length - 2], bas[bas.length - 1], q) <= 0) bas.pop();
+    bas.push(q);
+  }
+  const haut = [];
+  for (let i = p.length - 1; i >= 0; i--) {
+    const q = p[i];
+    while (haut.length >= 2 && croix(haut[haut.length - 2], haut[haut.length - 1], q) <= 0) haut.pop();
+    haut.push(q);
+  }
+  return bas.slice(0, -1).concat(haut.slice(0, -1));
+};
+
+// Étendue de la parcelle dans le repère de la PAGE, pour une rotation donnée.
+const empriseSurPage = (pts, angleDeg) => {
+  const a = angleDeg * Math.PI / 180;
+  const c = Math.cos(a), s = Math.sin(a);
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const [x, y] of pts) {
+    const u = x * c + y * s;
+    const v = -x * s + y * c;
+    if (u < minU) minU = u;
+    if (u > maxU) maxU = u;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+  }
+  return { L: maxU - minU, H: maxV - minV };
+};
+
+// Angle ramené dans (−90, 90]. Un demi-tour ne change ni l'emprise ni la
+// lisibilité d'un plan cadastral, et le service n'a pas à recevoir de valeurs
+// qu'il pourrait refuser.
+const normaliserAngle = (a) => {
+  let r = ((a % 180) + 180) % 180;
+  if (r > 90) r -= 180;
+  return Math.round(r * 100) / 100;
+};
+
+// Choisit la rotation qui donne le meilleur couple échelle / format, sur le
+// contour PROJETÉ en conique conforme — c'est-à-dire dans le même repère que
+// celui où l'extrait est composé.
+const choisirOrientation = (polyProjete) => {
+  const nul = { rotation: 0, rang: null, ef: null, L: 0, H: 0 };
+  if (!polyProjete || polyProjete.length < 4) return nul;
+  const enveloppe = enveloppeConvexe(polyProjete);
+  if (enveloppe.length < 3) return nul;
+
+  // Référence : sans rotation. C'est elle qu'il faudra battre STRICTEMENT.
+  const base = empriseSurPage(enveloppe, 0);
+  let meilleur = { rotation: 0, ef: choisirEchelle(base.L, base.H), L: base.L, H: base.H };
+
+  const angles = new Set();
+  for (let i = 0; i < enveloppe.length; i++) {
+    const [x0, y0] = enveloppe[i];
+    const [x1, y1] = enveloppe[(i + 1) % enveloppe.length];
+    const dx = x1 - x0, dy = y1 - y0;
+    if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) continue;
+    // Angle qui amène cette arête à l'horizontale sur la page : la page voit
+    // l'arête sous l'angle atan2(−dy·sin+…) — il suffit d'annuler v, donc de
+    // prendre θ = atan2(dy, dx).
+    angles.add(normaliserAngle(Math.atan2(dy, dx) * 180 / Math.PI));
+    angles.add(normaliserAngle(Math.atan2(dy, dx) * 180 / Math.PI + 90));
+  }
+
+  for (const angle of angles) {
+    if (!angle) continue;                       // le zéro est déjà la référence
+    const e = empriseSurPage(enveloppe, angle);
+    if (!(e.L > 0) || !(e.H > 0)) continue;     // contour dégénéré : sans objet
+    const ef = choisirEchelle(e.L, e.H);
+    // STRICTEMENT meilleur, ou rang égal et angle plus faible : on ne penche un
+    // plan que pour un gain réel.
+    if (ef.rang < meilleur.ef.rang
+      || (ef.rang === meilleur.ef.rang && Math.abs(angle) < Math.abs(meilleur.rotation))) {
+      meilleur = { rotation: angle, ef, L: e.L, H: e.H };
+    }
+  }
+  return {
+    rotation: meilleur.rotation,
+    rang: meilleur.ef.rang,
+    ef: meilleur.ef,
+    L: Math.round(meilleur.L * 10) / 10,
+    H: Math.round(meilleur.H * 10) / 10,
+  };
 };
 
 // Contenance dans la forme notariale : hectares, ares, centiares. Un are vaut
@@ -476,7 +623,13 @@ const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres) => 
   return base + '&' + sup.toString();
 };
 
-const lienExtraitCadastral = (codeParcelle) => {
+// EXTRAIT DGFiP — le PDF brut, pièce autonome à joindre à un dossier.
+// Il ne passe par aucun traitement d'image : c'est donc le seul des trois liens
+// qui puisse porter une ROTATION de la zone d'impression sans risque (voir la
+// réserve au paragraphe sur la rotation). Quand le contour est connu, l'échelle,
+// le format ET l'angle sont choisis ensemble ; à défaut on retombe sur l'A4
+// portrait au 1/1000 d'origine.
+const lienExtraitCadastral = (codeParcelle, geom) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
   const qs = new URLSearchParams({
@@ -487,6 +640,16 @@ const lienExtraitCadastral = (codeParcelle) => {
     echelle: '1000',
     taille: 'A4',
   });
+  const o = orientationDe(descripteursForme(geom));
+  if (o && o.ef && !o.ef.deborde) {
+    const [taille, sens] = o.ef.format.split('|');
+    qs.set('echelle', o.ef.echelle);
+    qs.set('taille', taille);
+    // api/extrait.js n'attend « paysage » qu'en minuscules, et retombe sur le
+    // portrait pour toute autre valeur.
+    if (sens === 'paysage') qs.set('orientation', 'paysage');
+    if (o.rotation) qs.set('rotation', String(o.rotation));
+  }
   return `${PAINT_URL}/api/extrait?${qs.toString()}`;
 };
 
@@ -1523,7 +1686,7 @@ export default function App() {
             // autonome qu'on peut joindre à un dossier. « Plan colorisé » ouvre
             // PAINT, qui génère l'extrait ET colorie la parcelle en carmin — c'est
             // l'outil de travail, et c'est de là que part l'utilisateur en pratique.
-            const extrait = lienExtraitCadastral(o.codeParcelle);
+            const extrait = lienExtraitCadastral(o.codeParcelle, contours?.get(o.codeParcelle));
             const cellEx = row.getCell(17);
             if (extrait) {
               cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
@@ -1585,7 +1748,7 @@ export default function App() {
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
               cell.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cell.value = '';
-            const extrait = lienExtraitCadastral(o.codeParcelle);
+            const extrait = lienExtraitCadastral(o.codeParcelle, contours?.get(o.codeParcelle));
             const cellEx = row.getCell(13);
             if (extrait) {
               cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
@@ -1683,7 +1846,7 @@ export default function App() {
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
-        ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export."],
+        ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export. Lorsque le contour est connu, l'échelle, le format et, s'il y a lieu, une rotation de la zone d'impression sont choisis pour que la parcelle tienne au plus près du 1/1000 ; la rotation n'est appliquée que si elle permet une échelle plus fine, et le plan porte alors sa flèche du nord inclinée d'autant. Les échelles vont du 1/1000 au 1/5000, plafond du service."],
         ['Unités foncières', `Une unité foncière est, au sens de la jurisprudence administrative, l'îlot de propriété d'un seul tenant appartenant au même propriétaire. Le regroupement est calculé sur les contours du plan cadastral : deux parcelles sont réunies lorsqu'elles partagent au moins deux sommets, donc une limite commune — un simple contact par un angle ne suffit pas. Résultat sur ce relevé : ${unitesF ? `${unitesF.unites.length} unité(s), dont ${unitesF.groupees} d'un seul tenant de plusieurs parcelles et ${unitesF.isolees} isolée(s)` : 'non calculé, faute de contours chargés'}. LIMITE ESSENTIELLE : ce relevé ne connaît que les parcelles de la société interrogée. Une parcelle voisine appartenant au même propriétaire mais détenue sous un autre SIREN, ou par une personne physique, n'y figure pas et n'a donc pas été regroupée. L'unité indiquée est l'unité au sein du portefeuille, non l'unité foncière au sens plein.`],
         ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
           ? "Société CESSÉE au répertoire Sirene, et pourtant encore inscrite à la documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation postérieure au 1er janvier " + millesime + ". À instruire avant toute reprise."
