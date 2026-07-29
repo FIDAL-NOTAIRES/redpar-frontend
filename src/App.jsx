@@ -573,6 +573,89 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune) => {
   return `${PAINT_URL}/?${qs.toString()}`;
 };
 
+// ----------------------------------------------------------------------
+// APERÇU D'UNE SÉLECTION MANUELLE — « plan à la carte »
+// Mesure l'emprise réelle de l'union des parcelles cochées et en déduit
+// l'échelle et le format, AVANT de générer quoi que ce soit. C'est ce qui permet
+// à l'utilisateur de voir tout de suite qu'il déborde, plutôt que de découvrir un
+// plan illisible après coup.
+// Trois réserves sont remontées telles quelles, jamais masquées :
+//  — les parcelles SANS CONTOUR, qui ne pourront pas être coloriées ;
+//  — la sélection à cheval sur DEUX ZONES coniques conformes, que lienPaintUnite
+//    refuse (elle rendrait null), cas des communes en limite de zone ;
+//  — le DÉBORDEMENT au-delà du 1/5000, plafond de la liste du service.
+// ----------------------------------------------------------------------
+const mesurerSelection = (refs, contours) => {
+  if (!contours || !refs || !refs.length) return null;
+  let zone = null, horsZone = false, sansContour = 0;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const r of refs) {
+    const g = contours.get(r);
+    const anneaux = g ? anneauxDe(g) : [];
+    if (!anneaux.length) { sansContour++; continue; }
+    const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
+    for (const [lo, la] of ext) {
+      const q = versConiqueConforme(la, lo);
+      if (!q) { horsZone = true; continue; }
+      if (zone === null) zone = q.zone;
+      else if (q.zone !== zone) horsZone = true;
+      if (q.X < minX) minX = q.X;
+      if (q.X > maxX) maxX = q.X;
+      if (q.Y < minY) minY = q.Y;
+      if (q.Y > maxY) maxY = q.Y;
+    }
+  }
+  if (!isFinite(minX)) return { mesurable: false, sansContour, horsZone, zone };
+  const largeur = Math.round((maxX - minX) * 10) / 10;
+  const hauteur = Math.round((maxY - minY) * 10) / 10;
+  return { mesurable: true, largeur, hauteur, sansContour, horsZone, zone, ...choisirEchelle(largeur, hauteur) };
+};
+
+// ----------------------------------------------------------------------
+// REGROUPEMENT COMMUNE → SECTION pour le sélecteur du plan à la carte.
+// Porte sur les parcelles DISTINCTES du relevé filtré par titre de droit, et
+// JAMAIS sur le filtre de lecture : celui-ci ne touche ni les agrégats, ni la
+// carte, ni les livrables, faute de quoi un filtre de confort fausserait un plan
+// de dossier.
+// La COMMUNE est verrouillante — le service ne sert qu'une emprise, donc un plan
+// ne peut porter que sur une commune. La SECTION ne l'est pas : ce n'est qu'un
+// accordéon de navigation, parce qu'une unité foncière enjambe volontiers une
+// limite de section, qui suit souvent une voie ou un cours d'eau.
+// ----------------------------------------------------------------------
+const grouperPourCarte = (liste) => {
+  const communes = new Map();
+  for (const o of liste || []) {
+    const r = String(o.codeParcelle || '');
+    if (r.length !== 14) continue;
+    const insee = r.slice(0, 5);
+    let c = communes.get(insee);
+    if (!c) {
+      c = { insee, nom: o.commune || insee, departement: o.departement || '', vues: new Set(), sections: new Map(), nb: 0, surface: 0 };
+      communes.set(insee, c);
+    }
+    if (c.vues.has(r)) continue;
+    c.vues.add(r);
+    const m2 = Number(o.contenance) || 0;
+    c.nb += 1;
+    c.surface += m2;
+    const sn = sectionEtNumero(r);
+    const cle = sn ? sn.section : '—';
+    let s = c.sections.get(cle);
+    if (!s) { s = { cle, lignes: [], surface: 0 }; c.sections.set(cle, s); }
+    s.lignes.push({ ref: r, numero: sn ? sn.numero : '', m2, adresse: o.adresse || '' });
+    s.surface += m2;
+  }
+  for (const c of communes.values()) {
+    c.sectionsTriees = [...c.sections.values()]
+      .map((s) => ({ ...s, lignes: s.lignes.sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0) || a.ref.localeCompare(b.ref)) }))
+      .sort((a, b) => b.lignes.length - a.lignes.length || a.cle.localeCompare(b.cle, 'fr'));
+  }
+  // Communes classées par nombre de parcelles décroissant : sur un portefeuille
+  // de quarante-sept communes, celle qui porte le dossier est presque toujours
+  // celle qui en compte le plus.
+  return [...communes.values()].sort((a, b) => b.nb - a.nb || a.nom.localeCompare(b.nom, 'fr'));
+};
+
 const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
@@ -1097,6 +1180,12 @@ export default function App() {
   // mille six cents parcelles, les géométries représentent plusieurs mégaoctets —
   // inutile de les imposer à qui veut seulement le tableau et les exports.
   const [contours, setContours] = useState(null);
+  // Plan à la carte : commune verrouillée, sections dépliées, panier de parcelles.
+  const [carteOuverte, setCarteOuverte] = useState(false);
+  const [carteCommune, setCarteCommune] = useState(null);
+  const [carteSel, setCarteSel] = useState(() => new Set());
+  const [carteDepliees, setCarteDepliees] = useState(() => new Set());
+  const [qCarteCommune, setQCarteCommune] = useState('');
 
   const droitsPresents = (() => {
     const m = new Map();
@@ -1382,6 +1471,61 @@ export default function App() {
     });
     return m;
   })();
+
+  // Sélecteur du plan à la carte. Calculé seulement quand le panneau est ouvert :
+  // inutile de regrouper mille six cents parcelles à chaque frappe au clavier.
+  const carteGroupes = carteOuverte ? grouperPourCarte(parcelles) : null;
+  const carteCommuneObj = (carteGroupes && carteCommune) ? carteGroupes.find((c) => c.insee === carteCommune) : null;
+  const carteRefs = [...carteSel];
+  const carteApercu = (carteOuverte && carteRefs.length) ? mesurerSelection(carteRefs, contours) : null;
+  const carteSurface = carteRefs.reduce((t, r) => t + (Number(surfaceParRef.get(r)) || 0), 0);
+
+  const basculerParcelleCarte = (r) => setCarteSel((s) => {
+    const n = new Set(s);
+    if (n.has(r)) n.delete(r); else n.add(r);
+    return n;
+  });
+  const basculerSectionCarte = (cle) => setCarteDepliees((d) => {
+    const n = new Set(d);
+    if (n.has(cle)) n.delete(cle); else n.add(cle);
+    return n;
+  });
+  const cocherSectionCarte = (s, on) => setCarteSel((sel) => {
+    const n = new Set(sel);
+    s.lignes.forEach((l) => { if (on) n.add(l.ref); else n.delete(l.ref); });
+    return n;
+  });
+  // Une ou deux sections seulement : on les déplie d'office. La plupart des
+  // dossiers n'en concernent qu'une, autant ne pas imposer un clic pour rien.
+  const choisirCommuneCarte = (c) => {
+    setCarteCommune(c.insee);
+    setCarteSel(new Set());
+    setCarteDepliees(new Set(c.sectionsTriees.length <= 2 ? c.sectionsTriees.map((s) => s.cle) : []));
+  };
+  const ouvrirCarte = () => {
+    setCarteOuverte(true);
+    setQCarteCommune('');
+    const g = grouperPourCarte(parcelles);
+    // Une seule commune au relevé : la question ne se pose pas, on entre direct.
+    if (g.length === 1) choisirCommuneCarte(g[0]); else { setCarteCommune(null); setCarteSel(new Set()); }
+  };
+  const genererCarte = () => {
+    if (!carteRefs.length) return;
+    const nom = carteCommuneObj ? carteCommuneObj.nom : '';
+    const avecContour = carteRefs.filter((r) => contours?.get(r));
+    let lien = avecContour.length >= 2
+      ? lienPaintUnite(carteRefs, surfaceParRef, contours, nom)
+      : null;
+    // Repli : une seule parcelle coloriable, ou lienPaintUnite qui refuse. Le plan
+    // est alors centré sur elle, mais le TABLEAU porte toute la sélection — on ne
+    // perd pas la désignation des parcelles restées sans contour.
+    if (!lien) {
+      const pivot = avecContour[0] || carteRefs[0];
+      const autres = carteRefs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r) }));
+      lien = lienPaintAnnote(pivot, nom, contours?.get(pivot), surfaceParRef.get(pivot), autres);
+    }
+    if (lien) window.open(lien, '_blank', 'noreferrer');
+  };
 
   // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
   // exports continuent de porter sur l'ensemble — seul l'affichage est réduit,
@@ -2686,6 +2830,170 @@ export default function App() {
                   </div>
                 )}
 
+                {/* ------------------------------------------------------------
+                    PLAN À LA CARTE — commune, puis sections en accordéon.
+                    La commune est VERROUILLANTE : le service ne sert qu'une
+                    emprise, donc un plan ne porte que sur une commune. Le code
+                    INSEE est affiché parce qu'il départage les homonymes, comme
+                    dans le classeur. Les sections ne sont qu'un accordéon de
+                    navigation : le panier traverse les sections, une unité
+                    foncière enjambant volontiers une limite de section.
+                    ------------------------------------------------------------ */}
+                {carteOuverte && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
+                    <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
+
+                      <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-3">
+                        <MapPin className="w-4 h-4" style={{ color: '#A01040' }} />
+                        <h3 className="font-semibold text-blue-950">Plan à la carte</h3>
+                        {carteCommuneObj && (
+                          <span className="text-sm text-stone-600">
+                            {carteCommuneObj.nom} <span className="text-stone-400">({carteCommuneObj.insee})</span>
+                          </span>
+                        )}
+                        {carteCommuneObj && carteGroupes.length > 1 && (
+                          <button onClick={() => { setCarteCommune(null); setCarteSel(new Set()); }}
+                            className="text-xs underline text-blue-900">changer de commune</button>
+                        )}
+                        <button onClick={() => setCarteOuverte(false)}
+                          className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
+                      </div>
+
+                      {!contours && (
+                        <div className="px-6 py-2 text-xs text-amber-800 bg-amber-50 border-b border-amber-200">
+                          ⚠ Contours non chargés : la colorisation et le choix de l'échelle en dépendent. Lancer le géocodage d'abord.
+                        </div>
+                      )}
+                      {melangeDesTitres && (
+                        <div className="px-6 py-2 text-xs text-blue-900 bg-blue-50 border-b border-blue-200">
+                          Sélection prise dans le périmètre des titres de droit retenus, propriété et gestion mêlées.
+                        </div>
+                      )}
+
+                      {/* ÉTAPE 1 — la commune */}
+                      {!carteCommuneObj && (
+                        <div className="flex-1 overflow-y-auto">
+                          <div className="px-6 py-3 border-b border-stone-100">
+                            <input value={qCarteCommune} onChange={(e) => setQCarteCommune(e.target.value)}
+                              placeholder="Rechercher une commune..."
+                              className="w-full px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
+                            <div className="text-xs text-stone-500 mt-2">
+                              {carteGroupes.length.toLocaleString('fr-FR')} commune(s) au relevé. Un plan ne peut porter que sur une seule.
+                            </div>
+                          </div>
+                          {carteGroupes
+                            .filter((c) => !qCarteCommune || normTexte(`${c.nom} ${c.insee}`).includes(normTexte(qCarteCommune)))
+                            .map((c) => (
+                              <button key={c.insee} onClick={() => choisirCommuneCarte(c)}
+                                className="w-full text-left px-6 py-3 border-b border-stone-100 hover:bg-stone-50 flex items-baseline gap-3">
+                                <span className="font-medium text-blue-950">{c.nom}</span>
+                                <span className="text-xs text-stone-400">{c.insee}</span>
+                                <span className="ml-auto text-xs text-stone-600">
+                                  {c.nb.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(c.surface)}
+                                </span>
+                              </button>
+                            ))}
+                        </div>
+                      )}
+
+                      {/* ÉTAPE 2 — sections en accordéon, panier traversant */}
+                      {carteCommuneObj && (
+                        <div className="flex-1 overflow-y-auto">
+                          {carteCommuneObj.sectionsTriees.map((s) => {
+                            const deplie = carteDepliees.has(s.cle);
+                            const cochees = s.lignes.filter((l) => carteSel.has(l.ref)).length;
+                            return (
+                              <div key={s.cle} className="border-b border-stone-100">
+                                <div className="px-6 py-2 flex items-center gap-3 bg-stone-50">
+                                  <input type="checkbox" checked={cochees === s.lignes.length && cochees > 0}
+                                    onChange={(e) => cocherSectionCarte(s, e.target.checked)}
+                                    title="Toute la section" />
+                                  <button onClick={() => basculerSectionCarte(s.cle)}
+                                    className="flex-1 text-left flex items-baseline gap-2">
+                                    <span className="text-stone-400 text-xs">{deplie ? '▾' : '▸'}</span>
+                                    <span className="font-medium text-blue-950">Section {s.cle}</span>
+                                    <span className="text-xs text-stone-500">
+                                      {s.lignes.length.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(s.surface)}
+                                    </span>
+                                    {cochees > 0 && (
+                                      <span className="ml-auto text-xs font-semibold" style={{ color: '#A01040' }}>
+                                        {cochees} cochée(s)
+                                      </span>
+                                    )}
+                                  </button>
+                                </div>
+                                {deplie && s.lignes.map((l) => (
+                                  <label key={l.ref}
+                                    className="px-6 py-1.5 flex items-center gap-3 text-sm hover:bg-stone-50 cursor-pointer">
+                                    <input type="checkbox" checked={carteSel.has(l.ref)}
+                                      onChange={() => basculerParcelleCarte(l.ref)} />
+                                    <span className="font-medium text-blue-950 w-16">n° {l.numero}</span>
+                                    <span className="text-xs text-stone-500 flex-1 truncate">{l.adresse || '—'}</span>
+                                    {!contours?.get(l.ref) && (
+                                      <span className="text-xs text-amber-700">sans contour</span>
+                                    )}
+                                    <span className="text-xs text-stone-600">{contenanceNotariale(l.m2)}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* LE PANIER — visible en permanence, échelle prévisionnelle comprise */}
+                      {carteCommuneObj && (
+                        <div className="px-6 py-3 border-t border-stone-200 bg-white rounded-b-xl">
+                          <div className="flex items-center gap-3 flex-wrap text-sm">
+                            <span className="font-semibold text-blue-950">
+                              {carteRefs.length.toLocaleString('fr-FR')} parcelle(s)
+                            </span>
+                            <span className="text-stone-600">{contenanceNotariale(carteSurface)}</span>
+                            {carteApercu && carteApercu.mesurable && (
+                              <span className="text-xs px-2 py-0.5 rounded border"
+                                style={carteApercu.deborde
+                                  ? { color: '#92400e', backgroundColor: '#fffbeb', borderColor: '#fde68a' }
+                                  : { color: '#0F2238', backgroundColor: '#f5f5f4', borderColor: '#e7e5e4' }}>
+                                {carteApercu.deborde
+                                  ? `emprise ${carteApercu.largeur} × ${carteApercu.hauteur} m — ne tient pas au 1/5000`
+                                  : `1/${carteApercu.echelle} · ${carteApercu.format.replace('|', ' ')} · ${carteApercu.largeur} × ${carteApercu.hauteur} m`}
+                              </span>
+                            )}
+                            {carteRefs.length > 0 && (
+                              <button onClick={() => setCarteSel(new Set())}
+                                className="text-xs underline text-stone-500">tout décocher</button>
+                            )}
+                            <button onClick={genererCarte}
+                              disabled={!carteRefs.length || !contours || (carteApercu && carteApercu.horsZone)}
+                              className="ml-auto px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
+                              style={{ backgroundColor: '#A01040' }}>
+                              Générer le plan
+                            </button>
+                          </div>
+                          {carteApercu && carteApercu.horsZone && (
+                            <div className="text-xs text-amber-800 mt-2">
+                              ⚠ Sélection hors métropole ou à cheval sur deux zones coniques conformes : le plan ne peut pas être calé. Restreindre la sélection.
+                            </div>
+                          )}
+                          {carteApercu && carteApercu.sansContour > 0 && (
+                            <div className="text-xs text-amber-800 mt-2">
+                              ⚠ {carteApercu.sansContour} parcelle(s) sans contour au plan : elles figureront au tableau mais ne seront pas coloriées.
+                            </div>
+                          )}
+                          {carteApercu && carteApercu.deborde && (
+                            <div className="text-xs text-amber-800 mt-2">
+                              ⚠ Au-delà du 1/5000, plafond du service : l'extrait cadastral n'est plus le bon document. Scinder la sélection en deux plans.
+                            </div>
+                          )}
+                          <div className="text-xs text-stone-500 mt-2">
+                            Contenances tirées de la matrice, jamais de l'aire mesurée sur le contour. Ligne de total à partir de deux parcelles.
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <MapPin className="w-4 h-4 text-blue-950" />
@@ -2697,6 +3005,12 @@ export default function App() {
                       <span className="text-xs text-stone-500">{parcellesAffichees.length.toLocaleString('fr-FR')} sur {parcelles.length.toLocaleString('fr-FR')}</span>
                     )}
                     <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Fichiers DGFiP des personnes morales — millésime 2025</span>
+                    <button onClick={ouvrirCarte} disabled={!parcelles.length}
+                      title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
+                      className="ml-auto px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
+                      style={{ backgroundColor: '#A01040' }}>
+                      Plan à la carte
+                    </button>
                   </div>
                   <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                     <table className="w-full text-sm">
