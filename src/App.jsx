@@ -99,7 +99,22 @@ const simplifier = (pts, tol) => {
 
 // Point GARANTI INTÉRIEUR au polygone. Le centroïde suffit dans la plupart des
 // cas, mais il tombe hors d'une parcelle concave ou en L : on le teste, et à
-// défaut on balaie la boîte englobante pour trouver un point intérieur.
+// défaut on cherche par BALAYAGE PAR LANCER DE RAYON.
+//
+// ⚠ POURQUOI PAS UNE GRILLE. Le repli d'origine échantillonnait la boîte
+// englobante en 7 × 7 points. Sur une parcelle en ruban, il ne trouve rien :
+// mesuré le 29/07/2026 sur une parcelle de la section BE à Saint-Omer, 2 120 m²
+// dans une boîte de 347 × 181 m, soit un remplissage de 3,4 % — un ruban de 5 m
+// de large sur 391 m de long, que les 49 points d'une grille au pas de 43 × 23 m
+// manquent tous. Ni « pt » ni « poly » ne partaient alors vers PAINT, qui
+// refusait de colorier faute de position, et rendait la main à l'outil manuel.
+//
+// Le balayage, lui, ne peut pas manquer une surface non vide : sur chaque ligne
+// horizontale on calcule les intersections avec les côtés, on les trie, et les
+// segments de rang pair sont intérieurs par la règle de parité. On retient le
+// MILIEU DU SEGMENT INTÉRIEUR LE PLUS LARGE de tout le balayage — donc l'endroit
+// le plus confortablement dedans, ce qui est précisément ce qu'un amorçage de
+// remplissage demande, et non un point collé à une limite.
 const dansPolygone = (x, y, anneau) => {
   let dedans = false;
   for (let i = 0, j = anneau.length - 2; i < anneau.length - 1; j = i++) {
@@ -108,6 +123,11 @@ const dansPolygone = (x, y, anneau) => {
   }
   return dedans;
 };
+
+// Nombre de lignes du balayage. Soixante-quatre suffisent : sur le ruban de
+// Saint-Omer, dont la boîte fait 181 m de haut, cela donne une ligne tous les
+// 2,8 m pour une largeur de 5 m — le ruban est traversé plusieurs fois.
+const LIGNES_BALAYAGE = 64;
 
 const pointInterieur = (anneau) => {
   let a = 0, cx = 0, cy = 0;
@@ -120,16 +140,28 @@ const pointInterieur = (anneau) => {
     const c = [cx / (3 * a), cy / (3 * a)];
     if (dansPolygone(c[0], c[1], anneau)) return c;
   }
-  const xs = anneau.map((q) => q[0]), ys = anneau.map((q) => q[1]);
-  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const ys = anneau.map((q) => q[1]);
   const y0 = Math.min(...ys), y1 = Math.max(...ys);
-  for (let i = 1; i < 8; i++) {
-    for (let j = 1; j < 8; j++) {
-      const x = x0 + (x1 - x0) * i / 8, y = y0 + (y1 - y0) * j / 8;
-      if (dansPolygone(x, y, anneau)) return [x, y];
+  if (!(y1 > y0)) return null;
+  let meilleur = null;
+  for (let i = 1; i < LIGNES_BALAYAGE; i++) {
+    const y = y0 + (y1 - y0) * i / LIGNES_BALAYAGE;
+    const xs = [];
+    for (let k = 0, j = anneau.length - 2; k < anneau.length - 1; j = k++) {
+      const [xk, yk] = anneau[k], [xj, yj] = anneau[j];
+      // Le côté franchit-il cette ligne ? Comparaison stricte d'un seul côté,
+      // pour ne compter qu'une fois un sommet posé exactement sur la ligne.
+      if ((yk > y) !== (yj > y)) xs.push(xk + (xj - xk) * (y - yk) / (yj - yk));
+    }
+    xs.sort((p, q) => p - q);
+    for (let k = 0; k + 1 < xs.length; k += 2) {
+      const largeur = xs[k + 1] - xs[k];
+      if (largeur > 0 && (!meilleur || largeur > meilleur.largeur)) {
+        meilleur = { x: (xs[k] + xs[k + 1]) / 2, y, largeur };
+      }
     }
   }
-  return null;
+  return meilleur ? [meilleur.x, meilleur.y] : null;
 };
 
 // Descripteurs métriques d'une parcelle, calculés sur son contour cadastral.
