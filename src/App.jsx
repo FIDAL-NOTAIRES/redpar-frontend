@@ -589,11 +589,15 @@ const mesurerSelection = (refs, contours) => {
   if (!contours || !refs || !refs.length) return null;
   let zone = null, horsZone = false, sansContour = 0;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  // Plus petite dimension de CHAQUE parcelle, pour dépister celles qui seront
+  // invisibles à l'échelle retenue (voir plus bas).
+  const cotes = [];
   for (const r of refs) {
     const g = contours.get(r);
     const anneaux = g ? anneauxDe(g) : [];
     if (!anneaux.length) { sansContour++; continue; }
     const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
+    let ax = Infinity, bx = -Infinity, ay = Infinity, by = -Infinity;
     for (const [lo, la] of ext) {
       const q = versConiqueConforme(la, lo);
       if (!q) { horsZone = true; continue; }
@@ -603,12 +607,32 @@ const mesurerSelection = (refs, contours) => {
       if (q.X > maxX) maxX = q.X;
       if (q.Y < minY) minY = q.Y;
       if (q.Y > maxY) maxY = q.Y;
+      if (q.X < ax) ax = q.X;
+      if (q.X > bx) bx = q.X;
+      if (q.Y < ay) ay = q.Y;
+      if (q.Y > by) by = q.Y;
     }
+    // La PLUS PETITE dimension, et non le côté d'un carré équivalent : une
+    // lanière de 40 m² fait peut-être 40 × 1 m, et c'est le mètre qui décide de
+    // sa visibilité. Le carré équivalent en donnerait six, et rassurerait à tort.
+    if (isFinite(ax)) cotes.push({ ref: r, cote: Math.min(bx - ax, by - ay) });
   }
   if (!isFinite(minX)) return { mesurable: false, sansContour, horsZone, zone };
   const largeur = Math.round((maxX - minX) * 10) / 10;
   const hauteur = Math.round((maxY - minY) * 10) / 10;
-  return { mesurable: true, largeur, hauteur, sansContour, horsZone, zone, ...choisirEchelle(largeur, hauteur) };
+  const ef = choisirEchelle(largeur, hauteur);
+  // PARCELLES INVISIBLES À L'ÉCHELLE RETENUE. Une parcelle de 10 ca mesure
+  // environ 3 m de côté ; au 1/2500 cela fait 1,2 mm sur le papier, invisible
+  // même coloriée. Elle figurera pourtant au tableau d'annotation, ce qui rend
+  // la pièce difficile à lire pour son destinataire. Seuil retenu : 2 mm, en
+  // deçà desquels un aplat de couleur ne se distingue plus du trait de limite.
+  // On AVERTIT sans bloquer : c'est un jugement de lisibilité, qui appartient au
+  // rédacteur de l'acte, non une erreur.
+  const SEUIL_MM = 2;
+  const minuscules = cotes
+    .filter((c) => c.cote / Number(ef.echelle) * 1000 < SEUIL_MM)
+    .map((c) => ({ ...c, mm: c.cote / Number(ef.echelle) * 1000 }));
+  return { mesurable: true, largeur, hauteur, sansContour, horsZone, zone, minuscules, seuilMm: SEUIL_MM, ...ef };
 };
 
 // ----------------------------------------------------------------------
@@ -2978,6 +3002,17 @@ export default function App() {
                           {carteApercu && carteApercu.sansContour > 0 && (
                             <div className="text-xs text-amber-800 mt-2">
                               ⚠ {carteApercu.sansContour} parcelle(s) sans contour au plan : elles figureront au tableau mais ne seront pas coloriées.
+                            </div>
+                          )}
+                          {carteApercu && carteApercu.minuscules && carteApercu.minuscules.length > 0 && (
+                            <div className="text-xs text-amber-800 mt-2">
+                              ⚠ {carteApercu.minuscules.length} parcelle(s) sous {carteApercu.seuilMm} mm au 1/{carteApercu.echelle} —{' '}
+                              {carteApercu.minuscules.slice(0, 6).map((c) => {
+                                const sn = sectionEtNumero(c.ref);
+                                return (sn ? sn.section + ' ' + sn.numero : c.ref) + ' (' + c.mm.toFixed(1) + ' mm)';
+                              }).join(', ')}
+                              {carteApercu.minuscules.length > 6 ? '…' : ''}. Elles figureront au tableau mais seront
+                              indiscernables sur le plan. Envisager un plan séparé à plus grande échelle.
                             </div>
                           )}
                           {carteApercu && carteApercu.deborde && (
