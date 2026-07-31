@@ -874,6 +874,22 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => 
   return `${PAINT_URL}/?${qs.toString()}`;
 };
 
+// DOCUMENT À DEUX PAGES — plan cadastral colorié et annoté, puis vue aérienne.
+// Demandé par JFD le 31/07/2026. C'est le lien « Annoté » PLUS doc=1 : rien de
+// nouveau à calculer, les paramètres de la vue aérienne (poly, pt, tab) sont déjà
+// tous portés par ce lien, et PAINT retient ses propres défauts pour le reste.
+//
+// ⚠ CE LIEN N'EXPORTE RIEN. Il ouvre PAINT sur le plan cadastral et y révèle un
+// bouton « Document 2 pages ». L'export reste donc sous l'œil de l'utilisateur,
+// et ce n'est pas une timidité : la colorisation cadastrale est semi-automatique
+// par conception — OCR des numéros, filtre de vraisemblance, repli manuel — alors
+// que la vue aérienne est déterministe. Un export lancé sans regard livrerait
+// parfois un document dont la PREMIÈRE page est mal coloriée, au dossier.
+const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres) => {
+  const base = lienPaintAnnote(codeParcelle, nomCommune, geom, contenance, autres);
+  return base ? `${base}&doc=1` : null;
+};
+
 // EXTRAIT DGFiP — le PDF brut, pièce autonome à joindre à un dossier.
 // Il ne passe par aucun traitement d'image : c'est donc le seul des trois liens
 // qui puisse porter une ROTATION de la zone d'impression sans risque (voir la
@@ -3179,9 +3195,10 @@ export default function App() {
                           <EnTete label="Nature" champ="natureCulture" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Droit" champ="codeDroit" tri={triParcelles} onTri={setTriParcelles} />
                           <EnTete label="Unité" champ="_unite" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Carte" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
+                          <EnTete label="Vue aérienne" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Colorier" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Annoté" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
+                          <EnTete label="Document" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                         </tr>
                       </thead>
                       <tbody>
@@ -3249,6 +3266,13 @@ export default function App() {
                                   <a href={lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance)} target="_blank" rel="noreferrer"
                                     title="Plan colorié ET annoté : désignation cadastrale et contenance en hectares, ares, centiares portées sous le titre"
                                     className="underline text-xs font-semibold" style={{ color: '#0F2238' }}>Annoté</a>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance) && (
+                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance)} target="_blank" rel="noreferrer"
+                                    title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
+                                    className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
                                 )}
                               </td>
                             </tr>
