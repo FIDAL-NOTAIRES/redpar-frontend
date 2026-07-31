@@ -927,9 +927,47 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres, adr
 // par conception — OCR des numéros, filtre de vraisemblance, repli manuel — alors
 // que la vue aérienne est déterministe. Un export lancé sans regard livrerait
 // parfois un document dont la PREMIÈRE page est mal coloriée, au dossier.
-const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
+/* ⚠ PLAFOND DE LOTS DANS L'URL — 400, et non 40 comme dans la première version.
+   Les 40 initiaux étaient une limite TECHNIQUE DÉGUISÉE EN LIMITE ÉDITORIALE,
+   ce qui était un mauvais raisonnement : PAINT lit location.search côté
+   navigateur, sans serveur intermédiaire, donc on tient sans peine 7 000
+   caractères, soit environ 400 lots à quatorze caractères encodés chacun.
+   PAINT pagine désormais sur autant de pages de continuation qu'il faut
+   (décision JFD du 31/07), donc le plafond ne borne plus l'affichage, seulement
+   le transport. Au-delà, seule la synthèse « n bâtiments, m lots » est émise.
+   ⚠ Un portefeuille réel peut dépasser largement : 15 451 locaux sur le cas de
+   contrôle LOGIS METROPOLE. Le plafond n'est donc pas théorique.
+   ⚠ AUCUNE SUPERFICIE : le volet bâti IDENTIFIE les locaux (bâtiment, entrée,
+   niveau, porte), il ne les MESURE pas. Ne pas chercher de surface bâtie. */
+const LOTS_MAX_URL = 400;
+const suffixeBati = (refs, batiPar) => {
+  if (!batiPar || !refs || !refs.length) return '';
+  const bats = new Set();
+  let lots = [];
+  refs.forEach((r) => {
+    const e = batiPar.get(r);
+    if (!e) return;
+    e.bats.forEach((b) => bats.add(b));
+    lots = lots.concat(e.lots);
+  });
+  if (!lots.length) return '';
+  const q = new URLSearchParams();
+  // Un local sans code bâtiment appartient tout de même à un bâtiment : on ne
+  // veut pas imprimer « 0 bâtiment, 15 lots ».
+  q.set('bati', `${Math.max(1, bats.size)},${lots.length}`);
+  if (lots.length <= LOTS_MAX_URL) {
+    q.set('lots', lots.map((t) => t
+      .map((c) => String(c == null ? '' : c).replace(/[;,]/g, ' ').trim())
+      .join(',')).join(';'));
+  }
+  return '&' + q.toString();
+};
+
+const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres, adresse, batiPar) => {
   const base = lienPaintAnnote(codeParcelle, nomCommune, geom, contenance, autres, adresse);
-  return base ? `${base}&doc=1` : null;
+  if (!base) return null;
+  const refs = (autres && autres.length) ? autres.map((o) => o.codeParcelle) : [codeParcelle];
+  return `${base}&doc=1${suffixeBati(refs, batiPar)}`;
 };
 
 // EXTRAIT DGFiP — le PDF brut, pièce autonome à joindre à un dossier.
@@ -1745,7 +1783,7 @@ export default function App() {
     // pas une collection. PAINT avertit de lui-même si les parcelles sont trop
     // dispersées pour qu'un repère unique ait du sens.
     if (mode === 'ortho') lien += '&fond=ortho&trace=rond&cadre=contexte';
-    else if (mode === 'doc') lien += '&doc=1';
+    else if (mode === 'doc') lien += '&doc=1' + suffixeBati(carteRefs, batiParRef);
     window.open(lien, '_blank', 'noreferrer');
   };
 
@@ -1779,6 +1817,20 @@ export default function App() {
       titresTxt: [...e.titres].join(' ; '),
       batimentsTxt: [...e.batiments].sort().join(', '),
     }));
+  })();
+
+  // Locaux par parcelle, pour le bloc « LOCAUX BÂTIS » de la page 2 du document.
+  // Même source que la vue par immeuble, structurée pour l'URL.
+  const batiParRef = (() => {
+    const m = new Map();
+    locaux.forEach((l) => {
+      if (!l.codeParcelle) return;
+      if (!m.has(l.codeParcelle)) m.set(l.codeParcelle, { bats: new Set(), lots: [] });
+      const e = m.get(l.codeParcelle);
+      if (l.batiment) e.bats.add(l.batiment);
+      e.lots.push([l.batiment, l.entree, l.niveau, l.porte]);
+    });
+    return m;
   })();
 
   const locauxAffiches = trierListe(
@@ -3326,11 +3378,25 @@ export default function App() {
                                     );
                                   }
                                   return (
-                                    <a href={lienU} target="_blank" rel="noreferrer"
-                                      title={`Éditer le plan de l'unité entière : ${u.membres.length} parcelles coloriées, `
-                                        + `désignation et total au cartouche — ${u.membres.join(', ')}`}>
-                                      {pastille}
-                                    </a>
+                                    <>
+                                      <a href={lienU} target="_blank" rel="noreferrer"
+                                        title={`Éditer le plan de l'unité entière : ${u.membres.length} parcelles coloriées, `
+                                          + `désignation et total au cartouche — ${u.membres.join(', ')}`}>
+                                        {pastille}
+                                      </a>
+                                      {/* ⚠ TROU COMBLÉ : la cellule n'offrait QUE le plan cadastral, alors que
+                                        la ligne par parcelle porte quatre liens. L'entrée la plus
+                                        naturelle vers le multi-parcelles était donc la plus pauvre.
+                                        Mêmes suffixes que le plan à la carte, aucun calcul nouveau. */}
+                                      <div className="mt-0.5 flex gap-1.5 justify-center">
+                                        <a href={`${lienU}&fond=ortho&trace=rond&cadre=contexte`} target="_blank" rel="noreferrer"
+                                          title="Vue aérienne de l'unité entière, un repère sur l'ensemble"
+                                          className="text-[10px] underline" style={{ color: '#0F2238' }}>aérienne</a>
+                                        <a href={`${lienU}&doc=1${suffixeBati(u.membres, batiParRef)}`} target="_blank" rel="noreferrer"
+                                          title="Document deux pages de l'unité entière"
+                                          className="text-[10px] underline" style={{ color: '#33838B' }}>doc</a>
+                                      </div>
+                                    </>
                                   );
                                 })()}
                               </td>
@@ -3354,8 +3420,8 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse) && (
-                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse)} target="_blank" rel="noreferrer"
+                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef) && (
+                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef)} target="_blank" rel="noreferrer"
                                     title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
                                     className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
                                 )}
