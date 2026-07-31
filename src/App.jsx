@@ -825,7 +825,14 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => 
     parcelle: r.slice(10, 14),
     fond: 'ortho',
     trace: 'rond',        // repère qui DÉSIGNE sans délimiter
-    cadre: 'plan',        // superposable au plan cadastral, si emp suit
+    // CADRAGE DE CONTEXTE (×3 le repère), décision JFD du 31/07/2026 après
+    // comparaison à l'écran de trois cadrages. Arbitrage chiffré : lisibilité du
+    // repère et finesse d'impression tirent en sens OPPOSÉ. En demi-page, ×3
+    // laisse un repère à 33 % de la largeur pour 180 dpi réels ; le cadrage
+    // cadastral donnait 276 dpi mais un repère à 22 %, jugé trop discret.
+    // ⚠ Si l'image devait passer en PLEINE LARGEUR A4, ×3 tomberait à 83 dpi et
+    // il faudrait repasser à 'plan' — la largeur d'insertion commande le choix.
+    cadre: 'contexte',
     couleur: '#A01040',
     auto: '1',
   });
@@ -837,15 +844,16 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => 
   // millimètres, et l'échelle les convertit. Sans ce paramètre, PAINT retombe sur
   // un cadrage serré EN L'ANNONÇANT, plutôt que de livrer une pièce faussement
   // superposable.
+  // emp reste ÉMIS bien qu'inutilisé par le cadrage de contexte : il suffit alors
+  // de remplacer 'contexte' par 'plan' dans l'URL pour obtenir la pièce
+  // superposable au plan cadastral, sans rien recalculer. Coût nul, option
+  // conservée. Si la parcelle déborde du plus grand format, il n'existe aucun
+  // cadre cadastral cohérent à reprendre et emp est simplement absent.
   const ef = choisirEchelle(f.largeur, f.hauteur);
   const c = CARTES[ef.format];
   if (c && !ef.deborde) {
     const e = Number(ef.echelle);
     qs.set('emp', `${(c.l * e / 1000).toFixed(1)}x${(c.h * e / 1000).toFixed(1)}`);
-  } else {
-    // Parcelle plus grande que ce qu'un extrait peut montrer : aucun cadre
-    // cadastral cohérent à reprendre, donc on cadre sur le repère.
-    qs.set('cadre', 'serre');
   }
   // Tableau d'annotation, même convention que lienPaintAnnote.
   const liste = (autres && autres.length ? autres
