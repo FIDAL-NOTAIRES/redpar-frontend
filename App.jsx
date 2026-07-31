@@ -467,6 +467,44 @@ const choisirOrientation = (polyProjete) => {
 // Contenance dans la forme notariale : hectares, ares, centiares. Un are vaut
 // cent mètres carrés, un centiare un mètre carré. C'est la forme attendue dans
 // une désignation, et non le mètre carré brut.
+/* ==================================================================
+   ADRESSE CADASTRALE, FORME DU M1                  (31/07/2026)
+   ------------------------------------------------------------------
+   ⚠ ON RESTE EN CAPITALES, ABRÉVIATIONS CONSERVÉES. Décision JFD du 31/07,
+   prise sur pièce : un extrait cadastral modèle 1 réel (Bergues, AC 0170 et
+   0185) imprime « 6 PL DU MARCHE AUX BESTIAUX » et « 16 RUE DU COLLEGE ».
+   Donc numéro SANS remplissage à zéro, nature de voie ABRÉGÉE, capitales, pas
+   d'accent. La seule chose retirée est le bourrage « 0010 » du fichier MAJIC,
+   qui est un artefact de format et ne figure sur AUCUN document imprimé.
+
+   ⚠ DIVERGENCE ASSUMÉE AVEC TRENTE, À NE PAS « HARMONISER ». L'addendum TRENTE
+   v3 prescrit l'inverse — libellés rétablis en langage d'acte, « 11 ALL DU
+   TENNIS » devenant « 11 allée du Tennis ». Les deux ont raison, parce qu'ils ne
+   font pas la même chose : TRENTE RÉDIGE UNE CLAUSE D'ACTE, où le langage
+   d'acte s'impose ; REDPAR produit une ANNEXE ILLUSTRATIVE que l'on doit pouvoir
+   recouper avec un M1, donc qui doit lui ressembler. Ne pas aligner l'un sur
+   l'autre au nom de la cohérence : ce serait casser l'un des deux usages.
+
+   ⚠ CONSÉQUENCE HEUREUSE : plus de problème d'accents. Le fichier MAJIC étant en
+   capitales non accentuées, rester en capitales supprime la question — et avec
+   elle la relecture qu'imposait toute tentative de restitution. Le dictionnaire
+   d'accents et la table des natures de voie, écrits puis éprouvés le 31/07, ont
+   été RETIRÉS : ne pas les réintroduire ici, ils appartiennent à TRENTE.
+   ================================================================== */
+function adresseM1(brut){
+  let t = String(brut || '').trim().toUpperCase();
+  if (!t) return '';
+  // La virgule et le point-virgule séparent les champs et les rangs du
+  // paramètre « tab » : ils ne peuvent pas traverser une valeur.
+  t = t.replace(/[;,]/g, ' ').replace(/\s+/g, ' ').trim();
+  const mots = t.split(' ');
+  if (/^\d+$/.test(mots[0])) {
+    const n = parseInt(mots[0], 10);
+    if (n === 0) mots.shift(); else mots[0] = String(n);
+  }
+  return mots.join(' ').trim();
+}
+
 const contenanceNotariale = (m2) => {
   const a = Math.max(0, Math.round(Number(m2) || 0));
   const ha = Math.floor(a / 10000);
@@ -522,7 +560,7 @@ const designationCadastrale = (codeParcelle) => {
 // cinq mille, ce qui laisse de la marge tout en conservant un tracé fidèle.
 const BUDGET_SOMMETS = 250;
 
-const lienPaintUnite = (membres, parParcelle, contours, nomCommune) => {
+const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) => {
   if (!membres || membres.length < 2 || !contours) return null;
   const geoms = membres.map((r) => contours.get(r)).filter(Boolean);
   if (geoms.length < 2) return null;
@@ -587,7 +625,7 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune) => {
     if (!sn) return;
     const m2 = Number(parParcelle.get(ref)) || 0;
     somme += m2;
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''}`);
+    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(adressePar && adressePar.get ? adressePar.get(ref) : '')}`);
   });
   if (rangs.length) {
     qs.set('tab', rangs.join(';'));
@@ -772,7 +810,7 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
 // ligne de total quand il y en a plusieurs.
 // Signature prévue pour les UNITÉS FONCIÈRES : elle accepte déjà une liste de
 // parcelles, même si l'interface n'en passe qu'une pour l'instant.
-const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres) => {
+const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
   const liste = (autres && autres.length ? autres
     : [{ codeParcelle, contenance }]).filter((o) => o && o.codeParcelle);
   const rangs = [];
@@ -782,7 +820,9 @@ const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres) => 
     if (!sn) return;
     const m2 = Number(o.contenance) || 0;
     somme += m2;
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''}`);
+    // 4e champ : le LIEUDIT en langage d'acte. Vide s'il est inconnu — PAINT
+    // supprime alors la colonne au lieu de l'imprimer creuse.
+    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(o.adresse || adresse || '')}`);
   });
   if (!rangs.length) return lienPaintColorise(codeParcelle, nomCommune, geom);
   const sup = new URLSearchParams();
@@ -812,7 +852,7 @@ const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres) => 
 // contour : les 2,7 % de parcelles sans contour garderaient sinon aucune vue du
 // ciel, alors que le lien Google ne demande que des coordonnées. Le remplacement
 // est donc total sur les 97,3 % où l'on sait faire mieux, et nul ailleurs.
-const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => {
+const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
   const f = descripteursForme(geom);
@@ -865,7 +905,9 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => 
     if (!sn) return;
     const m2 = Number(o.contenance) || 0;
     somme += m2;
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''}`);
+    // 4e champ : le LIEUDIT en langage d'acte. Vide s'il est inconnu — PAINT
+    // supprime alors la colonne au lieu de l'imprimer creuse.
+    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(o.adresse || adresse || '')}`);
   });
   if (rangs.length) {
     qs.set('tab', rangs.join(';'));
@@ -885,8 +927,8 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => 
 // par conception — OCR des numéros, filtre de vraisemblance, repli manuel — alors
 // que la vue aérienne est déterministe. Un export lancé sans regard livrerait
 // parfois un document dont la PREMIÈRE page est mal coloriée, au dossier.
-const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres) => {
-  const base = lienPaintAnnote(codeParcelle, nomCommune, geom, contenance, autres);
+const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
+  const base = lienPaintAnnote(codeParcelle, nomCommune, geom, contenance, autres, adresse);
   return base ? `${base}&doc=1` : null;
 };
 
@@ -1190,7 +1232,7 @@ function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) 
       if (!coords) return;
       bounds.push(coords);
       const satLink = lienVueAerienne(p.codeParcelle, p.commune,
-          contours?.get(p.codeParcelle), p.contenance)
+          contours?.get(p.codeParcelle), p.contenance, null, p.adresse)
         || buildSatelliteLink(p.coordonnees);
       const marker = L.marker(coords, { icon: fidalIcon });
       const popupContent = `
@@ -1626,6 +1668,18 @@ export default function App() {
     return m;
   })();
 
+  // Adresse cadastrale par référence : alimente le 4e champ de « tab », donc la
+  // colonne « Lieudit » de la désignation. Même construction que ci-dessus, la
+  // première occurrence gagne — une parcelle détenue à deux titres apparaît
+  // deux fois mais porte la même adresse.
+  const adresseParRef = (() => {
+    const m = new Map();
+    parcelles.forEach((o) => {
+      if (o.codeParcelle && !m.has(o.codeParcelle)) m.set(o.codeParcelle, o.adresse || '');
+    });
+    return m;
+  })();
+
   // Sélecteur du plan à la carte. Calculé seulement quand le panneau est ouvert :
   // inutile de regrouper mille six cents parcelles à chaque frappe au clavier.
   const carteGroupes = carteOuverte ? grouperPourCarte(parcelles) : null;
@@ -1663,22 +1717,36 @@ export default function App() {
     // Une seule commune au relevé : la question ne se pose pas, on entre direct.
     if (g.length === 1) choisirCommuneCarte(g[0]); else { setCarteCommune(null); setCarteSel(new Set()); }
   };
-  const genererCarte = () => {
+  /* ⚠ TROU COMBLÉ LE 31/07/2026 : le plan à la carte ne produisait QUE le plan
+     cadastral, alors que le tableau de détail offrait déjà vue aérienne et
+     document. Une sélection de plusieurs parcelles n'avait donc accès à aucune
+     des deux — c'était l'usage le plus utile qui en était privé.
+     Réparation sans duplication : lienPaintUnite fabrique déjà le poly
+     multi-parcelles et le pt de l'ensemble ; il suffit de lui adjoindre les
+     suffixes. Les paramètres cadastraux qu'il émet (echelle, format, dim) sont
+     sans effet en mode ortho, c'est acquis au contrat. */
+  const genererCarte = (mode = 'plan') => {
     if (!carteRefs.length) return;
     const nom = carteCommuneObj ? carteCommuneObj.nom : '';
     const avecContour = carteRefs.filter((r) => contours?.get(r));
     let lien = avecContour.length >= 2
-      ? lienPaintUnite(carteRefs, surfaceParRef, contours, nom)
+      ? lienPaintUnite(carteRefs, surfaceParRef, contours, nom, adresseParRef)
       : null;
     // Repli : une seule parcelle coloriable, ou lienPaintUnite qui refuse. Le plan
     // est alors centré sur elle, mais le TABLEAU porte toute la sélection — on ne
     // perd pas la désignation des parcelles restées sans contour.
     if (!lien) {
       const pivot = avecContour[0] || carteRefs[0];
-      const autres = carteRefs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r) }));
-      lien = lienPaintAnnote(pivot, nom, contours?.get(pivot), surfaceParRef.get(pivot), autres);
+      const autres = carteRefs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r), adresse: adresseParRef.get(r) }));
+      lien = lienPaintAnnote(pivot, nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
     }
-    if (lien) window.open(lien, '_blank', 'noreferrer');
+    if (!lien) return;
+    // trace=rond pose UN repère sur l'ensemble : une sélection est une propriété,
+    // pas une collection. PAINT avertit de lui-même si les parcelles sont trop
+    // dispersées pour qu'un repère unique ait du sens.
+    if (mode === 'ortho') lien += '&fond=ortho&trace=rond&cadre=contexte';
+    else if (mode === 'doc') lien += '&doc=1';
+    window.open(lien, '_blank', 'noreferrer');
   };
 
   // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
@@ -1906,7 +1974,7 @@ export default function App() {
   // sans contour, lienVueAerienne rend null, et une colonne vide priverait la
   // parcelle de toute vue du ciel.
   const lienCarte = (o) => lienVueAerienne(o.codeParcelle, o.commune,
-      contours?.get(o.codeParcelle), o.contenance)
+      contours?.get(o.codeParcelle), o.contenance, null, o.adresse)
     || buildSatelliteLink(o.coordonnees)
     || (o.adresse && o.commune
       ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${o.adresse} ${o.commune}`)}`
@@ -2037,7 +2105,7 @@ export default function App() {
             } else cellCo.value = '';
             // Plan colorié ET annoté : désignation cadastrale et contenance en
             // hectares, ares, centiares, portées sous le titre de l'extrait.
-            const annote = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance);
+            const annote = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance, null, o.adresse);
             const cellAn = row.getCell(19);
             if (annote) {
               cellAn.value = { text: 'Annoté', hyperlink: annote };
@@ -2090,7 +2158,7 @@ export default function App() {
               cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
               cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cellEx.value = '';
-            const annote2 = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance);
+            const annote2 = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance, null, o.adresse);
             const cellAn2 = row.getCell(15);
             if (annote2) {
               cellAn2.value = { text: 'Annoté', hyperlink: annote2 };
@@ -3122,11 +3190,28 @@ export default function App() {
                               <button onClick={() => setCarteSel(new Set())}
                                 className="text-xs underline text-stone-500">tout décocher</button>
                             )}
-                            <button onClick={genererCarte}
+                            <button onClick={() => genererCarte('plan')}
                               disabled={!carteRefs.length || !contours || (carteApercu && carteApercu.horsZone)}
                               className="ml-auto px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
                               style={{ backgroundColor: '#A01040' }}>
                               Générer le plan
+                            </button>
+                            {/* ⚠ Ces deux boutons exigent AU MOINS UN CONTOUR : sans poly ni pt,
+                                la vue aérienne n'a pas d'emprise à commander et PAINT ne
+                                pourrait qu'afficher un message d'échec. */}
+                            <button onClick={() => genererCarte('ortho')}
+                              disabled={!carteRefs.length || !contours || !carteRefs.some((r) => contours?.get(r))}
+                              title="Vue aérienne IGN de la sélection, avec un repère sur l'ensemble"
+                              className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
+                              style={{ backgroundColor: '#0F2238' }}>
+                              Vue aérienne
+                            </button>
+                            <button onClick={() => genererCarte('doc')}
+                              disabled={!carteRefs.length || !contours || !carteRefs.some((r) => contours?.get(r))}
+                              title="Un seul PDF : le plan cadastral de la sélection, puis la vue aérienne et la carte de situation"
+                              className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
+                              style={{ backgroundColor: '#33838B' }}>
+                              Document
                             </button>
                           </div>
                           {carteApercu && carteApercu.horsZone && (
@@ -3204,7 +3289,7 @@ export default function App() {
                       <tbody>
                         {parcellesAffichees.map((p, i) => {
                           const link = lienVueAerienne(p.codeParcelle, p.commune,
-                              contours?.get(p.codeParcelle), p.contenance)
+                              contours?.get(p.codeParcelle), p.contenance, null, p.adresse)
                             || buildSatelliteLink(p.coordonnees);
                           return (
                             <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
@@ -3223,7 +3308,7 @@ export default function App() {
                                   const u = unitesF.unites[n - 1];
                                   const groupe = u.membres.length > 1;
                                   const lienU = groupe
-                                    ? lienPaintUnite(u.membres, surfaceParRef, contours, p.commune)
+                                    ? lienPaintUnite(u.membres, surfaceParRef, contours, p.commune, adresseParRef)
                                     : null;
                                   const pastille = (
                                     <span className={groupe ? 'px-1.5 py-0.5 rounded border font-medium' : 'text-stone-500'}
@@ -3262,15 +3347,15 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance) && (
-                                  <a href={lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance)} target="_blank" rel="noreferrer"
+                                {lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse) && (
+                                  <a href={lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse)} target="_blank" rel="noreferrer"
                                     title="Plan colorié ET annoté : désignation cadastrale et contenance en hectares, ares, centiares portées sous le titre"
                                     className="underline text-xs font-semibold" style={{ color: '#0F2238' }}>Annoté</a>
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance) && (
-                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance)} target="_blank" rel="noreferrer"
+                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse) && (
+                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse)} target="_blank" rel="noreferrer"
                                     title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
                                     className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
                                 )}
