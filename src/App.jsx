@@ -793,6 +793,79 @@ const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres) => 
   return base + '&' + sup.toString();
 };
 
+// ----------------------------------------------------------------------
+// VUE AÉRIENNE IGN — pièce ILLUSTRATIVE, via PAINT (31/07/2026)
+// REMPLACE le lien Google Maps satellite, décision JFD du 31/07/2026. Les deux
+// ne faisaient pas le même métier : Google sert à REGARDER, et son imagerie
+// n'est pas reproductible dans un livrable — ses conditions d'utilisation
+// l'interdisent. L'ortho IGN est en licence ouverte, donc annexable à un acte,
+// et PAINT en fait une pièce annotée et exportable.
+//
+// GÉORÉFÉRENCEMENT ANALYTIQUE côté PAINT : il commande l'image au WMS, donc il
+// connaît la bbox et n'a RIEN à lire — ni étiquette, ni OCR. Voir l'addendum
+// PAINT v3 du 31/07/2026.
+//
+// ⚠ PAS DE ROTATION sur ce lien, pour la raison du § 5 de l'addendum v4 : le
+// repère est calculé dans le repère de la page non tournée.
+//
+// ⚠ REPLI SUR GOOGLE QUAND LE CONTOUR MANQUE. Cette fonction rend null sans
+// contour : les 2,7 % de parcelles sans contour garderaient sinon aucune vue du
+// ciel, alors que le lien Google ne demande que des coordonnées. Le remplacement
+// est donc total sur les 97,3 % où l'on sait faire mieux, et nul ailleurs.
+const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres) => {
+  const r = String(codeParcelle || '');
+  if (r.length !== 14) return null;
+  const f = descripteursForme(geom);
+  if (!f || !f.cc || !f.poly) return null;      // sans contour : repli appelant
+  const qs = new URLSearchParams({
+    commune: r.slice(0, 5),
+    nomCommune: nomCommune || '',
+    prefixe: r.slice(5, 8),
+    section: r.slice(8, 10),
+    parcelle: r.slice(10, 14),
+    fond: 'ortho',
+    trace: 'rond',        // repère qui DÉSIGNE sans délimiter
+    cadre: 'plan',        // superposable au plan cadastral, si emp suit
+    couleur: '#A01040',
+    auto: '1',
+  });
+  qs.set('pt', `${f.cc.X.toFixed(1)},${f.cc.Y.toFixed(1)}`);
+  qs.set('poly', f.poly.map(([X, Y]) => `${X.toFixed(1)},${Y.toFixed(1)}`).join(';'));
+  // EMPRISE AU SOL DU CADRE DU PLAN CADASTRAL, en mètres. C'est ELLE qui rend les
+  // deux pièces superposables : PAINT connaît le format et l'échelle, mais pas
+  // les dimensions utiles du cadre à l'intérieur de la page — CARTES les porte en
+  // millimètres, et l'échelle les convertit. Sans ce paramètre, PAINT retombe sur
+  // un cadrage serré EN L'ANNONÇANT, plutôt que de livrer une pièce faussement
+  // superposable.
+  const ef = choisirEchelle(f.largeur, f.hauteur);
+  const c = CARTES[ef.format];
+  if (c && !ef.deborde) {
+    const e = Number(ef.echelle);
+    qs.set('emp', `${(c.l * e / 1000).toFixed(1)}x${(c.h * e / 1000).toFixed(1)}`);
+  } else {
+    // Parcelle plus grande que ce qu'un extrait peut montrer : aucun cadre
+    // cadastral cohérent à reprendre, donc on cadre sur le repère.
+    qs.set('cadre', 'serre');
+  }
+  // Tableau d'annotation, même convention que lienPaintAnnote.
+  const liste = (autres && autres.length ? autres
+    : [{ codeParcelle, contenance }]).filter((o) => o && o.codeParcelle);
+  const rangs = [];
+  let somme = 0;
+  liste.forEach((o) => {
+    const sn = sectionEtNumero(o.codeParcelle);
+    if (!sn) return;
+    const m2 = Number(o.contenance) || 0;
+    somme += m2;
+    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''}`);
+  });
+  if (rangs.length) {
+    qs.set('tab', rangs.join(';'));
+    if (rangs.length > 1 && somme > 0) qs.set('total', contenanceNotariale(somme));
+  }
+  return `${PAINT_URL}/?${qs.toString()}`;
+};
+
 // EXTRAIT DGFiP — le PDF brut, pièce autonome à joindre à un dossier.
 // Il ne passe par aucun traitement d'image : c'est donc le seul des trois liens
 // qui puisse porter une ROTATION de la zone d'impression sans risque (voir la
@@ -1092,7 +1165,9 @@ function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) 
       const coords = parseCoords(p.coordonnees);
       if (!coords) return;
       bounds.push(coords);
-      const satLink = buildSatelliteLink(p.coordonnees);
+      const satLink = lienVueAerienne(p.codeParcelle, p.commune,
+          contours?.get(p.codeParcelle), p.contenance)
+        || buildSatelliteLink(p.coordonnees);
       const marker = L.marker(coords, { icon: fidalIcon });
       const popupContent = `
         <div style="font-family:system-ui;min-width:220px">
@@ -1101,7 +1176,7 @@ function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) 
           <div style="font-size:12px;color:#475569;margin-bottom:3px">${p.commune || ''} (${p.departement || ''})</div>
           <div style="font-size:12px;color:#475569;margin-bottom:3px">📐 ${(p.contenance || 0).toLocaleString('fr-FR')} m² • ${p.natureCulture || ''}</div>
           <div style="font-family:monospace;font-size:10px;color:#94a3b8;margin-bottom:6px">${p.codeParcelle || ''}</div>
-          ${satLink ? `<a href="${satLink}" target="_blank" rel="noreferrer" style="display:inline-block;background:#1e2952;color:#fbbf24;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600;text-decoration:none">Vue satellite ↗</a>` : ''}
+          ${satLink ? `<a href="${satLink}" target="_blank" rel="noreferrer" style="display:inline-block;background:#1e2952;color:#fbbf24;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600;text-decoration:none">Vue aérienne ↗</a>` : ''}
         </div>
       `;
       marker.bindPopup(popupContent);
@@ -1803,7 +1878,12 @@ export default function App() {
   // croire à une donnée manquante.
   const SANS_OBJET = '—';
 
-  const lienCarte = (o) => buildSatelliteLink(o.coordonnees)
+  // VUE AÉRIENNE IGN d'abord, Google en repli. Le repli n'est pas un confort :
+  // sans contour, lienVueAerienne rend null, et une colonne vide priverait la
+  // parcelle de toute vue du ciel.
+  const lienCarte = (o) => lienVueAerienne(o.codeParcelle, o.commune,
+      contours?.get(o.codeParcelle), o.contenance)
+    || buildSatelliteLink(o.coordonnees)
     || (o.adresse && o.commune
       ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${o.adresse} ${o.commune}`)}`
       : null);
@@ -1865,7 +1945,7 @@ export default function App() {
           headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
             'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
             'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit',
-            'Unité foncière', 'Carte', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
+            'Unité foncière', 'Vue aérienne', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
           widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
@@ -1951,7 +2031,7 @@ export default function App() {
         ajouterOnglet(wb, {
           nom: 'Écarts de contenance',
           headers: ['#', 'Ampleur', 'Référence cadastrale', 'Commune', 'Département',
-            'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Carte',
+            'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Vue aérienne',
             'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
           widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16, 16, 16, 16],
           sujet: `${selectedCompany?.nom || ''}  |  ${coherence.ecarts.length} écart(s) sur `
@@ -2007,7 +2087,7 @@ export default function App() {
       // --- Onglet 3 : le non bâti seul ---
       ajouterOnglet(wb, {
         nom: 'Parcelles',
-        headers: ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Droit', 'Carte'],
+        headers: ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Droit', 'Vue aérienne'],
         widths: [5, 18, 22, 18, 22, 35, 12, 14, 26, 18],
         sujet: sujet('parcelle(s)', totalParcelles),
         lignes: parcelles,
@@ -2037,7 +2117,7 @@ export default function App() {
       if (locaux.length) {
         ajouterOnglet(wb, {
           nom: 'Locaux',
-          headers: ['#', 'Référence parcelle', 'Commune', 'Département', 'Région', 'Adresse', 'Bâtiment', 'Entrée', 'Niveau', 'Porte', 'Droit', 'Carte'],
+          headers: ['#', 'Référence parcelle', 'Commune', 'Département', 'Région', 'Adresse', 'Bâtiment', 'Entrée', 'Niveau', 'Porte', 'Droit', 'Vue aérienne'],
           widths: [5, 18, 22, 18, 22, 35, 10, 8, 8, 10, 26, 18],
           sujet: sujet('local(aux)', totalLocaux),
           lignes: locaux,
@@ -3098,7 +3178,9 @@ export default function App() {
                       </thead>
                       <tbody>
                         {parcellesAffichees.map((p, i) => {
-                          const link = buildSatelliteLink(p.coordonnees);
+                          const link = lienVueAerienne(p.codeParcelle, p.commune,
+                              contours?.get(p.codeParcelle), p.contenance)
+                            || buildSatelliteLink(p.coordonnees);
                           return (
                             <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
                               <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
