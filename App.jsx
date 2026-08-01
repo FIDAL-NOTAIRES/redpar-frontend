@@ -1449,6 +1449,12 @@ export default function App() {
   const [carteSel, setCarteSel] = useState(() => new Set());
   const [carteDepliees, setCarteDepliees] = useState(() => new Set());
   const [qCarteCommune, setQCarteCommune] = useState('');
+  // Dossier complet : un document PAR COMMUNE pour TOUT le relevé (filtré),
+  // communes triées alphabétiquement, parcelles triées section puis numéro.
+  // Contrainte de fond (mémo PAINT) : plan d'ensemble et zone conique = UNE
+  // commune ; le dossier complet est donc une SUITE de documents, pas un seul.
+  const [dossierOuvert, setDossierOuvert] = useState(false);
+  const [dossierFaits, setDossierFaits] = useState(() => new Set());
 
   const droitsPresents = (() => {
     const m = new Map();
@@ -1649,6 +1655,7 @@ export default function App() {
     setDroitsChoisis(null);
     setQParcelles(''); setQLocaux('');
     setContours(null);
+    setDossierFaits(new Set()); setDossierOuvert(false);
     setTriParcelles({ champ: '', sens: 'asc' }); setTriLocaux({ champ: '', sens: 'asc' });
     // Les deux relevés partent ensemble ; le géocodage attend les deux pour
     // n'interroger chaque commune qu'une fois.
@@ -1815,6 +1822,56 @@ export default function App() {
     else if (mode === 'doc') lien += '&doc=1' + suffixeBati(carteRefs, batiParRef)
       + suffixePP(carteRefs, contours);
     window.open(lien, '_blank', 'noreferrer');
+  };
+
+  // ---- DOSSIER COMPLET — demandé par JFD le 01/08/2026 --------------------
+  // Même chemin que le panier du plan à la carte (lienPaintUnite + doc=1 +
+  // suffixes), appliqué commune par commune à TOUT le relevé filtré : ZÉRO
+  // machinerie nouvelle, uniquement de l'orchestration. Chaque « Générer »
+  // ouvre PAINT prérempli ; le clic « Document » y reste volontaire (contrat
+  // doc=1). PAS DE PLAFOND de parcelles — décision JFD — mais un AVERTISSEMENT
+  // de délai : chaque parcelle coûte un extrait SCPC (~6 s) plus les vues IGN.
+  const dossierGroupes = dossierOuvert
+    ? grouperPourCarte(parcelles).slice().sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
+    : null;
+  // Tri section puis numéro À L'INTÉRIEUR de la commune : le préfixe précède la
+  // section dans la clé de tri (communes fusionnées : deux sections « A » de
+  // préfixes différents ne doivent pas s'entremêler).
+  const refsTrieesDe = (c) => [...c.vues].sort((a, b) =>
+    a.slice(5, 10).localeCompare(b.slice(5, 10)) ||
+    ((Number(a.slice(10, 14)) || 0) - (Number(b.slice(10, 14)) || 0)));
+  const lienDossierCommune = (c) => {
+    const refs = refsTrieesDe(c);
+    const avecContour = refs.filter((r) => contours?.get(r));
+    let lien = avecContour.length >= 2
+      ? lienPaintUnite(refs, surfaceParRef, contours, c.nom, adresseParRef)
+      : null;
+    // Repli identique à genererCarte : une seule parcelle coloriable, ou
+    // lienPaintUnite qui refuse — le tableau porte alors toute la commune.
+    if (!lien) {
+      const pivot = avecContour[0] || refs[0];
+      const autres = refs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r), adresse: adresseParRef.get(r) }));
+      lien = lienPaintAnnote(pivot, c.nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
+    }
+    if (!lien) return null;
+    return lien + '&doc=1' + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
+  };
+  const genererDossierCommune = (c) => {
+    const lien = lienDossierCommune(c);
+    if (!lien) return;
+    window.open(lien, '_blank', 'noreferrer');
+    setDossierFaits((s) => new Set(s).add(c.insee));
+  };
+  const basculerDossierFait = (insee) => setDossierFaits((s) => {
+    const n = new Set(s);
+    if (n.has(insee)) n.delete(insee); else n.add(insee);
+    return n;
+  });
+  const dureeDossier = (nb) => {
+    const s = nb * 8;
+    if (s < 60) return `≈ ${s} s`;
+    if (s < 3600) return `≈ ${Math.round(s / 60)} min`;
+    return `≈ ${(s / 3600).toFixed(1)} h`;
   };
 
   // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
@@ -3148,6 +3205,66 @@ export default function App() {
                     navigation : le panier traverse les sections, une unité
                     foncière enjambant volontiers une limite de section.
                     ------------------------------------------------------------ */}
+                {dossierOuvert && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
+                    <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
+                      <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-3">
+                        <MapPin className="w-4 h-4" style={{ color: '#33838B' }} />
+                        <h3 className="font-semibold text-blue-950">Dossier complet</h3>
+                        <span className="text-sm text-stone-600">
+                          {dossierGroupes ? dossierGroupes.length : 0} commune(s) · {parcelles.length.toLocaleString('fr-FR')} parcelle(s)
+                        </span>
+                        <button onClick={() => setDossierOuvert(false)}
+                          className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
+                      </div>
+                      <div className="px-6 py-3 text-xs text-amber-800 bg-amber-50 border-b border-amber-100">
+                        Un document par commune — le plan d'ensemble et son calage l'imposent. Chaque parcelle coûte
+                        un extrait officiel (~6 s, service du cadastre à débit limité) plus ses vues : la durée
+                        estimée figure par commune. Ouvrez PAINT commune par commune, contrôlez, puis cliquez
+                        « Document » — la coche suit votre avancement.
+                      </div>
+                      <div className="overflow-y-auto px-6 py-3">
+                        {(dossierGroupes || []).map((c) => {
+                          const lienOk = !!lienDossierCommune(c);
+                          const aContour = [...c.vues].some((r) => contours?.get(r));
+                          return (
+                            <div key={c.insee} className="flex items-center gap-3 py-2 border-b border-stone-100">
+                              <input type="checkbox" checked={dossierFaits.has(c.insee)}
+                                onChange={() => basculerDossierFait(c.insee)}
+                                title="Fait / à faire" className="accent-teal-700" />
+                              <div className="flex-1 min-w-0">
+                                <span className={dossierFaits.has(c.insee) ? 'line-through text-stone-400' : 'text-blue-950 font-medium'}>
+                                  {c.nom}
+                                </span>
+                                <span className="text-stone-400 text-xs ml-2">({c.insee})</span>
+                                {!aContour && contours && (
+                                  <div className="text-xs" style={{ color: '#A01040' }}>Aucun contour pour cette commune — plan centré sur une parcelle, sans colorisation.</div>
+                                )}
+                                {!lienOk && contours && aContour && (
+                                  <div className="text-xs" style={{ color: '#A01040' }}>Commune à cheval sur deux zones coniques conformes : document impossible d'un tenant.</div>
+                                )}
+                              </div>
+                              <span className="text-xs text-stone-600 whitespace-nowrap">{c.nb.toLocaleString('fr-FR')} parc. · {contenanceNotariale(c.surface)}</span>
+                              <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(c.nb)}</span>
+                              <button onClick={() => genererDossierCommune(c)}
+                                disabled={!contours || !lienOk}
+                                className="px-3 py-1.5 text-xs font-semibold text-white rounded-lg disabled:opacity-40"
+                                style={{ backgroundColor: '#33838B' }}>
+                                Générer
+                              </button>
+                            </div>
+                          );
+                        })}
+                        {!contours && (
+                          <div className="text-xs text-stone-500 py-3">Les contours se chargent avec le relevé — patientez, les boutons s'activeront d'eux-mêmes.</div>
+                        )}
+                      </div>
+                      <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
+                        {dossierFaits.size} / {dossierGroupes ? dossierGroupes.length : 0} commune(s) générée(s)
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {carteOuverte && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
                     <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
@@ -3347,6 +3464,12 @@ export default function App() {
                       className="ml-auto px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
                       style={{ backgroundColor: '#A01040' }}>
                       Plan à la carte
+                    </button>
+                    <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
+                      title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
+                      className="px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
+                      style={{ backgroundColor: '#33838B' }}>
+                      Dossier complet
                     </button>
                   </div>
                   <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
