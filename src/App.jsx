@@ -590,12 +590,31 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) 
   const ef = choisirEchelle(largeur, hauteur);
 
   const mParPixel = (/paysage/.test(ef.format) ? 0.297 : 0.210) * Number(ef.echelle) / 1700;
-  let tol = Math.max(0.2, mParPixel / 2);
-  let reduits = projetes.map((pts) => simplifier(pts, tol));
-  for (let i = 0; i < 8 && reduits.reduce((t, a) => t + a.length, 0) > BUDGET_SOMMETS; i++) {
-    tol *= 2;
-    reduits = projetes.map((pts) => simplifier(pts, tol));
-  }
+  // ⚠ SIMPLIFICATION PAR POLYGONE, plus jamais globale — défaut du 01/08 : le
+  // budget GLOBAL de 250 sommets, hérité des liens Excel (~2 000 caractères),
+  // affamait chaque contour du Dossier complet de Watten (150 parcelles → moins
+  // de 2 sommets par polygone). Tout ce qui dérive des contours mourait EN
+  // SILENCE : croix des cartes de situation, anneaux des vues aériennes,
+  // colorisation des plans de section. Désormais : cible 700 sommets au total,
+  // PLANCHER DE 5 SOMMETS PAR POLYGONE (échantillonnage uniforme de secours si
+  // la simplification descend trop bas), plafond 40 inchangé — les liens
+  // d'unités de quelques parcelles ne changent donc pas d'un octet.
+  // ⚠ CONTREPARTIE DITE, PAS TUE : au-delà de ~120 parcelles, chaque contour
+  // tombe vers 5 sommets — repères JUSTES (centres exacts), mais colorisation
+  // des plans de section APPROXIMATIVE (pentagones au lieu des vraies limites).
+  // La vraie sortie est un canal postMessage REDPAR→PAINT (chantier au mémo) :
+  // l'URL a une limite de transport qu'aucun réglage ne repousse.
+  const parPoly = Math.max(5, Math.min(40, Math.floor(700 / projetes.length)));
+  const reduits = projetes.map((pts) => {
+    let tol = Math.max(0.2, mParPixel / 2);
+    let r = simplifier(pts, tol);
+    for (let i = 0; i < 10 && r.length > parPoly; i++) { tol *= 2; r = simplifier(pts, tol); }
+    if (r.length > parPoly || r.length < 4) {
+      const n = Math.max(5, Math.min(parPoly, pts.length));
+      r = Array.from({ length: n }, (_, k) => pts[Math.floor(k * pts.length / n)]);
+    }
+    return r;
+  });
 
   const membre = membres.find((r) => contours.get(r)) || membres[0];
   const r = String(membre);
@@ -3268,6 +3287,9 @@ export default function App() {
                                 )}
                               </div>
                               <span className="text-xs text-stone-600 whitespace-nowrap">{c.nb.toLocaleString('fr-FR')} parc. · {contenanceNotariale(c.surface)}</span>
+                              {c.nb > 120 && (
+                                <span className="text-xs text-amber-700" title="Au-delà de ~120 parcelles, les contours sont ramenés à 5 sommets chacun : repères justes, mais colorisation des plans de section approximative. La sortie propre est le canal postMessage (chantier au mémo).">⚠ contours simplifiés</span>
+                              )}
                               <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(c.nb)}</span>
                               <button onClick={() => genererDossierCommune(c)}
                                 disabled={!contours || !lienOk}
