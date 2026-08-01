@@ -1455,6 +1455,7 @@ export default function App() {
   // commune ; le dossier complet est donc une SUITE de documents, pas un seul.
   const [dossierOuvert, setDossierOuvert] = useState(false);
   const [dossierFaits, setDossierFaits] = useState(() => new Set());
+  const [dossierNum, setDossierNum] = useState('');
 
   const droitsPresents = (() => {
     const m = new Map();
@@ -1819,8 +1820,8 @@ export default function App() {
     // pas une collection. PAINT avertit de lui-même si les parcelles sont trop
     // dispersées pour qu'un repère unique ait du sens.
     if (mode === 'ortho') lien += '&fond=ortho&trace=rond&cadre=contexte';
-    else if (mode === 'doc') lien += '&doc=1' + suffixeBati(carteRefs, batiParRef)
-      + suffixePP(carteRefs, contours);
+    else if (mode === 'doc') lien += '&doc=1' + suffixeDossier
+      + suffixeBati(carteRefs, batiParRef) + suffixePP(carteRefs, contours);
     window.open(lien, '_blank', 'noreferrer');
   };
 
@@ -1857,7 +1858,8 @@ export default function App() {
     // docauto=1 : PAINT exporte le document TOUT SEUL si — et seulement si — la
     // colorisation aboutit par la voie déterministe sans aucun avertissement ;
     // au moindre doute il suspend et rend la main (contrat PAINT du 01/08).
-    return lien + '&doc=1&docauto=1' + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
+    return lien + '&doc=1&docauto=1' + suffixeDossier
+      + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
   };
   const genererDossierCommune = (c) => {
     const lien = lienDossierCommune(c);
@@ -1870,6 +1872,11 @@ export default function App() {
     if (n.has(insee)) n.delete(insee); else n.add(insee);
     return n;
   });
+  // N° de dossier — 01/08 : saisi dans le panneau Dossier complet, il vaut pour
+  // TOUS les documents (liens unitaires, unités foncières, panier, dossier
+  // complet) : mêmes pièces, même pied de page.
+  const suffixeDossier = dossierNum.trim()
+    ? '&dossier=' + encodeURIComponent(dossierNum.trim()) : '';
   const dureeDossier = (nb) => {
     const s = nb * 8;
     if (s < 60) return `≈ ${s} s`;
@@ -3223,8 +3230,15 @@ export default function App() {
                       <div className="px-6 py-3 text-xs text-amber-800 bg-amber-50 border-b border-amber-100">
                         Un document par commune — le plan d'ensemble et son calage l'imposent. Chaque parcelle coûte
                         un extrait officiel (~6 s, service du cadastre à débit limité) plus ses vues : la durée
-                        estimée figure par commune. Ouvrez PAINT commune par commune, contrôlez, puis cliquez
-                        « Document » — la coche suit votre avancement.
+                        estimée figure par commune. Le document se génère et se télécharge tout seul dans l'onglet
+                        PAINT — la coche suit votre avancement.
+                      </div>
+                      <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3">
+                        <label className="text-xs text-stone-600 whitespace-nowrap" htmlFor="dossierNum">N° de dossier</label>
+                        <input id="dossierNum" type="text" value={dossierNum}
+                          onChange={(e) => setDossierNum(e.target.value)}
+                          placeholder="porté au pied de page de tous les documents (dossier complet, panier, liens unitaires)"
+                          className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
                       </div>
                       <div className="overflow-y-auto px-6 py-3">
                         {(dossierGroupes || []).map((c) => {
@@ -3548,7 +3562,7 @@ export default function App() {
                                         <a href={`${lienU}&fond=ortho&trace=rond&cadre=contexte`} target="_blank" rel="noreferrer"
                                           title="Vue aérienne de l'unité entière, un repère sur l'ensemble"
                                           className="text-[10px] underline" style={{ color: '#0F2238' }}>aérienne</a>
-                                        <a href={`${lienU}&doc=1${suffixeBati(u.membres, batiParRef)}${suffixePP(u.membres, contours)}`} target="_blank" rel="noreferrer"
+                                        <a href={`${lienU}&doc=1${suffixeDossier}${suffixeBati(u.membres, batiParRef)}${suffixePP(u.membres, contours)}`} target="_blank" rel="noreferrer"
                                           title="Document deux pages de l'unité entière"
                                           className="text-[10px] underline" style={{ color: '#33838B' }}>doc</a>
                                       </div>
@@ -3577,7 +3591,7 @@ export default function App() {
                               </td>
                               <td className="px-4 py-3 text-center">
                                 {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) && (
-                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours)} target="_blank" rel="noreferrer"
+                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) + suffixeDossier} target="_blank" rel="noreferrer"
                                     title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
                                     className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
                                 )}
