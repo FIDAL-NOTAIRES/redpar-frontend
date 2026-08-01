@@ -1854,7 +1854,10 @@ export default function App() {
       lien = lienPaintAnnote(pivot, c.nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
     }
     if (!lien) return null;
-    return lien + '&doc=1' + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
+    // docauto=1 : PAINT exporte le document TOUT SEUL si — et seulement si — la
+    // colorisation aboutit par la voie déterministe sans aucun avertissement ;
+    // au moindre doute il suspend et rend la main (contrat PAINT du 01/08).
+    return lien + '&doc=1&docauto=1' + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
   };
   const genererDossierCommune = (c) => {
     const lien = lienDossierCommune(c);
