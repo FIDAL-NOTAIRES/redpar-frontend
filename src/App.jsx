@@ -939,16 +939,24 @@ const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres, adr
    contrôle LOGIS METROPOLE. Le plafond n'est donc pas théorique.
    ⚠ AUCUNE SUPERFICIE : le volet bâti IDENTIFIE les locaux (bâtiment, entrée,
    niveau, porte), il ne les MESURE pas. Ne pas chercher de surface bâtie. */
-const LOTS_MAX_URL = 400;
+// Ramené de 400 à 300 le 01/08 : chaque rang porte désormais aussi la section et
+// le numéro, soit environ 24 caractères encodés au lieu de 14. 300 rangs font
+// ~7 200 caractères, ce qui laisse de la marge dans une URL.
+const LOTS_MAX_URL = 300;
 const suffixeBati = (refs, batiPar) => {
   if (!batiPar || !refs || !refs.length) return '';
   const bats = new Set();
   let lots = [];
+  // ⚠ CHAQUE LOT PORTE SA PARCELLE. Sans section ni numéro, la grille des locaux
+  // d'un document multi-parcelles est AMBIGUË : le lecteur ne peut rattacher
+  // aucun lot à son fonds. Défaut relevé par JFD le 01/08.
   refs.forEach((r) => {
     const e = batiPar.get(r);
     if (!e) return;
+    const sn = sectionEtNumero(r);
     e.bats.forEach((b) => bats.add(b));
-    lots = lots.concat(e.lots);
+    e.lots.forEach((t) => lots.push([
+      sn ? sn.section : '', sn ? sn.numero : '', t[0], t[1], t[2], t[3]]));
   });
   if (!lots.length) return '';
   const q = new URLSearchParams();
@@ -963,11 +971,32 @@ const suffixeBati = (refs, batiPar) => {
   return '&' + q.toString();
 };
 
-const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres, adresse, batiPar) => {
+/* PARAMÈTRES PAR PARCELLE, pour l'extrait cadastral BRUT de chaque page.
+   ⚠ INDISPENSABLE : sans échelle ni format propres, PAINT sortirait chaque
+   extrait à l'échelle de l'ENSEMBLE, où une petite parcelle est illisible.
+   Format d'un rang : prefixe,section,parcelle,echelle,format — le « | » du format
+   ne gêne pas, on découpe sur la virgule.
+   ⚠ PAS DE « dim » : l'extrait est BRUT, sans colorisation, donc PAINT n'a besoin
+   ni de dimension attendue ni de géoréférencement. C'est ce qui rend cette page
+   possible sans toucher à la chaîne OCR. */
+const suffixePP = (refs, contoursMap) => {
+  const rangs = [];
+  (refs || []).forEach((r) => {
+    const c = String(r || '');
+    if (c.length !== 14) return;
+    const f = descripteursForme(contoursMap && contoursMap.get ? contoursMap.get(r) : null);
+    const ef = f ? choisirEchelle(f.largeur, f.hauteur) : null;
+    rangs.push([c.slice(5, 8), c.slice(8, 10), c.slice(10, 14),
+                ef ? ef.echelle : '', ef ? ef.format : ''].join(','));
+  });
+  return rangs.length ? '&' + new URLSearchParams({ pp: rangs.join(';') }).toString() : '';
+};
+
+const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres, adresse, batiPar, contoursMap) => {
   const base = lienPaintAnnote(codeParcelle, nomCommune, geom, contenance, autres, adresse);
   if (!base) return null;
   const refs = (autres && autres.length) ? autres.map((o) => o.codeParcelle) : [codeParcelle];
-  return `${base}&doc=1${suffixeBati(refs, batiPar)}`;
+  return `${base}&doc=1${suffixeBati(refs, batiPar)}${suffixePP(refs, contoursMap)}`;
 };
 
 // EXTRAIT DGFiP — le PDF brut, pièce autonome à joindre à un dossier.
@@ -1783,7 +1812,8 @@ export default function App() {
     // pas une collection. PAINT avertit de lui-même si les parcelles sont trop
     // dispersées pour qu'un repère unique ait du sens.
     if (mode === 'ortho') lien += '&fond=ortho&trace=rond&cadre=contexte';
-    else if (mode === 'doc') lien += '&doc=1' + suffixeBati(carteRefs, batiParRef);
+    else if (mode === 'doc') lien += '&doc=1' + suffixeBati(carteRefs, batiParRef)
+      + suffixePP(carteRefs, contours);
     window.open(lien, '_blank', 'noreferrer');
   };
 
@@ -3392,7 +3422,7 @@ export default function App() {
                                         <a href={`${lienU}&fond=ortho&trace=rond&cadre=contexte`} target="_blank" rel="noreferrer"
                                           title="Vue aérienne de l'unité entière, un repère sur l'ensemble"
                                           className="text-[10px] underline" style={{ color: '#0F2238' }}>aérienne</a>
-                                        <a href={`${lienU}&doc=1${suffixeBati(u.membres, batiParRef)}`} target="_blank" rel="noreferrer"
+                                        <a href={`${lienU}&doc=1${suffixeBati(u.membres, batiParRef)}${suffixePP(u.membres, contours)}`} target="_blank" rel="noreferrer"
                                           title="Document deux pages de l'unité entière"
                                           className="text-[10px] underline" style={{ color: '#33838B' }}>doc</a>
                                       </div>
@@ -3420,8 +3450,8 @@ export default function App() {
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
-                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef) && (
-                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef)} target="_blank" rel="noreferrer"
+                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) && (
+                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours)} target="_blank" rel="noreferrer"
                                     title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
                                     className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
                                 )}
