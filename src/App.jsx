@@ -1962,7 +1962,9 @@ export default function App() {
   const suffixeDossier = dossierNum.trim()
     ? '&dossier=' + encodeURIComponent(dossierNum.trim()) : '';
   const dureeDossier = (nb) => {
-    const s = nb * 8;
+    // ~18 s par parcelle depuis les extraits COLORIÉS (01/08 au soir) :
+    // extrait recentré + calage OCR + peinture, par iframe, pour chaque fiche.
+    const s = nb * 18;
     if (s < 60) return `≈ ${s} s`;
     if (s < 3600) return `≈ ${Math.round(s / 60)} min`;
     return `≈ ${(s / 3600).toFixed(1)} h`;
@@ -3312,10 +3314,10 @@ export default function App() {
                           className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
                       </div>
                       <div className="px-6 py-3 text-xs text-amber-800 bg-amber-50 border-b border-amber-100">
-                        Un document par commune — le plan d'ensemble et son calage l'imposent. Chaque parcelle coûte
-                        un extrait officiel (~6 s, service du cadastre à débit limité) plus ses vues : la durée
-                        estimée figure par commune. Le document se génère et se télécharge tout seul dans l'onglet
-                        PAINT — la coche suit votre avancement.
+                        Un document par volume — sections entières regroupées par 50 parcelles. Chaque parcelle
+                        coûte un extrait officiel colorié (~18 s : service du cadastre à débit limité, calage et
+                        peinture) plus ses vues : la durée estimée figure par ligne. Le document se génère et se
+                        télécharge tout seul dans l'onglet PAINT — la coche suit votre avancement.
                       </div>
                       <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3">
                         <label className="text-xs text-stone-600 whitespace-nowrap" htmlFor="dossierNum">N° de dossier</label>
