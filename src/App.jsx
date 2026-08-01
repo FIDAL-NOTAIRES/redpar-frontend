@@ -1865,6 +1865,15 @@ export default function App() {
   // PDF, et 14 sommets par contour (au lieu de 5 à 150 parcelles) — les vraies
   // limites reviennent sur les plans de section.
   const TAILLE_VOLUME = 50;
+  // Tri section puis numéro À L'INTÉRIEUR de la commune : le préfixe précède la
+  // section dans la clé de tri (communes fusionnées : deux sections « A » de
+  // préfixes différents ne doivent pas s'entremêler). ⚠ DÉCLARÉ AVANT volumesDe
+  // qui l'appelle AU RENDU : le 01/08, sa déclaration laissée plus bas a fait
+  // une zone morte temporelle — ReferenceError, page blanche à l'ouverture du
+  // panneau. L'ordre des const d'un composant est un ordre d'EXÉCUTION.
+  const refsTrieesDe = (c) => [...c.vues].sort((a, b) =>
+    a.slice(5, 10).localeCompare(b.slice(5, 10)) ||
+    ((Number(a.slice(10, 14)) || 0) - (Number(b.slice(10, 14)) || 0)));
   const volumesDe = (c) => {
     const refs = refsTrieesDe(c);
     const sections = [];
@@ -1896,12 +1905,6 @@ export default function App() {
           }));
         })
     : null;
-  // Tri section puis numéro À L'INTÉRIEUR de la commune : le préfixe précède la
-  // section dans la clé de tri (communes fusionnées : deux sections « A » de
-  // préfixes différents ne doivent pas s'entremêler).
-  const refsTrieesDe = (c) => [...c.vues].sort((a, b) =>
-    a.slice(5, 10).localeCompare(b.slice(5, 10)) ||
-    ((Number(a.slice(10, 14)) || 0) - (Number(b.slice(10, 14)) || 0)));
   const lienDossierCommune = (lg) => {
     const refs = lg.refs;   // déjà triées et tranchées en volume
     const avecContour = refs.filter((r) => contours?.get(r));
