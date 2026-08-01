@@ -1857,8 +1857,44 @@ export default function App() {
   // ouvre PAINT prérempli ; le clic « Document » y reste volontaire (contrat
   // doc=1). PAS DE PLAFOND de parcelles — décision JFD — mais un AVERTISSEMENT
   // de délai : chaque parcelle coûte un extrait SCPC (~6 s) plus les vues IGN.
-  const dossierGroupes = dossierOuvert
+  // ⚠ DÉCOUPAGE EN VOLUMES — décision JFD du 01/08 : au-delà de 50 parcelles,
+  // une commune se livre en PLUSIEURS documents. Règle hybride : des SECTIONS
+  // ENTIÈRES regroupées tant que le volume tient sous 50 (on ne coupe jamais
+  // une section qui tient), et une section qui dépasse 50 se TRANCHE en
+  // volumes successifs. Bénéfices en cascade : ~7 min par volume, ~20 Mo par
+  // PDF, et 14 sommets par contour (au lieu de 5 à 150 parcelles) — les vraies
+  // limites reviennent sur les plans de section.
+  const TAILLE_VOLUME = 50;
+  const volumesDe = (c) => {
+    const refs = refsTrieesDe(c);
+    const sections = [];
+    refs.forEach((r) => {
+      const k = r.slice(5, 10);
+      const d = sections[sections.length - 1];
+      if (d && d.k === k) d.refs.push(r); else sections.push({ k, refs: [r] });
+    });
+    const vols = []; let cur = [];
+    sections.forEach((s) => {
+      if (s.refs.length > TAILLE_VOLUME) {
+        if (cur.length) { vols.push(cur); cur = []; }
+        for (let i = 0; i < s.refs.length; i += TAILLE_VOLUME) vols.push(s.refs.slice(i, i + TAILLE_VOLUME));
+      } else if (cur.length + s.refs.length > TAILLE_VOLUME) { vols.push(cur); cur = [...s.refs]; }
+      else cur.push(...s.refs);
+    });
+    if (cur.length) vols.push(cur);
+    return vols;
+  };
+  const dossierLignes = dossierOuvert
     ? grouperPourCarte(parcelles).slice().sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
+        .flatMap((c) => {
+          const vols = volumesDe(c);
+          return vols.map((refs, i) => ({
+            cle: c.insee + '_' + (i + 1), insee: c.insee, nom: c.nom,
+            volume: vols.length > 1 ? (i + 1) + '/' + vols.length : '',
+            refs, nb: refs.length,
+            surface: refs.reduce((t, r) => t + (Number(surfaceParRef.get(r)) || 0), 0),
+          }));
+        })
     : null;
   // Tri section puis numéro À L'INTÉRIEUR de la commune : le préfixe précède la
   // section dans la clé de tri (communes fusionnées : deux sections « A » de
@@ -1866,31 +1902,51 @@ export default function App() {
   const refsTrieesDe = (c) => [...c.vues].sort((a, b) =>
     a.slice(5, 10).localeCompare(b.slice(5, 10)) ||
     ((Number(a.slice(10, 14)) || 0) - (Number(b.slice(10, 14)) || 0)));
-  const lienDossierCommune = (c) => {
-    const refs = refsTrieesDe(c);
+  const lienDossierCommune = (lg) => {
+    const refs = lg.refs;   // déjà triées et tranchées en volume
     const avecContour = refs.filter((r) => contours?.get(r));
     let lien = avecContour.length >= 2
-      ? lienPaintUnite(refs, surfaceParRef, contours, c.nom, adresseParRef)
+      ? lienPaintUnite(refs, surfaceParRef, contours, lg.nom, adresseParRef)
       : null;
     // Repli identique à genererCarte : une seule parcelle coloriable, ou
-    // lienPaintUnite qui refuse — le tableau porte alors toute la commune.
+    // lienPaintUnite qui refuse — le tableau porte alors tout le volume.
     if (!lien) {
       const pivot = avecContour[0] || refs[0];
       const autres = refs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r), adresse: adresseParRef.get(r) }));
-      lien = lienPaintAnnote(pivot, c.nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
+      lien = lienPaintAnnote(pivot, lg.nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
     }
     if (!lien) return null;
-    // docauto=1 : PAINT exporte le document TOUT SEUL si — et seulement si — la
-    // colorisation aboutit par la voie déterministe sans aucun avertissement ;
-    // au moindre doute il suspend et rend la main (contrat PAINT du 01/08).
     return lien + '&doc=1&docauto=1' + suffixeDossier
+      + (lg.volume ? '&vol=' + encodeURIComponent(lg.volume) : '')
       + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
   };
-  const genererDossierCommune = (c) => {
-    const lien = lienDossierCommune(c);
+  const genererDossierCommune = (lg) => {
+    const lien = lienDossierCommune(lg);
     if (!lien) return;
-    window.open(lien, '_blank', 'noreferrer');
-    setDossierFaits((s) => new Set(s).add(c.insee));
+    // ⚠ VERCEL REFUSE LES URL AU-DELÀ DE ~14 ko (URI_TOO_LONG, constaté le
+    // 01/08 sur Watten, 152 parcelles). Au-delà de 7 000 caractères — marge
+    // large —, les paramètres partent par postMessage : PAINT s'ouvre sur une
+    // URL LÉGÈRE (charge=message), envoie « paint-pret » dès qu'il écoute, et
+    // reçoit la chaîne complète qu'il pose lui-même dans sa barre d'adresse
+    // (history.replaceState, aucune requête). ⚠ PAS de 'noreferrer' ici :
+    // il couperait window.opener, donc le canal.
+    if (lien.length > 7000) {
+      const u = new URL(lien);
+      const w = window.open(u.origin + u.pathname + '?charge=message&cb=' + Date.now(), '_blank');
+      if (w) {
+        const qs = u.search.slice(1);
+        const h = (e) => {
+          if (e.source !== w || !e.data || e.data.type !== 'paint-pret') return;
+          w.postMessage({ type: 'paint-params', qs }, u.origin);
+          window.removeEventListener('message', h);
+        };
+        window.addEventListener('message', h);
+        setTimeout(() => window.removeEventListener('message', h), 30000);
+      }
+    } else {
+      window.open(lien, '_blank', 'noreferrer');
+    }
+    setDossierFaits((s) => new Set(s).add(lg.cle));
   };
   const basculerDossierFait = (insee) => setDossierFaits((s) => {
     const n = new Set(s);
@@ -3247,7 +3303,7 @@ export default function App() {
                         <MapPin className="w-4 h-4" style={{ color: '#33838B' }} />
                         <h3 className="font-semibold text-blue-950">Dossier complet</h3>
                         <span className="text-sm text-stone-600">
-                          {dossierGroupes ? dossierGroupes.length : 0} commune(s) · {parcelles.length.toLocaleString('fr-FR')} parcelle(s)
+                          {dossierLignes ? dossierLignes.length : 0} document(s) · {parcelles.length.toLocaleString('fr-FR')} parcelle(s)
                         </span>
                         <button onClick={() => setDossierOuvert(false)}
                           className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
@@ -3266,32 +3322,30 @@ export default function App() {
                           className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
                       </div>
                       <div className="overflow-y-auto px-6 py-3">
-                        {(dossierGroupes || []).map((c) => {
-                          const lienOk = !!lienDossierCommune(c);
-                          const aContour = [...c.vues].some((r) => contours?.get(r));
+                        {(dossierLignes || []).map((lg) => {
+                          const lienOk = !!lienDossierCommune(lg);
+                          const aContour = lg.refs.some((r) => contours?.get(r));
                           return (
-                            <div key={c.insee} className="flex items-center gap-3 py-2 border-b border-stone-100">
-                              <input type="checkbox" checked={dossierFaits.has(c.insee)}
-                                onChange={() => basculerDossierFait(c.insee)}
+                            <div key={lg.cle} className="flex items-center gap-3 py-2 border-b border-stone-100">
+                              <input type="checkbox" checked={dossierFaits.has(lg.cle)}
+                                onChange={() => basculerDossierFait(lg.cle)}
                                 title="Fait / à faire" className="accent-teal-700" />
                               <div className="flex-1 min-w-0">
-                                <span className={dossierFaits.has(c.insee) ? 'line-through text-stone-400' : 'text-blue-950 font-medium'}>
-                                  {c.nom}
+                                <span className={dossierFaits.has(lg.cle) ? 'text-stone-400' : 'text-blue-950 font-medium'}>
+                                  {dossierFaits.has(lg.cle) && <span style={{ color: '#33838B' }}>✓ </span>}{lg.nom}
+                                  {lg.volume && <span className="font-normal text-stone-500"> — volume {lg.volume.replace('/', ' de ')}</span>}
                                 </span>
-                                <span className="text-stone-400 text-xs ml-2">({c.insee})</span>
+                                <span className="text-stone-400 text-xs ml-2">({lg.insee})</span>
                                 {!aContour && contours && (
-                                  <div className="text-xs" style={{ color: '#A01040' }}>Aucun contour pour cette commune — plan centré sur une parcelle, sans colorisation.</div>
+                                  <div className="text-xs" style={{ color: '#A01040' }}>Aucun contour pour ce volume — plan centré sur une parcelle, sans colorisation.</div>
                                 )}
                                 {!lienOk && contours && aContour && (
-                                  <div className="text-xs" style={{ color: '#A01040' }}>Commune à cheval sur deux zones coniques conformes : document impossible d'un tenant.</div>
+                                  <div className="text-xs" style={{ color: '#A01040' }}>Volume à cheval sur deux zones coniques conformes : document impossible d'un tenant.</div>
                                 )}
                               </div>
-                              <span className="text-xs text-stone-600 whitespace-nowrap">{c.nb.toLocaleString('fr-FR')} parc. · {contenanceNotariale(c.surface)}</span>
-                              {c.nb > 120 && (
-                                <span className="text-xs text-amber-700" title="Au-delà de ~120 parcelles, les contours sont ramenés à 5 sommets chacun : repères justes, mais colorisation des plans de section approximative. La sortie propre est le canal postMessage (chantier au mémo).">⚠ contours simplifiés</span>
-                              )}
-                              <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(c.nb)}</span>
-                              <button onClick={() => genererDossierCommune(c)}
+                              <span className="text-xs text-stone-600 whitespace-nowrap">{lg.nb.toLocaleString('fr-FR')} parc. · {contenanceNotariale(lg.surface)}</span>
+                              <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(lg.nb)}</span>
+                              <button onClick={() => genererDossierCommune(lg)}
                                 disabled={!contours || !lienOk}
                                 className="px-3 py-1.5 text-xs font-semibold text-white rounded-lg disabled:opacity-40"
                                 style={{ backgroundColor: '#33838B' }}>
@@ -3305,7 +3359,7 @@ export default function App() {
                         )}
                       </div>
                       <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
-                        {dossierFaits.size} / {dossierGroupes ? dossierGroupes.length : 0} commune(s) générée(s)
+                        {dossierFaits.size} / {dossierLignes ? dossierLignes.length : 0} document(s) généré(s)
                       </div>
                     </div>
                   </div>
