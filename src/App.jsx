@@ -606,8 +606,14 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) 
     prefixe: r.slice(5, 8),
     section: r.slice(8, 10),
     parcelle: r.slice(10, 14),
-    echelle: ef.echelle,
-    format: ef.format,
+    // ⚠ LA SENTINELLE 25000 NE DOIT JAMAIS FUIR DANS UNE URL — constaté le
+    // 01/08 sur le Dossier complet de Watten : le sélecteur d'échelle de PAINT
+    // arrivait VIDE (aucune option 25000). Le garde-fou de fin juillet
+    // l'arrêtait à l'écran du panier, pas dans le lien. Au débordement, on
+    // émet la meilleure échelle RÉELLE du service ; auto reste retiré, et le
+    // mode « plans par section » de PAINT recalcule de toute façon les siennes.
+    echelle: ef.deborde ? '5000' : ef.echelle,
+    format: ef.deborde ? 'A3|paysage' : ef.format,
     couleur: '#A01040',
     x: cx.toFixed(1),
     y: cy.toFixed(1),
