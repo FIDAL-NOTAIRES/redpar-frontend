@@ -1,3884 +1,5303 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { ChevronRight, ChevronLeft, Mic, MicOff, Loader2, CheckCircle2, Building2, MapPin, FileText, RotateCcw, ArrowRight, AlertCircle, Download, FileDown, BarChart3, Map as MapIcon } from 'lucide-react';
-
-const BACKEND_URL = 'https://redpar-backend.vercel.app';
-
-// PAINT expose un endpoint qui renvoie directement le PDF de l'extrait
-// cadastral officiel. Il attend commune, préfixe, section et numéro : or notre
-// référence à quatorze caractères les contient exactement, dans cet ordre.
-// REDPAR est même mieux placé que l'interface de PAINT, qui doit deviner le
-// préfixe via l'IGN quand la saisie est manuelle.
-// ⚠ Ce service interroge le service de consultation du plan cadastral par un
-// procédé non officiel, sujet à limitation de débit : un lien à la demande,
-// jamais de génération en masse.
-const PAINT_URL = 'https://paint-blue.vercel.app';
-
-// Deux liens, deux usages assumés.
-// À l'écran : on ouvre PAINT, qui génère l'extrait ET colorie la parcelle, prêt
-// à annoter et à exporter — c'est l'outil de travail.
-// Dans le classeur : on pointe le PDF brut, parce qu'un tableur remis à un tiers
-// doit livrer une pièce, pas ouvrir une application du cabinet.
-// ----------------------------------------------------------------------
-// PROJECTION CONIQUE CONFORME DE LAMBERT — méthode EPSG 9802, ellipsoïde GRS80
-// Les extraits DGFiP portent leurs coordonnées en projection conique conforme
-// (RGF93CC50 pour Saint-Omer). Convertir le contour dans cette projection
-// permet à PAINT de savoir EXACTEMENT quels pixels appartiennent à la parcelle,
-// par simple application du géoréférencement qu'il lit en marge du plan.
-// Neuf zones : CC42 à CC50. Parallèle d'origine = numéro de zone, parallèles
-// automécoïques à ±0,75°, méridien central 3° Est, constante en X 1 700 000 m,
-// constante en Y (zone − 41) millions + 200 000.
-// Vérifié contre le géoréférencement mesuré sur la planche de Saint-Omer : le
-// centroïde d'AV 1 se projette en X 1 647 577 / Y 9 283 388, soit exactement
-// entre les étiquettes 1647500-1647600 et 9283300-9283400, et au centre du
-// cadre — là où l'extrait est effectivement centré.
-// ⚠ LIMITE : cette projection ne couvre que la métropole et la Corse. Appliquée
-// à Pointe-à-Pitre elle donne X = −5 170 838, valeur absurde. D'où la garde de
-// latitude ci-dessous ; les départements d'outre-mer emploient d'autres
-// projections et retomberont sur la détection par taille.
-// ----------------------------------------------------------------------
-const LAMBERT_A = 6378137.0;
-const LAMBERT_APLAT = 1 / 298.257222101;
-const LAMBERT_E2 = 2 * LAMBERT_APLAT - LAMBERT_APLAT * LAMBERT_APLAT;
-const LAMBERT_E = Math.sqrt(LAMBERT_E2);
-const enRad = (d) => d * Math.PI / 180;
-const tIsometrique = (phi) => {
-  const s = Math.sin(phi);
-  return Math.tan(Math.PI / 4 - phi / 2)
-    / Math.pow((1 - LAMBERT_E * s) / (1 + LAMBERT_E * s), LAMBERT_E / 2);
-};
-const mParallele = (phi) =>
-  Math.cos(phi) / Math.sqrt(1 - LAMBERT_E2 * Math.sin(phi) ** 2);
-
-// ----------------------------------------------------------------------
-// ZONE CONIQUE CONFORME PAR DÉPARTEMENT — TABLE MESURÉE LE 27/08/2026
-// ----------------------------------------------------------------------
-// ⚠⚠ NE PAS REMPLACER PAR UN CALCUL SUR LA LATITUDE. C'est précisément ce que
-// faisait le code d'avant — `Math.round(lat)` sur la latitude de la PARCELLE —
-// et c'est FAUX, parce que les neuf zones se RECOUVRENT d'un degré et que la
-// DGFiP tranche par voie administrative, non par géométrie. Toutes les règles
-// latitudinaires ont été essayées et RÉFUTÉES sur des zones mesurées :
-//   round(lat de la parcelle)   : faux au nord de l'Aisne, faux à Toulouse
-//   round(lat du centroïde)     : faux pour l'Aisne (50 au lieu de 49),
-//                                 l'Hérault (44 au lieu de 43), la Lozère
-//   floor(lat du centroïde)     : faux pour Paris (48 au lieu de 49)
-//   « la zone doit couvrir tout le département » : AUCUNE solution pour
-//                                 l'Aisne, qui s'étend de 48,84° à 50,07° et
-//                                 est pourtant servie en CC49, soit 8 km hors
-//                                 de la bande théorique de la zone.
-//
-// PORTÉE DU DÉFAUT CORRIGÉ : 78 départements sur 96 avaient une partie de leur
-// territoire mal zonée par l'ancien calcul. Ce n'était donc pas un cas
-// exotique — il était latent presque partout, et n'avait échappé que parce que
-// les cas de contrôle du projet (Saint-Omer, Bergues, Watten, Paris) tombaient
-// tous du bon côté de l'arrondi. Le premier à tomber côté défavorable a été
-// TOULOUSE le 27/08/2026 : latitude 43,6037° arrondie à 44, alors que la
-// Haute-Garonne est servie en CC43 — 888 931 m d'écart en Y, colorisation
-// silencieusement morte, plan correct mais non recentré.
-//
-// COMMENT LA TABLE A ÉTÉ ÉTABLIE — et comment la refaire. Une parcelle réelle
-// par département (API Carto de l'IGN), interrogée par
-// paint-blue.vercel.app/api/extrait?...&diag=1, dont le champ
-// centre_du_service.y donne la zone SANS AMBIGUÏTÉ :
-//        zone = Math.round((y - 200000) / 1e6) + 41
-// Les zones sont séparées d'un MILLION de mètres en Y pour une étendue de
-// ±111 km : là où la latitude est ambiguë, le Y ne l'est pas. Marge la plus
-// faible mesurée sur les 96 relevés : 0,085 — très loin du 0,5 qui signalerait
-// un doute. 96 mesures, aucun échec.
-//
-// ⚠ LA TABLE RESTE UNE APPROXIMATION PAR DÉPARTEMENT. La DGFiP décide FEUILLE
-// PAR FEUILLE : un département hétérogène est possible, et alors cette table
-// sera fausse pour certaines de ses feuilles. C'est pourquoi PAINT compare, à
-// chaque extrait, la zone reçue à celle qu'il lit dans le plan, et le DIT.
-// Ne jamais supprimer cette comparaison en croyant la table suffisante.
-const ZONE_CC_PAR_DEPARTEMENT = {
-  '01':46, '02':49, '03':46, '04':44, '05':45, '06':44, '07':45, '08':50, '09':43, '10':48,
-  '11':43, '12':44, '13':44, '14':49, '15':45, '16':46, '17':46, '18':47, '19':45, '21':47,
-  '22':48, '23':46, '24':45, '25':47, '26':45, '27':49, '28':48, '29':48, '2A':42, '2B':42,
-  '30':44, '31':43, '32':44, '33':45, '34':43, '35':48, '36':47, '37':47, '38':45, '39':47,
-  '40':44, '41':48, '42':46, '43':45, '44':47, '45':48, '46':45, '47':44, '48':44, '49':47,
-  '50':49, '51':49, '52':48, '53':48, '54':49, '55':49, '56':48, '57':49, '58':47, '59':50,
-  '60':49, '61':49, '62':50, '63':46, '64':43, '65':43, '66':43, '67':49, '68':48, '69':46,
-  '70':48, '71':47, '72':48, '73':45, '74':46, '75':49, '76':50, '77':49, '78':49, '79':47,
-  '80':50, '81':44, '82':44, '83':43, '84':44, '85':47, '86':47, '87':46, '88':48, '89':48,
-  '90':48, '91':49, '92':49, '93':49, '94':49, '95':49
-};
-// Département au format des codes INSEE, outre-mer sur trois caractères comme
-// dans api/extrait.js de PAINT. Sur 97x la projection rend null de toute façon.
-const departementDe = (ref) => {
-  const c = String(ref || '');
-  return c.startsWith('97') ? c.slice(0, 3) : c.slice(0, 2);
-};
-// Zone à employer. Sans département connu, on retombe sur l'ancien arrondi —
-// repli assumé : mieux vaut une zone probable qu'aucune projection, et le
-// contrôle de PAINT signalera l'erreur si elle survient.
-const zoneCadastrale = (dep, lat) => {
-  const t = ZONE_CC_PAR_DEPARTEMENT[dep];
-  return t || Math.min(50, Math.max(42, Math.round(lat)));
-};
-
-const versConiqueConforme = (lat, lon, dep) => {
-  if (!(lat > 41 && lat < 52)) return null;          // hors métropole et Corse
-  const z = zoneCadastrale(dep, lat);
-  const phi0 = enRad(z), phi1 = enRad(z - 0.75), phi2 = enRad(z + 0.75), lam0 = enRad(3);
-  const X0 = 1700000, Y0 = (z - 41) * 1000000 + 200000;
-  const phi = enRad(lat), lam = enRad(lon);
-  const m1 = mParallele(phi1), m2 = mParallele(phi2);
-  const t1 = tIsometrique(phi1), t2 = tIsometrique(phi2);
-  const t0 = tIsometrique(phi0), t = tIsometrique(phi);
-  const n = (Math.log(m1) - Math.log(m2)) / (Math.log(t1) - Math.log(t2));
-  const Fc = m1 / (n * Math.pow(t1, n));
-  const r0 = LAMBERT_A * Fc * Math.pow(t0, n);
-  const r = LAMBERT_A * Fc * Math.pow(t, n);
-  const theta = n * (lam - lam0);
-  return { zone: z, X: X0 + r * Math.sin(theta), Y: Y0 + r0 - r * Math.cos(theta) };
-};
-
-// Simplification de Douglas-Peucker. Nécessaire parce que le contour voyage dans
-// une URL, et qu'Excel plafonne ses liens hypertexte à environ 2 000 caractères :
-// on ne peut pas y mettre deux cents sommets. Une tolérance d'un demi-mètre est
-// insensible à l'échelle d'un extrait cadastral, et l'on plafonne à 40 points.
-const simplifier = (pts, tol) => {
-  if (pts.length <= 2) return pts;
-  const dist2 = (p, a, b) => {
-    const dx = b[0] - a[0], dy = b[1] - a[1];
-    if (dx === 0 && dy === 0) return (p[0] - a[0]) ** 2 + (p[1] - a[1]) ** 2;
-    let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy);
-    t = Math.max(0, Math.min(1, t));
-    return (p[0] - (a[0] + t * dx)) ** 2 + (p[1] - (a[1] + t * dy)) ** 2;
-  };
-  const garder = new Array(pts.length).fill(false);
-  garder[0] = garder[pts.length - 1] = true;
-  const pile = [[0, pts.length - 1]];
-  while (pile.length) {
-    const [i, j] = pile.pop();
-    let pire = -1, dPire = 0;
-    for (let k = i + 1; k < j; k++) {
-      const d = dist2(pts[k], pts[i], pts[j]);
-      if (d > dPire) { dPire = d; pire = k; }
-    }
-    if (pire > 0 && dPire > tol * tol) {
-      garder[pire] = true;
-      pile.push([i, pire], [pire, j]);
-    }
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PAINT · Vos plans en couleurs — FIDAL Notaires</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<style>
+  :root{
+    --navy-1:#16314f; --navy-2:#091525;
+    --teal:#6DD5DC; --teal-deep:#4E98A0;
+    --gold:#E3CC7A;
+    --ink:#0F2238; --grey:#657D96; --line:#d8dee6;
+    --panel:#fbfcfd; --bg:#eef1f4;
   }
-  return pts.filter((_, i) => garder[i]);
-};
-
-// Point GARANTI INTÉRIEUR au polygone. Le centroïde suffit dans la plupart des
-// cas, mais il tombe hors d'une parcelle concave ou en L : on le teste, et à
-// défaut on cherche par BALAYAGE PAR LANCER DE RAYON.
-//
-// ⚠ POURQUOI PAS UNE GRILLE. Le repli d'origine échantillonnait la boîte
-// englobante en 7 × 7 points. Sur une parcelle en ruban, il ne trouve rien :
-// mesuré le 29/07/2026 sur une parcelle de la section BE à Saint-Omer, 2 120 m²
-// dans une boîte de 347 × 181 m, soit un remplissage de 3,4 % — un ruban de 5 m
-// de large sur 391 m de long, que les 49 points d'une grille au pas de 43 × 23 m
-// manquent tous. Ni « pt » ni « poly » ne partaient alors vers PAINT, qui
-// refusait de colorier faute de position, et rendait la main à l'outil manuel.
-//
-// Le balayage, lui, ne peut pas manquer une surface non vide : sur chaque ligne
-// horizontale on calcule les intersections avec les côtés, on les trie, et les
-// segments de rang pair sont intérieurs par la règle de parité. On retient le
-// MILIEU DU SEGMENT INTÉRIEUR LE PLUS LARGE de tout le balayage — donc l'endroit
-// le plus confortablement dedans, ce qui est précisément ce qu'un amorçage de
-// remplissage demande, et non un point collé à une limite.
-const dansPolygone = (x, y, anneau) => {
-  let dedans = false;
-  for (let i = 0, j = anneau.length - 2; i < anneau.length - 1; j = i++) {
-    const [xi, yi] = anneau[i], [xj, yj] = anneau[j];
-    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) dedans = !dedans;
-  }
-  return dedans;
-};
-
-// Nombre de lignes du balayage. Soixante-quatre suffisent : sur le ruban de
-// Saint-Omer, dont la boîte fait 181 m de haut, cela donne une ligne tous les
-// 2,8 m pour une largeur de 5 m — le ruban est traversé plusieurs fois.
-const LIGNES_BALAYAGE = 64;
-
-const pointInterieur = (anneau) => {
-  let a = 0, cx = 0, cy = 0;
-  for (let i = 0; i < anneau.length - 1; i++) {
-    const [x0, y0] = anneau[i], [x1, y1] = anneau[i + 1];
-    const f = x0 * y1 - x1 * y0;
-    a += f; cx += (x0 + x1) * f; cy += (y0 + y1) * f;
-  }
-  if (a !== 0) {
-    const c = [cx / (3 * a), cy / (3 * a)];
-    if (dansPolygone(c[0], c[1], anneau)) return c;
-  }
-  const ys = anneau.map((q) => q[1]);
-  const y0 = Math.min(...ys), y1 = Math.max(...ys);
-  if (!(y1 > y0)) return null;
-  let meilleur = null;
-  for (let i = 1; i < LIGNES_BALAYAGE; i++) {
-    const y = y0 + (y1 - y0) * i / LIGNES_BALAYAGE;
-    const xs = [];
-    for (let k = 0, j = anneau.length - 2; k < anneau.length - 1; j = k++) {
-      const [xk, yk] = anneau[k], [xj, yj] = anneau[j];
-      // Le côté franchit-il cette ligne ? Comparaison stricte d'un seul côté,
-      // pour ne compter qu'une fois un sommet posé exactement sur la ligne.
-      if ((yk > y) !== (yj > y)) xs.push(xk + (xj - xk) * (y - yk) / (yj - yk));
-    }
-    xs.sort((p, q) => p - q);
-    for (let k = 0; k + 1 < xs.length; k += 2) {
-      const largeur = xs[k + 1] - xs[k];
-      if (largeur > 0 && (!meilleur || largeur > meilleur.largeur)) {
-        meilleur = { x: (xs[k] + xs[k + 1]) / 2, y, largeur };
-      }
-    }
-  }
-  return meilleur ? [meilleur.x, meilleur.y] : null;
-};
-
-// Descripteurs métriques d'une parcelle, calculés sur son contour cadastral.
-// Ils permettent à PAINT de PRÉDIRE la taille attendue de la parcelle en pixels
-// au lieu de la deviner : un extrait A4 à 1/1000 couvre 210 m de largeur, donc
-// connaissant la largeur du rendu on connaît l'échelle pixels par mètre.
-// Projection locale équirectangulaire : suffisante à l'échelle d'une parcelle,
-// et sans dépendance à une bibliothèque de projection.
-const descripteursForme = (geom, dep) => {
-  if (!geom) return null;
-  const anneaux = geom.type === 'Polygon' ? [geom.coordinates[0]]
-    : geom.type === 'MultiPolygon' ? geom.coordinates.map((p) => p[0]) : [];
-  if (!anneaux.length) return null;
-  // Anneau extérieur le plus vaste, comme côté serveur pour le centroïde.
-  const aireBrute = (a) => {
-    let s2 = 0;
-    for (let i = 0; i < a.length - 1; i++) s2 += a[i][0] * a[i + 1][1] - a[i + 1][0] * a[i][1];
-    return Math.abs(s2 / 2);
-  };
-  const anneau = anneaux.reduce((m, a) => (aireBrute(a) > aireBrute(m) ? a : m));
-  if (anneau.length < 4) return null;
-  const lat0 = anneau.reduce((t, pt) => t + pt[1], 0) / anneau.length;
-  const mx = 111320 * Math.cos(lat0 * Math.PI / 180), my = 110540;
-  const xy = anneau.map(([lo, la]) => [lo * mx, la * my]);
-  let a2 = 0;
-  for (let i = 0; i < xy.length - 1; i++) a2 += xy[i][0] * xy[i + 1][1] - xy[i + 1][0] * xy[i][1];
-  const aire = Math.abs(a2 / 2);
-  const xs = xy.map((q) => q[0]), ys = xy.map((q) => q[1]);
-  const largeur = Math.max(...xs) - Math.min(...xs);
-  const hauteur = Math.max(...ys) - Math.min(...ys);
-  if (!(largeur > 0) || !(hauteur > 0)) return null;
-  // Point intérieur, projeté en conique conforme.
-  const pi = pointInterieur(anneau);
-  const cc = pi ? versConiqueConforme(pi[1], pi[0], dep) : null;
-
-  // CONTOUR PROJETÉ, sommet par sommet. C'est lui qui permet à PAINT de PEINDRE
-  // le polygone au lieu de le tracer par remplissage. Décisif en rural : les
-  // limites y sont dessinées en traits d'axe interrompus — tirets et points —
-  // qu'un remplissage traverse. Observé à Pusey : 42 % du plan atteint.
-  // Simplifié à 40 sommets au plus, contrainte des liens hypertexte d'Excel.
-  let poly = null;
-  if (cc) {
-    const projetes = [];
-    for (const [lo, la] of anneau) {
-      const q = versConiqueConforme(la, lo, dep);
-      if (!q || q.zone !== cc.zone) { projetes.length = 0; break; }
-      projetes.push([q.X, q.Y]);
-    }
-    if (projetes.length >= 4) {
-      let reduit = simplifier(projetes, 0.5);
-      // Si la tolérance d'un demi-mètre ne suffit pas, on la desserre par paliers
-      // jusqu'à tenir dans quarante sommets.
-      for (let tol = 1; reduit.length > 40 && tol <= 32; tol *= 2) {
-        reduit = simplifier(projetes, tol);
-      }
-      poly = reduit.slice(0, 40);
-    }
-  }
-  return {
-    largeur: Math.round(largeur * 10) / 10,
-    hauteur: Math.round(hauteur * 10) / 10,
-    aire: Math.round(aire),
-    remplissage: Math.round(100 * aire / (largeur * hauteur)) / 100,
-    cc,
-    poly,
-  };
-};
-
-// Rotation optimale de la zone d'impression, calculée sur le contour projeté.
-// Séparée de descripteursForme parce que choisirOrientation dépend de
-// choisirEchelle, défini plus bas : ce n'est appelé qu'à la construction des
-// liens, jamais pendant le calcul des descripteurs.
-const orientationDe = (f) => (f && f.poly ? choisirOrientation(f.poly) : null);
-
-// ----------------------------------------------------------------------
-// CHOIX DE L'ÉCHELLE ET DU FORMAT
-// Le 1/1000 est la norme des éditions du cabinet et le reste : on ne s'en écarte
-// que lorsque la parcelle n'y tient pas.
-//
-// EMPRISES TERRAIN EXACTES, relevées dans api/extrait.js de PAINT (constante
-// MAP_SIZES, exprimée en centièmes de millimètre) — ce ne sont donc pas des
-// estimations mais les dimensions réelles de la carte produite :
-//     A4 portrait 195,5 × 211,0 mm      A4 paysage 210,7 × 197,0 mm
-//     A3 portrait 281,5 × 301,0 mm      A3 paysage 316,0 × 283,0 mm
-// À 1/1000, un A4 portrait couvre donc 195,5 × 211,0 m de terrain.
-//
-// TROIS PRINCIPES, dans l'ORDRE OÙ LES BOUCLES LES APPLIQUENT — et cet ordre est
-// un CHOIX D'ÉDITION, arbitré par JFD le 29/07/2026 (option « A ») :
-//  1. LE CONFORT D'ABORD. La passe est la boucle EXTÉRIEURE : toutes les échelles
-//     sont essayées à 60 % d'occupation avant qu'on n'envisage de laisser la
-//     parcelle remplir le cadre. On voit donc son voisinage — parcelles
-//     riveraines, voie d'accès, alignements —, ce qu'exige une désignation
-//     contextuelle ou l'examen d'une servitude ;
-//  2. puis l'ÉCHELLE, de la plus fine à la plus lâche ;
-//  3. puis le FORMAT, A4 avant A3 : un A3 ne s'imprime pas au cabinet aussi
-//     facilement. À échelle et passe égales, l'orientation paysage est essayée
-//     avant de desserrer l'échelle.
-//
-// ⚠ CE QUE CE CHOIX COÛTE, ASSUMÉ ET NON IGNORÉ. Le confort passant avant
-// l'échelle, une parcelle de 150 × 160 m sort au 1/1500 avec de la marge blanche
-// alors qu'elle tiendrait au 1/1000 en occupant 95 % du cadre (150 ≤ 185,7 et
-// 160 ≤ 200,5). On perd un facteur 1,5 sur l'échelle pour gagner du vide. C'est
-// délibéré. Une version antérieure de ce commentaire affirmait l'inverse —
-// « l'ORIENTATION change avant l'ÉCHELLE » — et NE DÉCRIVAIT PAS LE CODE : elle
-// est corrigée ici. Ne pas rétablir cette formulation sans changer les boucles.
-//
-// ⚠ ASYMÉTRIE DÉLIBÉRÉE AVEC LE RANG DE choisirOrientation — NE PAS L'« ALIGNER ».
-// Le rang, lui, classe par ÉCHELLE D'ABORD, et c'est correct : les deux
-// mécanismes ne répondent pas à la même question. Cette fonction demande
-// « quelle édition produire ? », où le confort a sa place. Le rang demande
-// « vaut-il la peine de TOURNER LA PAGE ? » — et tourner est un COÛT, la flèche
-// du nord n'étant plus verticale. On ne l'accepte que pour un gain d'échelle réel ;
-// gagner du blanc ne justifie pas de tourner une pièce de dossier. Un rang classant
-// par confort d'abord a été essayé le 29/07/2026 et retiré : sur un rectangle de
-// 600 × 300 m incliné à 30°, il faisait tourner le plan POUR PASSER DU 1/4000 AU
-// 1/5000, donc un plan tourné ET moins précis. Voir l'addendum REDPAR v4, § 4.
-//
-// Mesuré sur la base : 88,3 % des parcelles tiennent à 1/1000. La couverture
-// maximale atteignable est l'A3 paysage à 1/5000, soit 1 580 × 1 415 m ; au-delà
-// il reste 0,025 % des parcelles, soit 4 649 sur 18,7 millions, pour l'essentiel
-// des emprises forestières de Guyane de 100 000 hectares — qui relèvent de la
-// carte et non de l'extrait cadastral.
-// ----------------------------------------------------------------------
-const CARTES = {
-  'A4|portrait': { l: 195.5, h: 211.0, a3: false },
-  'A4|paysage': { l: 210.7, h: 197.0, a3: false },
-  'A3|portrait': { l: 281.5, h: 301.0, a3: true },
-  'A3|paysage': { l: 316.0, h: 283.0, a3: true },
-};
-// PLAFOND À 1/5000, VÉRIFIÉ EXPÉRIMENTALEMENT le 28/07/2026 : une demande à
-// 1/10000 est SILENCIEUSEMENT SERVIE À 1/1000 par le service du cadastre. Pas de
-// refus, pas de message — le cartouche indique 1/1000 et le plan couvre dix fois
-// moins de terrain que demandé. Ne pas rétablir 10000 ni 25000 sans avoir
-// revérifié : la substitution est invisible et produirait un plan faux sur une
-// pièce de dossier. PAINT contrôle désormais l'échelle réellement délivrée en la
-// mesurant sur les étiquettes de coordonnées.
-const ECHELLES = [1000, 1250, 1500, 2000, 2500, 4000, 5000];
-
-// Le RANG rend deux résultats comparables entre eux, ce dont on a besoin pour
-// choisir une orientation de zone d'impression (voir choisirOrientation) : plus
-// il est bas, meilleur est le résultat.
-// ⚠ IL NE RECOPIE PAS L'ORDRE DES BOUCLES CI-DESSOUS, et c'est délibéré. Les
-// boucles placent la passe en premier, donc le confort de 60 % avant l'échelle :
-// un 1/5000 avec de la marge y est préféré à un 1/4000 serré. Pour arbitrer une
-// ROTATION, ce classement conduit à des absurdités — sur un rectangle de
-// 600 × 300 m incliné à 30°, il faisait choisir de tourner le plan pour passer
-// du 1/4000 au 1/5000, soit un plan tourné ET moins précis. Le rang classe donc
-// par ÉCHELLE d'abord, puis A4 avant A3, puis le confort. Il ne sert qu'à cette
-// comparaison : le choix rendu par la fonction, lui, est inchangé.
-const choisirEchelle = (largeurM, hauteurM) => {
-  const L = Number(largeurM) || 0, H = Number(hauteurM) || 0;
-  if (!L || !H) return { echelle: '1000', format: 'A4|portrait', occupation: 0.6, deborde: false, rang: 99999 };
-  // Trois passes de plus en plus permissives, pour n'élargir qu'à contrecœur.
-  const passes = [
-    { occ: 0.60, a3: false },   // confortable, A4
-    { occ: 0.95, a3: false },   // la parcelle remplit le cadre, A4
-    { occ: 0.95, a3: true },    // dernier recours : A3
-  ];
-  for (let ip = 0; ip < passes.length; ip++) {
-    const passe = passes[ip];
-    for (let ie = 0; ie < ECHELLES.length; ie++) {
-      const ech = ECHELLES[ie];
-      for (const [nom, c] of Object.entries(CARTES)) {
-        if (c.a3 && !passe.a3) continue;
-        if (L <= c.l * ech / 1000 * passe.occ && H <= c.h * ech / 1000 * passe.occ) {
-          return { echelle: String(ech), format: nom, occupation: passe.occ, deborde: false,
-            rang: ie * 100 + (c.a3 ? 10 : 0) + ip };
-        }
-      }
-    }
-  }
-  // Aucune combinaison ne suffit : l'extrait cadastral n'est pas le bon document.
-  return { echelle: '25000', format: 'A3|paysage', occupation: 1, deborde: true, rang: 99999 };
-};
-
-// ----------------------------------------------------------------------
-// ROTATION DE LA ZONE D'IMPRESSION
-// Le service du cadastre accepte un champ MAPROTATION que PAINT laissait à zéro.
-// CONVENTION ÉTABLIE EXPÉRIMENTALEMENT le 29/07/2026, par la direction de la
-// flèche du nord sur cinq extraits de contrôle à Saint-Omer : la valeur est en
-// DEGRÉS, et une valeur POSITIVE fait tourner le contenu du plan dans le SENS
-// DES AIGUILLES sur la page — +45° amène la flèche du nord à 1 h 30, −45° à
-// 10 h 30. D'où la transformation ci-dessous : un vecteur terrain (x vers l'Est,
-// y vers le Nord) apparaît sur la page en
-//     u =  x·cos θ + y·sin θ        (vers la droite de la page)
-//     v = −x·sin θ + y·cos θ        (vers le haut de la page)
-//
-// À QUOI CELA SERT. L'emprise au sol de la page est INVARIANTE — mesuré sur les
-// extraits de contrôle : 100 m de terrain occupent 100 mm de papier au 1/1000,
-// que le plan soit droit ou tourné. La rotation ne donne donc pas plus de place,
-// elle l'ORIENTE. Tout le gain est là : une lanière de 300 m orientée à 45°
-// présente une boîte droite de 212 × 212 m, qui ne tient pas en A4 au 1/1000 ;
-// tournée dans son axe elle occupe 300 × 15 m et tient en A4 paysage.
-//
-// ON NE TOURNE QUE SI L'ON Y GAGNE : à rang égal, l'angle nul est conservé. Un
-// plan incliné se lit moins bien qu'un plan nord en haut, et le basculement
-// portrait/paysage — que choisirEchelle essaie déjà — doit rester le premier
-// recours. C'est aussi ce qui garantit que 88,3 % des parcelles, celles qui
-// tiennent déjà à 1/1000, sortiront exactement comme avant.
-//
-// ⚠ RÉSERVÉ AU LIEN « EXTRAIT DGFiP ». Les liens « Colorier » et « Annoté »
-// passent par le frontend de PAINT, dont le géoréférencement lit les étiquettes
-// de coordonnées en supposant les abscisses en haut et en bas, les ordonnées à
-// gauche et à droite. Sur un plan tourné cette hypothèse tombe : il faudrait une
-// transformation affine complète, et transmettre la rotation en l'état peindrait
-// le polygone de travers. Ne pas propager avant d'avoir traité ce point.
-// ----------------------------------------------------------------------
-
-// Enveloppe convexe par chaîne monotone d'Andrew. Le rectangle englobant d'aire
-// minimale d'un ensemble de points est toujours aligné sur une arête de son
-// enveloppe convexe : les directions de ces arêtes forment donc l'ensemble
-// complet des angles à examiner, et il est petit — au plus quarante ici.
-const enveloppeConvexe = (pts) => {
-  if (pts.length < 4) return pts.slice();
-  const p = pts.slice().sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
-  const croix = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
-  const bas = [];
-  for (const q of p) {
-    while (bas.length >= 2 && croix(bas[bas.length - 2], bas[bas.length - 1], q) <= 0) bas.pop();
-    bas.push(q);
-  }
-  const haut = [];
-  for (let i = p.length - 1; i >= 0; i--) {
-    const q = p[i];
-    while (haut.length >= 2 && croix(haut[haut.length - 2], haut[haut.length - 1], q) <= 0) haut.pop();
-    haut.push(q);
-  }
-  return bas.slice(0, -1).concat(haut.slice(0, -1));
-};
-
-// Étendue de la parcelle dans le repère de la PAGE, pour une rotation donnée.
-const empriseSurPage = (pts, angleDeg) => {
-  const a = angleDeg * Math.PI / 180;
-  const c = Math.cos(a), s = Math.sin(a);
-  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
-  for (const [x, y] of pts) {
-    const u = x * c + y * s;
-    const v = -x * s + y * c;
-    if (u < minU) minU = u;
-    if (u > maxU) maxU = u;
-    if (v < minV) minV = v;
-    if (v > maxV) maxV = v;
-  }
-  return { L: maxU - minU, H: maxV - minV };
-};
-
-// Angle ramené dans (−90, 90]. Un demi-tour ne change ni l'emprise ni la
-// lisibilité d'un plan cadastral, et le service n'a pas à recevoir de valeurs
-// qu'il pourrait refuser.
-const normaliserAngle = (a) => {
-  let r = ((a % 180) + 180) % 180;
-  if (r > 90) r -= 180;
-  return Math.round(r * 100) / 100;
-};
-
-// Choisit la rotation qui donne le meilleur couple échelle / format, sur le
-// contour PROJETÉ en conique conforme — c'est-à-dire dans le même repère que
-// celui où l'extrait est composé.
-const choisirOrientation = (polyProjete) => {
-  const nul = { rotation: 0, rang: null, ef: null, L: 0, H: 0 };
-  if (!polyProjete || polyProjete.length < 4) return nul;
-  const enveloppe = enveloppeConvexe(polyProjete);
-  if (enveloppe.length < 3) return nul;
-
-  // Référence : sans rotation. C'est elle qu'il faudra battre STRICTEMENT.
-  const base = empriseSurPage(enveloppe, 0);
-  let meilleur = { rotation: 0, ef: choisirEchelle(base.L, base.H), L: base.L, H: base.H };
-
-  const angles = new Set();
-  for (let i = 0; i < enveloppe.length; i++) {
-    const [x0, y0] = enveloppe[i];
-    const [x1, y1] = enveloppe[(i + 1) % enveloppe.length];
-    const dx = x1 - x0, dy = y1 - y0;
-    if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) continue;
-    // Angle qui amène cette arête à l'horizontale sur la page : la page voit
-    // l'arête sous l'angle atan2(−dy·sin+…) — il suffit d'annuler v, donc de
-    // prendre θ = atan2(dy, dx).
-    angles.add(normaliserAngle(Math.atan2(dy, dx) * 180 / Math.PI));
-    angles.add(normaliserAngle(Math.atan2(dy, dx) * 180 / Math.PI + 90));
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    font-family:"Segoe UI",system-ui,sans-serif;
+    color:var(--ink); background:var(--bg);
+    display:flex; flex-direction:column; overflow:hidden;
   }
 
-  for (const angle of angles) {
-    if (!angle) continue;                       // le zéro est déjà la référence
-    const e = empriseSurPage(enveloppe, angle);
-    if (!(e.L > 0) || !(e.H > 0)) continue;     // contour dégénéré : sans objet
-    const ef = choisirEchelle(e.L, e.H);
-    // STRICTEMENT meilleur, ou rang égal et angle plus faible : on ne penche un
-    // plan que pour un gain réel.
-    if (ef.rang < meilleur.ef.rang
-      || (ef.rang === meilleur.ef.rang && Math.abs(angle) < Math.abs(meilleur.rotation))) {
-      meilleur = { rotation: angle, ef, L: e.L, H: e.H };
-    }
+  /* ---------- Bandeau ---------- */
+  header{
+    background:linear-gradient(135deg,var(--navy-1),var(--navy-2));
+    color:#fff; padding:10px 18px; display:flex; align-items:center;
+    gap:18px; flex-wrap:wrap; box-shadow:0 2px 8px rgba(9,21,37,.25); z-index:20;
   }
-  return {
-    rotation: meilleur.rotation,
-    rang: meilleur.ef.rang,
-    ef: meilleur.ef,
-    L: Math.round(meilleur.L * 10) / 10,
-    H: Math.round(meilleur.H * 10) / 10,
-  };
-};
-
-// Contenance dans la forme notariale : hectares, ares, centiares. Un are vaut
-// cent mètres carrés, un centiare un mètre carré. C'est la forme attendue dans
-// une désignation, et non le mètre carré brut.
-/* ==================================================================
-   ADRESSE CADASTRALE, FORME DU M1                  (31/07/2026)
-   ------------------------------------------------------------------
-   ⚠ ON RESTE EN CAPITALES, ABRÉVIATIONS CONSERVÉES. Décision JFD du 31/07,
-   prise sur pièce : un extrait cadastral modèle 1 réel (Bergues, AC 0170 et
-   0185) imprime « 6 PL DU MARCHE AUX BESTIAUX » et « 16 RUE DU COLLEGE ».
-   Donc numéro SANS remplissage à zéro, nature de voie ABRÉGÉE, capitales, pas
-   d'accent. La seule chose retirée est le bourrage « 0010 » du fichier MAJIC,
-   qui est un artefact de format et ne figure sur AUCUN document imprimé.
-
-   ⚠ DIVERGENCE ASSUMÉE AVEC TRENTE, À NE PAS « HARMONISER ». L'addendum TRENTE
-   v3 prescrit l'inverse — libellés rétablis en langage d'acte, « 11 ALL DU
-   TENNIS » devenant « 11 allée du Tennis ». Les deux ont raison, parce qu'ils ne
-   font pas la même chose : TRENTE RÉDIGE UNE CLAUSE D'ACTE, où le langage
-   d'acte s'impose ; REDPAR produit une ANNEXE ILLUSTRATIVE que l'on doit pouvoir
-   recouper avec un M1, donc qui doit lui ressembler. Ne pas aligner l'un sur
-   l'autre au nom de la cohérence : ce serait casser l'un des deux usages.
-
-   ⚠ CONSÉQUENCE HEUREUSE : plus de problème d'accents. Le fichier MAJIC étant en
-   capitales non accentuées, rester en capitales supprime la question — et avec
-   elle la relecture qu'imposait toute tentative de restitution. Le dictionnaire
-   d'accents et la table des natures de voie, écrits puis éprouvés le 31/07, ont
-   été RETIRÉS : ne pas les réintroduire ici, ils appartiennent à TRENTE.
-   ================================================================== */
-function adresseM1(brut){
-  let t = String(brut || '').trim().toUpperCase();
-  if (!t) return '';
-  // La virgule et le point-virgule séparent les champs et les rangs du
-  // paramètre « tab » : ils ne peuvent pas traverser une valeur.
-  t = t.replace(/[;,]/g, ' ').replace(/\s+/g, ' ').trim();
-  const mots = t.split(' ');
-  if (/^\d+$/.test(mots[0])) {
-    const n = parseInt(mots[0], 10);
-    if (n === 0) mots.shift(); else mots[0] = String(n);
+  .brand{display:flex;align-items:center;gap:12px;font-weight:600;letter-spacing:.5px}
+  .brand .nib{width:30px;height:30px}
+  .brand small{display:block;font-weight:400;font-size:11px;color:var(--teal);letter-spacing:1px}
+  .hbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-left:auto}
+  .hbtn{
+    background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.18);
+    padding:7px 13px;border-radius:8px;font-size:13px;cursor:pointer;display:flex;
+    align-items:center;gap:6px;transition:.15s;font-family:inherit;
   }
-  return mots.join(' ').trim();
+  .hbtn:hover{background:rgba(109,213,220,.22);border-color:var(--teal)}
+  .hbtn.primary{background:var(--teal-deep);border-color:var(--teal)}
+  .hbtn.primary:hover{background:var(--teal)}
+  .hbtn:disabled{opacity:.4;cursor:not-allowed}
+  .pagenav{display:flex;align-items:center;gap:6px;font-size:13px}
+  .pagenav span{min-width:74px;text-align:center}
+
+  /* ---------- Corps ---------- */
+  main{flex:1;display:flex;min-height:0}
+
+  /* Barre d'outils gauche */
+  aside{
+    width:248px; background:var(--panel); border-right:1px solid var(--line);
+    padding:14px; overflow-y:auto; flex-shrink:0;
+  }
+  .grp{margin-bottom:18px}
+  .grp h3{
+    font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--grey);
+    margin:0 0 9px;font-weight:700;
+  }
+  .tools{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .tool{
+    background:#fff;border:1.5px solid var(--line);border-radius:9px;padding:9px 6px;
+    cursor:pointer;display:flex;flex-direction:column;align-items:center;gap:5px;
+    font-size:11px;color:var(--ink);transition:.12s;font-family:inherit;
+  }
+  .tool svg{width:22px;height:22px}
+  .tool:hover{border-color:var(--teal-deep)}
+  .tool.active{border-color:var(--teal-deep);background:#eafafb;box-shadow:inset 0 0 0 1.5px var(--teal-deep)}
+
+  .swatches{display:grid;grid-template-columns:repeat(6,1fr);gap:6px}
+  .sw{
+    aspect-ratio:1;border-radius:7px;cursor:pointer;border:2px solid #fff;
+    box-shadow:0 0 0 1px var(--line);transition:.12s;
+  }
+  .sw:hover{transform:scale(1.08)}
+  .sw.active{box-shadow:0 0 0 2px var(--ink);transform:scale(1.08)}
+  .colorrow{display:flex;align-items:center;gap:10px;margin-top:10px}
+  .colorrow input[type=color]{width:38px;height:34px;border:none;border-radius:7px;background:none;cursor:pointer;padding:0}
+  .colorrow label{font-size:12px;color:var(--grey)}
+
+  .slider{margin-top:6px}
+  .slider label{display:flex;justify-content:space-between;font-size:12px;color:var(--grey);margin-bottom:3px}
+  .slider input[type=range]{width:100%;accent-color:var(--teal-deep)}
+
+  .legend-item{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+  .legend-item .dot{width:18px;height:18px;border-radius:5px;flex-shrink:0;box-shadow:0 0 0 1px var(--line)}
+  .legend-item input{
+    flex:1;border:1px solid var(--line);border-radius:6px;padding:5px 7px;font-size:12px;
+    font-family:inherit;color:var(--ink);min-width:0;
+  }
+  .legend-item input:focus{outline:none;border-color:var(--teal-deep)}
+  .legend-hint{font-size:11px;color:var(--grey);line-height:1.4}
+
+  .numrow{display:flex;gap:6px;margin-bottom:8px}
+  .numrow input{
+    flex:1;min-width:0;border:1.5px solid var(--line);border-radius:8px;padding:8px 9px;
+    font-size:13px;font-family:inherit;color:var(--ink);
+  }
+  .numrow input:focus{outline:none;border-color:var(--teal-deep)}
+  .findbtn{
+    width:100%;background:var(--teal-deep);color:#fff;border:none;border-radius:8px;
+    padding:9px;font-size:13px;font-weight:600;cursor:pointer;font-family:inherit;transition:.15s;
+    display:flex;align-items:center;justify-content:center;gap:7px;
+  }
+  .findbtn:hover{background:var(--teal)}
+  .findbtn svg{width:17px;height:17px}
+  .status{margin-top:9px;font-size:12px;line-height:1.45;padding:8px 10px;border-radius:8px;display:none}
+  .status.show{display:block}
+  .status.ok{background:#eafaf0;color:#1f7a45;border:1px solid #bfe6cf}
+  .status.warn{background:#fff6e6;color:#9a6a14;border:1px solid #f0dcae}
+  .status.err{background:#fdeaea;color:#a52f2f;border:1px solid #f0c9c9}
+
+  /* Zone plan */
+  .stage{flex:1;position:relative;overflow:auto;scrollbar-gutter:stable;background:
+    repeating-conic-gradient(#e7ebef 0% 25%, #f3f5f7 0% 50%) 50%/22px 22px;}
+  .scroller{min-width:100%;min-height:100%;display:flex;align-items:flex-start;justify-content:center;padding:24px}
+  #cwrap{position:relative;transform-origin:top center;box-shadow:0 6px 30px rgba(9,21,37,.22);background:#fff;line-height:0}
+  #base,#overlay{display:block;position:absolute;top:0;left:0}
+  #base{position:relative}
+  #overlay{cursor:crosshair}
+  #anno{position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none}
+  .note{
+    position:absolute;pointer-events:auto;font-family:"Segoe UI",sans-serif;font-weight:600;
+    white-space:nowrap;cursor:move;padding:1px 3px;user-select:none;transform:translate(-50%,-50%);
+  }
+  .note.sel{outline:2px dashed var(--teal-deep);outline-offset:2px}
+
+  /* Accueil (drop zone) */
+  #drop{
+    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    flex-direction:column;gap:16px;color:var(--grey);text-align:center;padding:30px;
+  }
+  #drop.hide{display:none}
+  .dropcard{
+    border:2.5px dashed var(--line);border-radius:18px;padding:48px 60px;background:#fff;
+    transition:border-color .15s, background .15s;width:520px;max-width:calc(100vw - 60px);
+  }
+  #drop.over .dropcard{border-color:var(--teal-deep);background:#eafafb}
+  .dropcard h2{margin:0 0 6px;color:var(--ink);font-weight:600}
+  .dropcard p{margin:4px 0;font-size:14px}
+  .dropcard .pen{width:54px;height:54px;margin-bottom:8px}
+
+  .gen-sep{display:flex;align-items:center;gap:10px;margin:20px 0 14px;color:var(--grey);font-size:12px}
+  .gen-sep::before,.gen-sep::after{content:"";flex:1;height:1px;background:var(--line)}
+  .gen-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;text-align:left}
+  .gen-grid label{display:flex;flex-direction:column;gap:3px;font-size:11px;color:var(--grey);font-weight:600}
+  .gen-grid input,.gen-grid select{
+    border:1.5px solid var(--line);border-radius:7px;padding:7px 8px;font-size:13px;
+    font-family:inherit;color:var(--ink);background:#fff;width:100%;
+  }
+  .gen-grid input:focus,.gen-grid select:focus{outline:none;border-color:var(--teal-deep)}
+  .gen-btn{
+    margin-top:14px;width:100%;background:var(--teal-deep);color:#fff;border:none;border-radius:9px;
+    padding:11px;font-size:14px;font-weight:600;cursor:pointer;font-family:inherit;transition:.15s;
+  }
+  .gen-btn:hover{background:var(--teal)}
+  .gen-btn:disabled{opacity:.55;cursor:wait}
+  .gen-status{margin-top:10px;font-size:12.5px;line-height:1.45;min-height:1px}
+  .gen-status.err{color:#a52f2f}
+  .gen-status.ok{color:#1f7a45}
+  .ac-wrap{position:relative;width:100%}
+  .ac-list{position:absolute;left:0;right:0;top:100%;z-index:6;background:#fff;border:1px solid var(--line);border-top:none;border-radius:0 0 10px 10px;max-height:240px;overflow:auto;box-shadow:0 12px 26px rgba(9,21,37,.18);display:none}
+  .ac-list.show{display:block}
+  .ac-head{padding:6px 11px;font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;color:var(--grey);background:#f4f7f9;border-bottom:1px solid var(--line);position:sticky;top:0}
+  .ac-item{padding:10px 11px;font-size:12.5px;cursor:pointer;color:var(--ink);display:flex;justify-content:space-between;gap:10px;align-items:center;border-top:1px solid var(--line)}
+  .ac-item:first-child{border-top:none}
+  .ac-item:hover{background:#eafafb;box-shadow:inset 3px 0 0 var(--teal-deep)}
+  .ac-item small{color:var(--grey);white-space:nowrap}
+  .ac-item .lbl{display:flex;align-items:center;gap:8px;min-width:0;flex:1}
+  .ac-item .pin{flex-shrink:0;width:15px;height:15px;color:var(--teal-deep);opacity:.85}
+  .ac-ok{color:#1f7a45;font-size:11px;margin-top:3px;font-weight:600}
+  .ac-bad{color:#a52f2f;font-size:11px;margin-top:3px}
+  .gen-or{grid-column:1/-1;font-size:11px;color:var(--grey);margin:3px 0 0;border-top:1px solid var(--line);padding-top:9px}
+  .mic-btn{position:absolute;top:3px;right:3px;width:30px;height:30px;border:none;border-radius:7px;background:#eef4f5;color:var(--teal-deep);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;z-index:2}
+  .mic-btn:hover{background:#dff1f2}
+  .mic-btn:disabled{opacity:.4;cursor:not-allowed}
+  .mic-btn.rec{background:#fde2e2;color:#c0392b;animation:micpulse 1s infinite}
+  .mic-btn svg{width:16px;height:16px}
+  @keyframes micpulse{0%,100%{opacity:1}50%{opacity:.5}}
+  #g_adr_nom{padding-right:9px}
+  .dictee-or{display:flex;align-items:center;gap:10px;margin:11px 0 9px;color:var(--grey);font-size:11px}
+  .dictee-or::before,.dictee-or::after{content:"";flex:1;height:1px;background:var(--line)}
+  .dictee-btn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:#eef4f5;color:var(--teal-deep);border:1.5px solid var(--teal-deep);border-radius:9px;padding:10px;font-size:13.5px;font-weight:600;cursor:pointer;font-family:inherit;transition:background .15s,color .15s}
+  .dictee-btn:hover{background:#dff1f2}
+  .dictee-btn svg{width:17px;height:17px}
+  .dictee-btn.rec{background:#fde2e2;color:#c0392b;border-color:#e8a9a9;animation:micpulse 1s infinite}
+  .privacy{font-size:11.5px;color:var(--grey);margin-top:18px;display:flex;align-items:center;gap:6px;justify-content:center}
+
+  /* 3 méthodes de chargement */
+  .methods{display:flex;flex-direction:column;gap:13px;text-align:left;margin-top:14px}
+  .method{border:1.5px solid var(--line);border-radius:12px;padding:12px 14px 14px;background:#fff}
+  .method-head{display:flex;align-items:center;gap:9px;font-size:13.5px;font-weight:700;color:var(--ink);margin-bottom:11px}
+  .method-head .num{display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;background:var(--teal-deep);color:#fff;font-size:12px;font-weight:700;flex-shrink:0}
+  .method .gen-btn{margin-top:12px}
+  .method-hint{font-size:11px;color:var(--grey);margin-top:9px;line-height:1.45}
+  .dropzone{border:2px dashed var(--line);border-radius:10px;padding:20px 14px;text-align:center;color:var(--grey);font-size:13px;cursor:pointer;transition:border-color .15s, background .15s}
+  .dropzone:hover{border-color:var(--teal-deep);background:#f2fbfb;color:var(--ink)}
+  #drop.over .dropzone{border-color:var(--teal-deep);background:#eafafb}
+
+  .hint-bar{
+    position:absolute;left:50%;bottom:14px;transform:translateX(-50%);
+    background:rgba(15,34,56,.9);color:#fff;font-size:12.5px;padding:7px 14px;border-radius:20px;
+    pointer-events:none;opacity:0;transition:.25s;z-index:5;
+  }
+  .hint-bar.show{opacity:1}
+  .spin{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(255,255,255,.7);z-index:9;flex-direction:column;gap:12px;color:var(--ink)}
+  .spin.show{display:flex}
+  .spin .ring{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--teal-deep);border-radius:50%;animation:sp 1s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  input[type=file]{display:none}
+
+  /* Pointeurs personnalisés pinceau / gomme */
+  #toolring{
+    position:fixed;pointer-events:none;border-radius:50%;transform:translate(-50%,-50%);
+    display:none;z-index:60;box-sizing:border-box;
+  }
+  #toolring.brush{border:2px solid var(--teal-deep);background:rgba(109,213,220,.20)}
+  #toolring.erase{border:2px dashed var(--navy-1);background:rgba(255,255,255,.30)}
+  #toolring .badge{
+    position:absolute;left:100%;top:-22px;margin-left:2px;width:22px;height:22px;
+    filter:drop-shadow(0 1px 2px rgba(9,21,37,.45));
+  }
+  #toolring .badge svg{width:22px;height:22px}
+/* ---- VOILE DE PRODUCTION (docauto) — l'onglet travaille, on ne touche pas.
+   Demandé par JFD le 01/08 : l'interface qui se manipule toute seule appelait
+   la souris. Le voile couvre TOUT, dit où on en est, et sourit un peu. */
+#voile{position:fixed;inset:0;z-index:9999;display:none;flex-direction:column;
+  align-items:center;justify-content:center;gap:18px;background:#0F2238;
+  color:#fff;text-align:center;padding:32px;font-family:"Segoe UI",Selawik,system-ui,sans-serif}
+#voile.on{display:flex}
+#voile .vlogo{font-size:15px;letter-spacing:5px;color:#6DD5DC;font-weight:600}
+#voile .vtitre{font-size:34px;font-weight:700;letter-spacing:1px}
+#voile .vvol{font-size:15px;color:#9fb3c8;margin-top:-10px}
+#voile .vphase{font-size:15px;color:#e8eef5;min-height:22px}
+#voile .vbarre{width:min(520px,80vw);height:8px;border-radius:99px;background:rgba(255,255,255,.14);overflow:hidden}
+#voile .vbarre>div{height:100%;width:0%;background:#33838B;border-radius:99px;transition:width .6s ease}
+#voile .vquip{font-size:13.5px;color:#8fa5bb;font-style:italic;max-width:560px;min-height:20px;
+  opacity:1;transition:opacity .5s ease}
+#voile .vnote{font-size:12px;color:#657D96;margin-top:14px}
+#voile.fin .vbarre>div{background:#4caf7d}
+#voile{overflow:hidden}
+#voile.on{cursor:none}   /* la croix de visée remplace la souris */
+/* Trame cadastrale de fond, STATIQUE (les décors animés ont été retirés) */
+#voile::before{content:"";position:absolute;inset:0;opacity:.05;pointer-events:none;
+  background:repeating-linear-gradient(0deg,transparent 0 79px,#6DD5DC 79px 80px),
+             repeating-linear-gradient(90deg,transparent 0 79px,#6DD5DC 79px 80px)}
+/* ---- LE VISEUR : croix d'amorce jaune sous son cercle de visée, il SUIT la
+   souris (transform posé en JS). Recul bref à chaque tir. */
+#viseur{position:absolute;left:0;top:0;width:64px;height:64px;z-index:3;
+  pointer-events:none;transform:translate(-100px,-100px);will-change:transform}
+#viseur.recul .vcercle{transform:scale(.82)}
+.vcercle{position:absolute;inset:6px;border:2px dashed #6DD5DC;border-radius:50%;
+  opacity:.75;animation:vtourne 16s linear infinite;transition:transform .12s ease}
+@keyframes vtourne{to{transform:rotate(360deg)}}
+.vcroix::before,.vcroix::after{content:"";position:absolute;background:#FFE764;border-radius:2px;
+  animation:vpulse 2.4s ease-in-out infinite}
+.vcroix::before{left:50%;top:26%;bottom:26%;width:3px;margin-left:-1.5px}
+.vcroix::after{top:50%;left:26%;right:26%;height:3px;margin-top:-1.5px}
+@keyframes vpulse{0%,100%{opacity:.55}50%{opacity:1}}
+/* ---- LES CANARDS (JFD, 01/08 soir) — le défi de tir : traversée RAPIDE de
+   toute la largeur, altitude et sens tirés au sort, battement d'ailes, léger
+   tangage. Couleur canard, cela va de soi. Abattu : bascule et chute (la
+   position est figée en px au moment de l'impact, la traversée s'arrête, la
+   gravité prend le relais). Un canard vaut TROIS impressions évitées — c'est
+   la prime au tir difficile, ne cherchez pas d'autre logique. */
+.vcanard{position:absolute;z-index:1;pointer-events:none;left:0;top:var(--alt,30%);
+  animation:vvolcan var(--vit,4s) linear forwards;will-change:transform}
+@keyframes vvolcan{from{transform:translateX(-14vw)}to{transform:translateX(114vw)}}
+.vcanard.rg{animation-name:vvolcang}
+@keyframes vvolcang{from{transform:translateX(114vw)}to{transform:translateX(-14vw)}}
+.vbob{animation:vbob .5s ease-in-out infinite alternate}
+@keyframes vbob{from{transform:translateY(-6px)}to{transform:translateY(6px)}}
+.voiseau{position:relative;width:58px;height:36px}
+.rg .voiseau{transform:scaleX(-1)}
+.vcorps{position:absolute;left:0;top:11px;width:40px;height:20px;background:#33838B;
+  border-radius:52% 46% 42% 52%}
+.vqueue{position:absolute;left:-7px;top:13px;border-top:5px solid transparent;
+  border-bottom:5px solid transparent;border-right:10px solid #2a6d74}
+.vtete{position:absolute;right:4px;top:1px;width:16px;height:16px;background:#2a6d74;border-radius:50%}
+.voeil{position:absolute;right:8px;top:6px;width:3px;height:3px;background:#0F2238;border-radius:50%}
+.vbec{position:absolute;right:-7px;top:6px;border-top:4px solid transparent;
+  border-bottom:4px solid transparent;border-left:10px solid #FF982D}
+.vaile{position:absolute;left:11px;top:9px;width:19px;height:13px;background:#2a6d74;
+  border-radius:60% 60% 20% 60%;transform-origin:82% 18%;
+  animation:vbat .26s ease-in-out infinite alternate}
+@keyframes vbat{from{transform:rotate(-30deg)}to{transform:rotate(24deg)}}
+.vcanard.touche{animation:vchoit 1s ease-in forwards}
+.vcanard.touche .vbob,.vcanard.touche .vaile{animation:none}
+@keyframes vchoit{to{transform:translateY(110vh) rotate(160deg)}}
+/* ---- EXPLOSION : éclats de papier projetés depuis l'impact, bref éclair */
+.vfrag{position:absolute;z-index:1;pointer-events:none;border-radius:1px;
+  animation:veclate .7s ease-out forwards}
+@keyframes veclate{
+  0%{transform:translate(0,0) rotate(0deg);opacity:1}
+  100%{transform:translate(var(--dx,40px),var(--dy,40px)) rotate(var(--rot,220deg));opacity:0}}
+.vflash{position:absolute;z-index:1;pointer-events:none;border:2px solid #FFE764;
+  border-radius:50%;width:10px;height:10px;animation:vflash .3s ease-out forwards}
+@keyframes vflash{to{transform:scale(6);opacity:0}}
+/* ---- SCORE, clin d'œil de la maison */
+#vscore{position:absolute;top:22px;left:26px;z-index:2;font-size:13px;color:#8fa5bb}
+#vscore b{color:#6DD5DC;font-size:15px}
+/* Le contenu central passe DEVANT les promeneurs */
+#voile>.vlogo,#voile>.vtitre,#voile>.vvol,#voile>.vbarre,#voile>.vphase,
+#voile>.vquip,#voile>.vnote,#voile>#vmusique{position:relative;z-index:2}
+/* Pluie de documents (JFD, 01/08 soir) : sur TOUTE la largeur, des feuilles
+   tombent du haut avec la trajectoire d'un papier lâché — produit de DEUX
+   mouvements : chute verticale linéaire (porteur .vchute) × balancement
+   pendulaire avec bascule (feuille .vfeuillet). Paramètres tirés au sort en JS
+   (variables CSS), DÉLAIS NÉGATIFS pour un ciel déjà plein à l'ouverture.
+   Transform uniquement : compositeur GPU, coût nul sur la production. */
+#vchutes{position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none}
+.vchute{position:absolute;top:-110px;will-change:transform;perspective:600px;
+  animation:vtombe var(--dur,14s) linear var(--del,0s) infinite}
+/* Vent de côté : la chute dérive latéralement (--vent, même sens pour toutes
+   les feuilles d'une session, force tirée au sort par feuille). */
+@keyframes vtombe{to{transform:translate(var(--vent,90px),120vh)}}
+/* Virevolte à DEUX PÉRIODES : le tangage court (.vtangue) se superpose au
+   balancement long (.vfeuillet) — deux périodes incommensurables, la
+   trajectoire ne se répète jamais, c'est ça l'aléatoire d'une vraie feuille. */
+.vtangue{animation:vtangue var(--bal2,1.1s) ease-in-out infinite alternate}
+@keyframes vtangue{
+  from{transform:translateX(calc(var(--amp2,10px)*-1)) rotateZ(-5deg)}
+  to{transform:translateX(var(--amp2,10px)) rotateZ(5deg)}}
+/* Feuille réaliste : grain de lumière en diagonale, VOLTIGE 3D (rotateY sous
+   perspective — le papier montre sa tranche en tombant), coin corné ombré,
+   et un CONTENU composé au hasard en JS : titre, paragraphes inégaux, parfois
+   sceau carmin ou paraphe. Aucune feuille n'est la copie d'une autre. */
+.vfeuillet{position:relative;width:var(--tail,40px);height:calc(var(--tail,40px)*1.35);
+  background:linear-gradient(135deg,#ffffff 0%,#f4f7fa 55%,#e7edf3 100%);
+  border-radius:2px;opacity:.62;box-shadow:0 3px 8px rgba(0,0,0,.35);
+  box-sizing:border-box;overflow:hidden;
+  animation:vbalance var(--bal,2.2s) ease-in-out infinite alternate}
+@keyframes vbalance{
+  from{transform:translateX(calc(var(--amp,30px)*-1))
+    rotateZ(calc(var(--gite,0deg) - 14deg)) rotateY(calc(var(--tourn,38deg)*-1))}
+  to{transform:translateX(var(--amp,30px))
+    rotateZ(calc(var(--gite,0deg) + 14deg)) rotateY(var(--tourn,38deg))}}
+/* ---- CINQ ESPÈCES de feuilles (choix JFD sur planches) : acte scellé,
+   mini-plan cadastral, chemise kraft, vue aérienne, carte de situation.
+   Chaque feuille tire son espèce au sort à la naissance (semerFeuille). ---- */
+/* Espèce ACTE : coin corné, titre, alinéas, sceau carmin, paraphe */
+.esp-acte{padding:14% 12% 10%}
+.esp-acte::before{content:"";position:absolute;top:0;right:0;width:0;height:0;
+  border:7px solid #d3dbe4;border-right-color:transparent;border-top-color:transparent;
+  filter:drop-shadow(-1px 1px 1px rgba(0,0,0,.18))}
+.esp-acte::after{content:"";position:absolute;top:0;right:0;
+  border:7px solid #0F2238;border-left-color:transparent;border-bottom-color:transparent}
+.vlgn{height:2px;background:#c3cfdb;border-radius:2px;margin:0 0 14% 0}
+.vlgn.t{height:4px;background:#8fa3b8;margin-bottom:16%}
+.vsceau{position:absolute;bottom:7%;right:9%;width:24%;aspect-ratio:1;
+  border:2px solid rgba(160,16,64,.55);border-radius:50%;transform:rotate(-14deg)}
+.vsceau::before{content:"";position:absolute;inset:22%;
+  border:1px solid rgba(160,16,64,.4);border-radius:50%}
+.vsign{position:absolute;bottom:9%;left:12%;width:36%;height:16%;
+  border-bottom:2px solid #5b6f83;border-radius:0 0 70% 40%/0 0 100% 55%;
+  transform:rotate(-7deg);opacity:.75}
+/* Espèce MINI-PLAN : cadre, parcelles jaunes/blanche, LA parcelle en carmin,
+   trait bleu du canal, croix d'amorce */
+.esp-plan{background:#fff;border:2px solid #b9c4cf}
+.vpar{position:absolute;border:1px solid rgba(120,110,60,.6)}
+.vpar.j{background:#FFE764}
+.vpar.b{background:#fff;border-color:#aeb9c4}
+.vpar.c{background:#d1729a;border-color:#A01040}
+.vcanal{position:absolute;left:-6%;right:-6%;height:8%;background:#4682B4;
+  transform:rotate(-7deg)}
+.vamorce{position:absolute;width:14%;aspect-ratio:1}
+.vamorce::before,.vamorce::after{content:"";position:absolute;background:#5b6f83}
+.vamorce::before{left:0;right:0;top:46%;height:8%}
+.vamorce::after{top:0;bottom:0;left:46%;width:8%}
+/* Espèce KRAFT : chemise, onglet, étiquette */
+.esp-kraft{background:linear-gradient(150deg,#dcc6a2,#c9b28a);border:1px solid #ab946f}
+.vonglet{position:absolute;top:0;left:6%;width:38%;height:9%;
+  background:#d3bc96;border:1px solid #ab946f;border-bottom:none;border-radius:3px 3px 0 0}
+.vetiq{position:absolute;top:36%;left:16%;right:16%;height:20%;
+  background:#fff;border:1px solid #b9b9b9;border-radius:2px}
+.vetiq::before,.vetiq::after{content:"";position:absolute;left:12%;height:12%;
+  background:#8fa3b8;border-radius:2px}
+.vetiq::before{top:24%;right:20%}
+.vetiq::after{top:58%;right:40%;background:#c3cfdb}
+/* Espèce VUE AÉRIENNE : mosaïque de verts, route, toits, anneau carmin, échelle */
+.esp-aerien{background:#46603c;border:1px solid #2c3e28}
+.vtuile{position:absolute;opacity:.9}
+.vroute{position:absolute;left:-6%;right:-6%;height:6%;background:#a8a28c;transform:rotate(6deg)}
+.vtoit{position:absolute;width:14%;height:8%;background:#b26050}
+.vanneau{position:absolute;width:34%;aspect-ratio:1;border:3px solid #A01040;border-radius:50%}
+.vechel{position:absolute;left:6%;bottom:5%;width:40%;height:9%;background:rgba(0,0,0,.45)}
+.vechel::before{content:"";position:absolute;left:12%;right:20%;top:38%;height:24%;background:#fff}
+/* Espèce CARTE DE SITUATION : fond crème, rivière, contour communal orange,
+   croix cerclée carmin */
+.esp-carte{background:#f4f2e8;border:1px solid #c8c8bc}
+.vriviere{position:absolute;left:-8%;right:-8%;height:7%;background:#96bedc;transform:rotate(-9deg)}
+.vcontour{position:absolute;inset:12% 14% 20% 12%;border:3px solid #FF982D;
+  border-radius:46% 54% 58% 42%/52% 44% 56% 48%;transform:rotate(-6deg)}
+.vcible{position:absolute;width:26%;aspect-ratio:1;border:2.5px solid #A01040;border-radius:50%}
+.vcible::before,.vcible::after{content:"";position:absolute;background:#A01040}
+.vcible::before{left:14%;right:14%;top:46%;height:9%}
+.vcible::after{top:14%;bottom:14%;left:46%;width:9%}
+/* Bouton musique : fantôme, discret */
+#vmusique{margin-top:6px;background:transparent;color:#8fa5bb;border:1px solid #33838B;
+  border-radius:99px;padding:5px 14px;font-size:12.5px;cursor:pointer}
+#vmusique.on{color:#0F2238;background:#6DD5DC;border-color:#6DD5DC}
+/* Accessibilité : qui demande moins de mouvement l'obtient */
+@media (prefers-reduced-motion:reduce){
+  .vcercle,.vcroix::before,.vcroix::after,.vchute,.vtangue,.vfeuillet,
+  .vcanard,.vbob,.vaile{animation:none}
 }
+</style>
+</head>
+<body>
+<div id="voile">
+  <div id="vchutes" aria-hidden="true"></div>
+  <!-- STAND DE TIR (JFD, 01/08 soir) : la croix de visée SUIT LA SOURIS, les
+       dossiers qui tombent sont les cibles, le clic gauche les fait exploser.
+       Compteur « dossiers classés sans suite ». Tout autre décor a été retiré
+       à la demande — ne pas réintroduire coins, fantômes ni avion. -->
+  <div id="viseur" aria-hidden="true"><div class="vcercle"></div><div class="vcroix"></div></div>
+  <div id="vscore" aria-hidden="true">Impressions évitées : <b>0</b></div>
+  <div class="vlogo">FIDAL NOTAIRES</div>
+  <div class="vtitre" id="vtitre">Production en cours</div>
+  <div class="vvol" id="vvol"></div>
+  <div class="vbarre"><div id="vbarrefill"></div></div>
+  <div class="vphase" id="vphase">Préparation…</div>
+  <div class="vquip" id="vquip"></div>
+  <div class="vnote">Ne fermez pas cet onglet — il travaille seul et se refermera tout seul.</div>
+  <button id="vmusique" type="button" title="Petite musique générée, volume de bibliothèque — et l'onglet en arrière-plan garde sa pleine vitesse">♪ musique</button>
+</div>
 
-const contenanceNotariale = (m2) => {
-  const a = Math.max(0, Math.round(Number(m2) || 0));
-  const ha = Math.floor(a / 10000);
-  const ares = Math.floor((a % 10000) / 100);
-  const ca = a % 100;
-  const deuxChiffres = (n) => String(n).padStart(2, '0');
-  return `${ha} ha ${deuxChiffres(ares)} a ${deuxChiffres(ca)} ca`;
-};
-
-// Section et numéro, extraits de la référence à 14 caractères, pour alimenter les
-// colonnes du tableau d'annotation. Les zéros de tête sont retirés, comme sur le
-// plan. Le préfixe est joint à la section quand il n'est pas 000, cas des communes
-// issues de fusion où il identifie l'ancienne commune.
-const sectionEtNumero = (codeParcelle) => {
-  const r = String(codeParcelle || '');
-  if (r.length !== 14) return null;
-  const prefixe = r.slice(5, 8);
-  const section = r.slice(8, 10).replace(/^0+/, '') || r.slice(8, 10);
-  const numero = r.slice(10, 14).replace(/^0+/, '') || '0';
-  return { section: prefixe !== '000' ? `${prefixe} ${section}` : section, numero };
-};
-
-// Désignation cadastrale lisible, à partir de la référence à 14 caractères.
-// Le préfixe n'est mentionné que s'il n'est pas 000 : il ne l'est que dans les
-// communes issues de fusion, où il identifie l'ancienne commune.
-const designationCadastrale = (codeParcelle) => {
-  const r = String(codeParcelle || '');
-  if (r.length !== 14) return '';
-  const prefixe = r.slice(5, 8), section = r.slice(8, 10).replace(/^0+/, '') || r.slice(8, 10);
-  const numero = r.slice(10, 14).replace(/^0+/, '') || '0';
-  return (prefixe !== '000' ? `Préfixe ${prefixe} — ` : '')
-    + `Section ${section} — Parcelle n° ${numero}`;
-};
-
-// ----------------------------------------------------------------------
-// LIEN D'UNITÉ FONCIÈRE : un plan, toutes les parcelles de l'unité
-// Trois différences avec le lien d'une parcelle seule :
-//  — plusieurs contours sont transmis, séparés par une barre verticale ;
-//  — l'échelle est choisie sur l'emprise de l'UNITÉ ENTIÈRE ;
-//  — l'extrait est RECENTRÉ sur l'unité par les paramètres x et y, que
-//    api/extrait.js substitue au centre de la parcelle demandée. Sans cela une
-//    unité vaste sortirait du cadre, puisque le service centre sur la parcelle.
-// Le budget de sommets est GLOBAL et réparti entre les parcelles : à 1/5000 un
-// pixel vaut 0,6 m, donc une tolérance d'un demi-pixel est visuellement sans
-// perte, et l'on desserre par paliers jusqu'à tenir dans le budget.
-// CE LIEN EST RÉSERVÉ À L'ÉCRAN : un contour d'unité peut représenter plusieurs
-// milliers de caractères, ce qu'un navigateur accepte mais qu'Excel plafonne
-// autour de deux mille. Le classeur garde donc ses liens par parcelle.
-// ----------------------------------------------------------------------
-// 250 sommets et non 400 : un sommet coûte une vingtaine de caractères d'URL, et
-// une unité de douze parcelles atteignait huit mille caractères — au-delà de ce
-// que certains serveurs acceptent dans une ligne de requête. À 250, on reste sous
-// cinq mille, ce qui laisse de la marge tout en conservant un tracé fidèle.
-const BUDGET_SOMMETS = 250;
-
-const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) => {
-  if (!membres || membres.length < 2 || !contours) return null;
-  const geoms = membres.map((r) => contours.get(r)).filter(Boolean);
-  if (geoms.length < 2) return null;
-
-  let zone = null, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  const dep = departementDe(membres[0]);
-  const projetes = [];
-  for (const g of geoms) {
-    const anneaux = anneauxDe(g);
-    if (!anneaux.length) return null;
-    const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
-    const pts = [];
-    for (const [lo, la] of ext) {
-      const q = versConiqueConforme(la, lo, dep);
-      if (!q) return null;
-      if (zone === null) zone = q.zone;
-      if (q.zone !== zone) return null;      // unité à cheval sur deux zones
-      pts.push([q.X, q.Y]);
-      if (q.X < minX) minX = q.X;
-      if (q.X > maxX) maxX = q.X;
-      if (q.Y < minY) minY = q.Y;
-      if (q.Y > maxY) maxY = q.Y;
-    }
-    projetes.push(pts);
-  }
-  const largeur = Math.round((maxX - minX) * 10) / 10;
-  const hauteur = Math.round((maxY - minY) * 10) / 10;
-  const ef = choisirEchelle(largeur, hauteur);
-
-  const mParPixel = (/paysage/.test(ef.format) ? 0.297 : 0.210) * Number(ef.echelle) / 1700;
-  // ⚠ SIMPLIFICATION PAR POLYGONE, plus jamais globale — défaut du 01/08 : le
-  // budget GLOBAL de 250 sommets, hérité des liens Excel (~2 000 caractères),
-  // affamait chaque contour du Dossier complet de Watten (150 parcelles → moins
-  // de 2 sommets par polygone). Tout ce qui dérive des contours mourait EN
-  // SILENCE : croix des cartes de situation, anneaux des vues aériennes,
-  // colorisation des plans de section. Désormais : cible 700 sommets au total,
-  // PLANCHER DE 5 SOMMETS PAR POLYGONE (échantillonnage uniforme de secours si
-  // la simplification descend trop bas), plafond 40 inchangé — les liens
-  // d'unités de quelques parcelles ne changent donc pas d'un octet.
-  // ⚠ CONTREPARTIE DITE, PAS TUE : au-delà de ~120 parcelles, chaque contour
-  // tombe vers 5 sommets — repères JUSTES (centres exacts), mais colorisation
-  // des plans de section APPROXIMATIVE (pentagones au lieu des vraies limites).
-  // La vraie sortie est un canal postMessage REDPAR→PAINT (chantier au mémo) :
-  // l'URL a une limite de transport qu'aucun réglage ne repousse.
-  const parPoly = Math.max(5, Math.min(40, Math.floor(700 / projetes.length)));
-  const reduits = projetes.map((pts) => {
-    let tol = Math.max(0.2, mParPixel / 2);
-    let r = simplifier(pts, tol);
-    for (let i = 0; i < 10 && r.length > parPoly; i++) { tol *= 2; r = simplifier(pts, tol); }
-    if (r.length > parPoly || r.length < 4) {
-      const n = Math.max(5, Math.min(parPoly, pts.length));
-      r = Array.from({ length: n }, (_, k) => pts[Math.floor(k * pts.length / n)]);
-    }
-    return r;
-  });
-
-  const membre = membres.find((r) => contours.get(r)) || membres[0];
-  const r = String(membre);
-  const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const qs = new URLSearchParams({
-    commune: r.slice(0, 5),
-    nomCommune: nomCommune || '',
-    prefixe: r.slice(5, 8),
-    section: r.slice(8, 10),
-    parcelle: r.slice(10, 14),
-    // ⚠ LA SENTINELLE 25000 NE DOIT JAMAIS FUIR DANS UNE URL — constaté le
-    // 01/08 sur le Dossier complet de Watten : le sélecteur d'échelle de PAINT
-    // arrivait VIDE (aucune option 25000). Le garde-fou de fin juillet
-    // l'arrêtait à l'écran du panier, pas dans le lien. Au débordement, on
-    // émet la meilleure échelle RÉELLE du service ; auto reste retiré, et le
-    // mode « plans par section » de PAINT recalcule de toute façon les siennes.
-    echelle: ef.deborde ? '5000' : ef.echelle,
-    format: ef.deborde ? 'A3|paysage' : ef.format,
-    couleur: '#A01040',
-    x: cx.toFixed(1),
-    y: cy.toFixed(1),
-    pt: `${cx.toFixed(1)},${cy.toFixed(1)}`,
-    crs: `CC${zone}`,
-    dim: `${largeur}x${hauteur}`,
-    poly: reduits.map((pts) => pts.map(([X, Y]) => `${X.toFixed(1)},${Y.toFixed(1)}`).join(';')).join('|'),
-  });
-  if (!ef.deborde) qs.set('auto', '1');
-
-  const rangs = [];
-  let somme = 0;
-  membres.forEach((ref) => {
-    const sn = sectionEtNumero(ref);
-    if (!sn) return;
-    const m2 = Number(parParcelle.get(ref)) || 0;
-    somme += m2;
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(adressePar && adressePar.get ? adressePar.get(ref) : '')}`);
-  });
-  if (rangs.length) {
-    qs.set('tab', rangs.join(';'));
-    if (somme > 0) qs.set('total', contenanceNotariale(somme));
-  }
-  return `${PAINT_URL}/?${qs.toString()}`;
-};
-
-// ----------------------------------------------------------------------
-// APERÇU D'UNE SÉLECTION MANUELLE — « plan à la carte »
-// Mesure l'emprise réelle de l'union des parcelles cochées et en déduit
-// l'échelle et le format, AVANT de générer quoi que ce soit. C'est ce qui permet
-// à l'utilisateur de voir tout de suite qu'il déborde, plutôt que de découvrir un
-// plan illisible après coup.
-// Trois réserves sont remontées telles quelles, jamais masquées :
-//  — les parcelles SANS CONTOUR, qui ne pourront pas être coloriées ;
-//  — la sélection à cheval sur DEUX ZONES coniques conformes, que lienPaintUnite
-//    refuse (elle rendrait null), cas des communes en limite de zone ;
-//  — le DÉBORDEMENT au-delà du 1/5000, plafond de la liste du service.
-// ----------------------------------------------------------------------
-const mesurerSelection = (refs, contours) => {
-  if (!contours || !refs || !refs.length) return null;
-  let zone = null, horsZone = false, sansContour = 0;
-  const dep = departementDe(refs[0]);
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  // Plus petite dimension de CHAQUE parcelle, pour dépister celles qui seront
-  // invisibles à l'échelle retenue (voir plus bas).
-  const cotes = [];
-  for (const r of refs) {
-    const g = contours.get(r);
-    const anneaux = g ? anneauxDe(g) : [];
-    if (!anneaux.length) { sansContour++; continue; }
-    const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
-    let ax = Infinity, bx = -Infinity, ay = Infinity, by = -Infinity;
-    for (const [lo, la] of ext) {
-      const q = versConiqueConforme(la, lo, dep);
-      if (!q) { horsZone = true; continue; }
-      if (zone === null) zone = q.zone;
-      else if (q.zone !== zone) horsZone = true;
-      if (q.X < minX) minX = q.X;
-      if (q.X > maxX) maxX = q.X;
-      if (q.Y < minY) minY = q.Y;
-      if (q.Y > maxY) maxY = q.Y;
-      if (q.X < ax) ax = q.X;
-      if (q.X > bx) bx = q.X;
-      if (q.Y < ay) ay = q.Y;
-      if (q.Y > by) by = q.Y;
-    }
-    // La PLUS PETITE dimension, et non le côté d'un carré équivalent : une
-    // lanière de 40 m² fait peut-être 40 × 1 m, et c'est le mètre qui décide de
-    // sa visibilité. Le carré équivalent en donnerait six, et rassurerait à tort.
-    if (isFinite(ax)) cotes.push({ ref: r, cote: Math.min(bx - ax, by - ay) });
-  }
-  if (!isFinite(minX)) return { mesurable: false, sansContour, horsZone, zone };
-  const largeur = Math.round((maxX - minX) * 10) / 10;
-  const hauteur = Math.round((maxY - minY) * 10) / 10;
-  const ef = choisirEchelle(largeur, hauteur);
-  // PARCELLES INVISIBLES À L'ÉCHELLE RETENUE. Une parcelle de 10 ca mesure
-  // environ 3 m de côté ; au 1/2500 cela fait 1,2 mm sur le papier, invisible
-  // même coloriée. Elle figurera pourtant au tableau d'annotation, ce qui rend
-  // la pièce difficile à lire pour son destinataire. Seuil retenu : 2 mm, en
-  // deçà desquels un aplat de couleur ne se distingue plus du trait de limite.
-  // On AVERTIT sans bloquer : c'est un jugement de lisibilité, qui appartient au
-  // rédacteur de l'acte, non une erreur.
-  // ⚠ EN CAS DE DÉBORDEMENT, ON NE DÉPISTE RIEN. choisirEchelle rend alors la
-  // SENTINELLE 25000, qui n'est pas une échelle du service : une demande à
-  // 1/25000 est silencieusement servie à 1/1000. Calculer des millimètres
-  // dessus produirait des tailles cinq fois trop petites et signalerait des
-  // parcelles qui, à l'échelle réellement retenue après scission, tiendraient
-  // largement au-dessus du seuil. Constaté le 29/07/2026 sur Saint-Omer : ZH 186
-  // annoncée à 0,4 mm alors qu'elle en fait 2,0 au 1/5000. L'utilisateur doit
-  // d'abord scinder ; le dépistage reprendra sur une échelle vraie.
-  const SEUIL_MM = 2;
-  const minuscules = ef.deborde ? [] : cotes
-    .filter((c) => c.cote / Number(ef.echelle) * 1000 < SEUIL_MM)
-    .map((c) => ({ ...c, mm: c.cote / Number(ef.echelle) * 1000 }));
-  return { mesurable: true, largeur, hauteur, sansContour, horsZone, zone, minuscules, seuilMm: SEUIL_MM, ...ef };
-};
-
-// ----------------------------------------------------------------------
-// REGROUPEMENT COMMUNE → SECTION pour le sélecteur du plan à la carte.
-// Porte sur les parcelles DISTINCTES du relevé filtré par titre de droit, et
-// JAMAIS sur le filtre de lecture : celui-ci ne touche ni les agrégats, ni la
-// carte, ni les livrables, faute de quoi un filtre de confort fausserait un plan
-// de dossier.
-// La COMMUNE est verrouillante — le service ne sert qu'une emprise, donc un plan
-// ne peut porter que sur une commune. La SECTION ne l'est pas : ce n'est qu'un
-// accordéon de navigation, parce qu'une unité foncière enjambe volontiers une
-// limite de section, qui suit souvent une voie ou un cours d'eau.
-// ----------------------------------------------------------------------
-const grouperPourCarte = (liste) => {
-  const communes = new Map();
-  for (const o of liste || []) {
-    const r = String(o.codeParcelle || '');
-    if (r.length !== 14) continue;
-    const insee = r.slice(0, 5);
-    let c = communes.get(insee);
-    if (!c) {
-      c = { insee, nom: o.commune || insee, departement: o.departement || '', vues: new Set(), sections: new Map(), nb: 0, surface: 0 };
-      communes.set(insee, c);
-    }
-    if (c.vues.has(r)) continue;
-    c.vues.add(r);
-    const m2 = Number(o.contenance) || 0;
-    c.nb += 1;
-    c.surface += m2;
-    const sn = sectionEtNumero(r);
-    const cle = sn ? sn.section : '—';
-    let s = c.sections.get(cle);
-    if (!s) { s = { cle, lignes: [], surface: 0 }; c.sections.set(cle, s); }
-    s.lignes.push({ ref: r, numero: sn ? sn.numero : '', m2, adresse: o.adresse || '' });
-    s.surface += m2;
-  }
-  for (const c of communes.values()) {
-    c.sectionsTriees = [...c.sections.values()]
-      .map((s) => ({ ...s, lignes: s.lignes.sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0) || a.ref.localeCompare(b.ref)) }))
-      .sort((a, b) => b.lignes.length - a.lignes.length || a.cle.localeCompare(b.cle, 'fr'));
-  }
-  // Communes classées par nombre de parcelles décroissant : sur un portefeuille
-  // de quarante-sept communes, celle qui porte le dossier est presque toujours
-  // celle qui en compte le plus.
-  return [...communes.values()].sort((a, b) => b.nb - a.nb || a.nom.localeCompare(b.nom, 'fr'));
-};
-
-const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
-  const r = String(codeParcelle || '');
-  if (r.length !== 14) return null;
-  const qs = new URLSearchParams({
-    commune: r.slice(0, 5),
-    nomCommune: nomCommune || '',
-    prefixe: r.slice(5, 8),
-    section: r.slice(8, 10),
-    parcelle: r.slice(10, 14),
-    // Valeurs par défaut, remplacées plus bas dès que les dimensions de la
-    // parcelle sont connues (voir choisirEchelle).
-    echelle: '1000',
-    format: 'A4|portrait',
-    // Carmin profond, et non l'orange : sur l'extrait cadastral le bâti est
-    // lui-même figuré en orange, ce qui rendrait la parcelle retenue
-    // indistinguable des constructions. Teinte choisie par mesure de l'écart au
-    // pêche du bâti composé à 45 % d'opacité — le rouge doux de la palette, lui,
-    // tombe dans la zone de confusion. Détail dans le code de PAINT.
-    couleur: '#A01040',
-    auto: '1',
-  });
-  // Dimensions réelles de la parcelle, en mètres, quand le contour est connu :
-  // PAINT en déduit la taille attendue en pixels et cesse de deviner.
-  const f = descripteursForme(geom, departementDe(r));
-  if (f) {
-    const ef = choisirEchelle(f.largeur, f.hauteur);
-    qs.set('echelle', ef.echelle);
-    qs.set('format', ef.format);
-    // Parcelle plus grande que ce qu'un extrait peut montrer : on retire le
-    // déclenchement automatique. Colorier une parcelle dont les limites sortent
-    // du cadre n'aurait pas de sens — le remplissage s'arrêterait au bord de la
-    // carte, donnant une emprise fausse sur une pièce de dossier.
-    if (ef.deborde) qs.delete('auto');
-    qs.set('dim', `${f.largeur}x${f.hauteur}`);
-    qs.set('surface', String(f.aire));
-    qs.set('remplissage', String(f.remplissage));
-    // Point intérieur en coordonnées projetées : PAINT le confronte au
-    // géoréférencement qu'il lit en marge de l'extrait, et sait alors
-    // exactement où amorcer le remplissage.
-    if (f.cc) {
-      qs.set('pt', `${f.cc.X.toFixed(1)},${f.cc.Y.toFixed(1)}`);
-      qs.set('crs', `CC${f.cc.zone}`);
-      // Contour projeté : PAINT peint le polygone plutôt que de le tracer par
-      // remplissage, ce qui le rend insensible aux traits de limite interrompus.
-      if (f.poly) {
-        qs.set('poly', f.poly.map(([X, Y]) => `${X.toFixed(1)},${Y.toFixed(1)}`).join(';'));
-      }
-    }
-  }
-  // Annotations à porter sous le titre de l'extrait, séparées par une barre.
-  if (annotations && annotations.length) {
-    qs.set('annot', annotations.filter(Boolean).join('|'));
-  }
-  return `${PAINT_URL}/?${qs.toString()}`;
-};
-
-// Variante annotée : mêmes traitements, plus un TABLEAU porté sous le titre de
-// l'extrait — une ligne par parcelle avec section, numéro et contenance, et une
-// ligne de total quand il y en a plusieurs.
-// Signature prévue pour les UNITÉS FONCIÈRES : elle accepte déjà une liste de
-// parcelles, même si l'interface n'en passe qu'une pour l'instant.
-const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
-  const liste = (autres && autres.length ? autres
-    : [{ codeParcelle, contenance }]).filter((o) => o && o.codeParcelle);
-  const rangs = [];
-  let somme = 0;
-  liste.forEach((o) => {
-    const sn = sectionEtNumero(o.codeParcelle);
-    if (!sn) return;
-    const m2 = Number(o.contenance) || 0;
-    somme += m2;
-    // 4e champ : le LIEUDIT en langage d'acte. Vide s'il est inconnu — PAINT
-    // supprime alors la colonne au lieu de l'imprimer creuse.
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(o.adresse || adresse || '')}`);
-  });
-  if (!rangs.length) return lienPaintColorise(codeParcelle, nomCommune, geom);
-  const sup = new URLSearchParams();
-  sup.set('tab', rangs.join(';'));
-  // Pas de ligne de total pour une parcelle seule : elle ferait doublon.
-  if (rangs.length > 1 && somme > 0) sup.set('total', contenanceNotariale(somme));
-  const base = lienPaintColorise(codeParcelle, nomCommune, geom);
-  return base + '&' + sup.toString();
-};
-
-// ----------------------------------------------------------------------
-// VUE AÉRIENNE IGN — pièce ILLUSTRATIVE, via PAINT (31/07/2026)
-// REMPLACE le lien Google Maps satellite, décision JFD du 31/07/2026. Les deux
-// ne faisaient pas le même métier : Google sert à REGARDER, et son imagerie
-// n'est pas reproductible dans un livrable — ses conditions d'utilisation
-// l'interdisent. L'ortho IGN est en licence ouverte, donc annexable à un acte,
-// et PAINT en fait une pièce annotée et exportable.
-//
-// GÉORÉFÉRENCEMENT ANALYTIQUE côté PAINT : il commande l'image au WMS, donc il
-// connaît la bbox et n'a RIEN à lire — ni étiquette, ni OCR. Voir l'addendum
-// PAINT v3 du 31/07/2026.
-//
-// ⚠ PAS DE ROTATION sur ce lien, pour la raison du § 5 de l'addendum v4 : le
-// repère est calculé dans le repère de la page non tournée.
-//
-// ⚠ REPLI SUR GOOGLE QUAND LE CONTOUR MANQUE. Cette fonction rend null sans
-// contour : les 2,7 % de parcelles sans contour garderaient sinon aucune vue du
-// ciel, alors que le lien Google ne demande que des coordonnées. Le remplacement
-// est donc total sur les 97,3 % où l'on sait faire mieux, et nul ailleurs.
-const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
-  const r = String(codeParcelle || '');
-  if (r.length !== 14) return null;
-  const f = descripteursForme(geom, departementDe(r));
-  if (!f || !f.cc || !f.poly) return null;      // sans contour : repli appelant
-  const qs = new URLSearchParams({
-    commune: r.slice(0, 5),
-    nomCommune: nomCommune || '',
-    prefixe: r.slice(5, 8),
-    section: r.slice(8, 10),
-    parcelle: r.slice(10, 14),
-    fond: 'ortho',
-    trace: 'rond',        // repère qui DÉSIGNE sans délimiter
-    // CADRAGE DE CONTEXTE (×3 le repère), décision JFD du 31/07/2026 après
-    // comparaison à l'écran de trois cadrages. Arbitrage chiffré : lisibilité du
-    // repère et finesse d'impression tirent en sens OPPOSÉ. En demi-page, ×3
-    // laisse un repère à 33 % de la largeur pour 180 dpi réels ; le cadrage
-    // cadastral donnait 276 dpi mais un repère à 22 %, jugé trop discret.
-    // ⚠ Si l'image devait passer en PLEINE LARGEUR A4, ×3 tomberait à 83 dpi et
-    // il faudrait repasser à 'plan' — la largeur d'insertion commande le choix.
-    cadre: 'contexte',
-    couleur: '#A01040',
-    auto: '1',
-  });
-  qs.set('pt', `${f.cc.X.toFixed(1)},${f.cc.Y.toFixed(1)}`);
-  qs.set('poly', f.poly.map(([X, Y]) => `${X.toFixed(1)},${Y.toFixed(1)}`).join(';'));
-  // EMPRISE AU SOL DU CADRE DU PLAN CADASTRAL, en mètres. C'est ELLE qui rend les
-  // deux pièces superposables : PAINT connaît le format et l'échelle, mais pas
-  // les dimensions utiles du cadre à l'intérieur de la page — CARTES les porte en
-  // millimètres, et l'échelle les convertit. Sans ce paramètre, PAINT retombe sur
-  // un cadrage serré EN L'ANNONÇANT, plutôt que de livrer une pièce faussement
-  // superposable.
-  // emp reste ÉMIS bien qu'inutilisé par le cadrage de contexte : il suffit alors
-  // de remplacer 'contexte' par 'plan' dans l'URL pour obtenir la pièce
-  // superposable au plan cadastral, sans rien recalculer. Coût nul, option
-  // conservée. Si la parcelle déborde du plus grand format, il n'existe aucun
-  // cadre cadastral cohérent à reprendre et emp est simplement absent.
-  const ef = choisirEchelle(f.largeur, f.hauteur);
-  const c = CARTES[ef.format];
-  if (c && !ef.deborde) {
-    const e = Number(ef.echelle);
-    qs.set('emp', `${(c.l * e / 1000).toFixed(1)}x${(c.h * e / 1000).toFixed(1)}`);
-  }
-  // Tableau d'annotation, même convention que lienPaintAnnote.
-  const liste = (autres && autres.length ? autres
-    : [{ codeParcelle, contenance }]).filter((o) => o && o.codeParcelle);
-  const rangs = [];
-  let somme = 0;
-  liste.forEach((o) => {
-    const sn = sectionEtNumero(o.codeParcelle);
-    if (!sn) return;
-    const m2 = Number(o.contenance) || 0;
-    somme += m2;
-    // 4e champ : le LIEUDIT en langage d'acte. Vide s'il est inconnu — PAINT
-    // supprime alors la colonne au lieu de l'imprimer creuse.
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(o.adresse || adresse || '')}`);
-  });
-  if (rangs.length) {
-    qs.set('tab', rangs.join(';'));
-    if (rangs.length > 1 && somme > 0) qs.set('total', contenanceNotariale(somme));
-  }
-  return `${PAINT_URL}/?${qs.toString()}`;
-};
-
-// DOCUMENT À DEUX PAGES — plan cadastral colorié et annoté, puis vue aérienne.
-// Demandé par JFD le 31/07/2026. C'est le lien « Annoté » PLUS doc=1 : rien de
-// nouveau à calculer, les paramètres de la vue aérienne (poly, pt, tab) sont déjà
-// tous portés par ce lien, et PAINT retient ses propres défauts pour le reste.
-//
-// ⚠ CE LIEN N'EXPORTE RIEN. Il ouvre PAINT sur le plan cadastral et y révèle un
-// bouton « Document 2 pages ». L'export reste donc sous l'œil de l'utilisateur,
-// et ce n'est pas une timidité : la colorisation cadastrale est semi-automatique
-// par conception — OCR des numéros, filtre de vraisemblance, repli manuel — alors
-// que la vue aérienne est déterministe. Un export lancé sans regard livrerait
-// parfois un document dont la PREMIÈRE page est mal coloriée, au dossier.
-/* ⚠ PLAFOND DE LOTS DANS L'URL — 400, et non 40 comme dans la première version.
-   Les 40 initiaux étaient une limite TECHNIQUE DÉGUISÉE EN LIMITE ÉDITORIALE,
-   ce qui était un mauvais raisonnement : PAINT lit location.search côté
-   navigateur, sans serveur intermédiaire, donc on tient sans peine 7 000
-   caractères, soit environ 400 lots à quatorze caractères encodés chacun.
-   PAINT pagine désormais sur autant de pages de continuation qu'il faut
-   (décision JFD du 31/07), donc le plafond ne borne plus l'affichage, seulement
-   le transport. Au-delà, seule la synthèse « n bâtiments, m lots » est émise.
-   ⚠ Un portefeuille réel peut dépasser largement : 15 451 locaux sur le cas de
-   contrôle LOGIS METROPOLE. Le plafond n'est donc pas théorique.
-   ⚠ AUCUNE SUPERFICIE : le volet bâti IDENTIFIE les locaux (bâtiment, entrée,
-   niveau, porte), il ne les MESURE pas. Ne pas chercher de surface bâtie. */
-// Ramené de 400 à 300 le 01/08 : chaque rang porte désormais aussi la section et
-// le numéro, soit environ 24 caractères encodés au lieu de 14. 300 rangs font
-// ~7 200 caractères, ce qui laisse de la marge dans une URL.
-const LOTS_MAX_URL = 300;
-const suffixeBati = (refs, batiPar) => {
-  if (!batiPar || !refs || !refs.length) return '';
-  const bats = new Set();
-  let lots = [];
-  // ⚠ CHAQUE LOT PORTE SA PARCELLE. Sans section ni numéro, la grille des locaux
-  // d'un document multi-parcelles est AMBIGUË : le lecteur ne peut rattacher
-  // aucun lot à son fonds. Défaut relevé par JFD le 01/08.
-  refs.forEach((r) => {
-    const e = batiPar.get(r);
-    if (!e) return;
-    const sn = sectionEtNumero(r);
-    e.bats.forEach((b) => bats.add(b));
-    e.lots.forEach((t) => lots.push([
-      sn ? sn.section : '', sn ? sn.numero : '', t[0], t[1], t[2], t[3]]));
-  });
-  if (!lots.length) return '';
-  const q = new URLSearchParams();
-  // Un local sans code bâtiment appartient tout de même à un bâtiment : on ne
-  // veut pas imprimer « 0 bâtiment, 15 lots ».
-  q.set('bati', `${Math.max(1, bats.size)},${lots.length}`);
-  if (lots.length <= LOTS_MAX_URL) {
-    q.set('lots', lots.map((t) => t
-      .map((c) => String(c == null ? '' : c).replace(/[;,]/g, ' ').trim())
-      .join(',')).join(';'));
-  }
-  return '&' + q.toString();
-};
-
-/* PARAMÈTRES PAR PARCELLE, pour l'extrait cadastral BRUT de chaque page.
-   ⚠ INDISPENSABLE : sans échelle ni format propres, PAINT sortirait chaque
-   extrait à l'échelle de l'ENSEMBLE, où une petite parcelle est illisible.
-   Format d'un rang : prefixe,section,parcelle,echelle,format — le « | » du format
-   ne gêne pas, on découpe sur la virgule.
-   ⚠ PAS DE « dim » : l'extrait est BRUT, sans colorisation, donc PAINT n'a besoin
-   ni de dimension attendue ni de géoréférencement. C'est ce qui rend cette page
-   possible sans toucher à la chaîne OCR. */
-const suffixePP = (refs, contoursMap) => {
-  const rangs = [];
-  (refs || []).forEach((r) => {
-    const c = String(r || '');
-    if (c.length !== 14) return;
-    const f = descripteursForme(contoursMap && contoursMap.get ? contoursMap.get(r) : null, departementDe(c));
-    const ef = f ? choisirEchelle(f.largeur, f.hauteur) : null;
-    rangs.push([c.slice(5, 8), c.slice(8, 10), c.slice(10, 14),
-                ef ? ef.echelle : '', ef ? ef.format : ''].join(','));
-  });
-  return rangs.length ? '&' + new URLSearchParams({ pp: rangs.join(';') }).toString() : '';
-};
-
-const lienDocument = (codeParcelle, nomCommune, geom, contenance, autres, adresse, batiPar, contoursMap) => {
-  const base = lienPaintAnnote(codeParcelle, nomCommune, geom, contenance, autres, adresse);
-  if (!base) return null;
-  const refs = (autres && autres.length) ? autres.map((o) => o.codeParcelle) : [codeParcelle];
-  return `${base}&doc=1${suffixeBati(refs, batiPar)}${suffixePP(refs, contoursMap)}`;
-};
-
-// EXTRAIT DGFiP — le PDF brut, pièce autonome à joindre à un dossier.
-// Il ne passe par aucun traitement d'image : c'est donc le seul des trois liens
-// qui puisse porter une ROTATION de la zone d'impression sans risque (voir la
-// réserve au paragraphe sur la rotation). Quand le contour est connu, l'échelle,
-// le format ET l'angle sont choisis ensemble ; à défaut on retombe sur l'A4
-// portrait au 1/1000 d'origine.
-const lienExtraitCadastral = (codeParcelle, geom) => {
-  const r = String(codeParcelle || '');
-  if (r.length !== 14) return null;
-  const qs = new URLSearchParams({
-    commune: r.slice(0, 5),
-    prefixe: r.slice(5, 8),
-    section: r.slice(8, 10),
-    parcelle: r.slice(10, 14),
-    echelle: '1000',
-    taille: 'A4',
-  });
-  const o = orientationDe(descripteursForme(geom, departementDe(r)));
-  if (o && o.ef && !o.ef.deborde) {
-    const [taille, sens] = o.ef.format.split('|');
-    qs.set('echelle', o.ef.echelle);
-    qs.set('taille', taille);
-    // api/extrait.js n'attend « paysage » qu'en minuscules, et retombe sur le
-    // portrait pour toute autre valeur.
-    if (sens === 'paysage') qs.set('orientation', 'paysage');
-    if (o.rotation) qs.set('rotation', String(o.rotation));
-  }
-  return `${PAINT_URL}/api/extrait?${qs.toString()}`;
-};
-
-// Formatage des nombres pour le PDF (espace simple compatible avec les polices PDF)
-const formatNumberForPdf = (n) => {
-  if (n === null || n === undefined || n === '') return '';
-  return Math.round(Number(n)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-};
-
-const FidalLogo = () => (
-  <div className="flex-shrink-0">
-    <img src="/logo-fidal.png" alt="FIDAL Notaires" style={{ height: '105px', width: 'auto', display: 'block' }} />
+<header>
+  <div class="brand">
+    <svg class="nib" viewBox="0 0 78 78" fill="none">
+      <path d="M39 8 L52 40 L39 70 L26 40 Z" fill="#6DD5DC"/>
+      <path d="M39 40 L39 70" stroke="#16314f" stroke-width="2.6"/>
+      <circle cx="39" cy="44" r="4" fill="#E3CC7A"/>
+    </svg>
+    <div>PAINT <small>Vos plans en couleurs</small></div>
   </div>
-);
-
-const buildSatelliteLink = (coords) => {
-  if (!coords) return null;
-  const [lat, lng] = coords.split(',').map(s => s.trim());
-  if (!lat || !lng) return null;
-  return `https://www.google.com/maps/@${lat},${lng},19z/data=!3m1!1e3`;
-};
-
-const parseCoords = (coords) => {
-  if (!coords) return null;
-  const [lat, lng] = coords.split(',').map(s => parseFloat(s.trim()));
-  if (isNaN(lat) || isNaN(lng)) return null;
-  return [lat, lng];
-};
-
-// Surface : sommer sur les PARCELLES DISTINCTES, jamais sur les lignes. Une
-// parcelle figure autant de fois qu'elle a de titulaires de droits
-// (propriétaire, gérant, syndic, usufruitier...) ; sommer les lignes la compte
-// plusieurs fois. Écart mesuré au niveau national : +41 %.
-// Fonction déclarée hors du composant : hissée, donc utilisable avant sa
-// position dans le fichier, et pure, donc sans raison d'être recréée à chaque
-// rendu.
-// ----------------------------------------------------------------------
-// RECHERCHE ET TRI DES TABLEAUX
-// Un relevé de quinze mille lots sans filtre ni tri est inexploitable : on
-// cherche « la parcelle de la rue Jean-Jaurès » ou « les plus grandes
-// surfaces », pas la ligne numéro 8 412.
-// ----------------------------------------------------------------------
-const normTexte = (v) => String(v ?? '')
-  .normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-
-// Tous les mots saisis doivent être présents, dans n'importe quel ordre et
-// n'importe quelle colonne : « jaures anstaing » trouve la ligne.
-function filtrerTexte(liste, q, champs) {
-  const t = normTexte(q).trim();
-  if (!t) return liste;
-  const mots = t.split(/\s+/);
-  return liste.filter((o) => {
-    const blob = champs.map((c) => normTexte(o[c])).join(' ');
-    return mots.every((m) => blob.includes(m));
-  });
-}
-
-function trierListe(liste, tri) {
-  if (!tri || !tri.champ) return liste;
-  const sens = tri.sens === 'desc' ? -1 : 1;
-  return [...liste].sort((a, b) => {
-    const va = a[tri.champ], vb = b[tri.champ];
-    const na = Number(va), nb = Number(vb);
-    if (Number.isFinite(na) && Number.isFinite(nb)) return sens * (na - nb);
-    return sens * String(va ?? '').localeCompare(String(vb ?? ''), 'fr', { numeric: true });
-  });
-}
-
-// En-tête cliquable : premier clic croissant, deuxième décroissant.
-function EnTete({ label, champ, tri, onTri, align = 'text-left' }) {
-  const actif = tri.champ === champ;
-  return (
-    <th className={`px-4 py-3 ${align} text-xs font-semibold uppercase select-none ${champ ? 'cursor-pointer hover:text-blue-900' : ''} ${actif ? 'text-blue-900' : 'text-stone-600'}`}
-      onClick={champ ? () => onTri({ champ, sens: actif && tri.sens === 'asc' ? 'desc' : 'asc' }) : undefined}>
-      {label}{actif ? (tri.sens === 'asc' ? ' ▲' : ' ▼') : ''}
-    </th>
-  );
-}
-
-// ----------------------------------------------------------------------
-// UNITÉS FONCIÈRES
-// Au sens de la jurisprudence administrative, l'unité foncière est l'îlot de
-// propriété D'UN SEUL TENANT appartenant au même propriétaire. Deux exigences en
-// découlent : une LIMITE COMMUNE, et non un simple contact par un angle ; et une
-// identité de propriétaire.
-//
-// MÉTHODE. Dans le plan cadastral informatisé, deux parcelles mitoyennes
-// partagent des sommets IDENTIQUES. On indexe donc tous les sommets, et deux
-// parcelles partageant au moins DEUX sommets ont une limite commune — un seul
-// sommet n'étant qu'un contact par un angle, qui ne fait pas l'unité foncière.
-// Le regroupement se fait ensuite par union-find. Coût mesuré : 80 ms pour
-// 1 636 parcelles, sans comparaison de paires puisque l'index de sommets donne
-// directement les candidats.
-//
-// ⚠ LIMITE À ANNONCER DANS TOUT LIVRABLE. REDPAR ne voit que les parcelles de la
-// société interrogée. Une parcelle voisine appartenant au même propriétaire mais
-// détenue sous un autre SIREN, ou par une personne physique, sera manquée.
-// L'unité calculée est donc l'unité AU SEIN DU PORTEFEUILLE, ce qui est déjà très
-// utile mais n'est pas tout à fait la notion juridique.
-// ----------------------------------------------------------------------
-const CLE_SOMMET = 1e7;   // arrondi à 1e-7 degré, environ un centimètre
-const cleSommet = ([lo, la]) =>
-  Math.round(lo * CLE_SOMMET) + ':' + Math.round(la * CLE_SOMMET);
-
-const anneauxDe = (geom) => {
-  if (!geom) return [];
-  if (geom.type === 'Polygon') return geom.coordinates;
-  if (geom.type === 'MultiPolygon') return geom.coordinates.flat();
-  return [];
-};
-
-const calculerUnites = (liste, contours) => {
-  const refs = [...new Set(liste.map((o) => o.codeParcelle).filter(Boolean))];
-  if (!contours || !contours.size || !refs.length) return null;
-
-  const parSommet = new Map();
-  let sansContour = 0;
-  refs.forEach((ref) => {
-    const g = contours.get(ref);
-    if (!g) { sansContour++; return; }
-    const vus = new Set();
-    anneauxDe(g).forEach((a) => a.forEach((pt) => {
-      const k = cleSommet(pt);
-      if (vus.has(k)) return;
-      vus.add(k);
-      if (!parSommet.has(k)) parSommet.set(k, []);
-      parSommet.get(k).push(ref);
-    }));
-  });
-
-  const paires = new Map();
-  parSommet.forEach((l) => {
-    if (l.length < 2) return;
-    for (let i = 0; i < l.length; i++) {
-      for (let j = i + 1; j < l.length; j++) {
-        const k = l[i] < l[j] ? `${l[i]}|${l[j]}` : `${l[j]}|${l[i]}`;
-        paires.set(k, (paires.get(k) || 0) + 1);
-      }
-    }
-  });
-
-  const parent = new Map(refs.map((r) => [r, r]));
-  const trouver = (x) => {
-    while (parent.get(x) !== x) { parent.set(x, parent.get(parent.get(x))); x = parent.get(x); }
-    return x;
-  };
-  let mitoyennetes = 0;
-  paires.forEach((n, k) => {
-    if (n < 2) return;              // un seul sommet = contact par un angle
-    mitoyennetes++;
-    const [a, b] = k.split('|');
-    const ra = trouver(a), rb = trouver(b);
-    if (ra !== rb) parent.set(ra, rb);
-  });
-
-  // Surface par parcelle distincte, pour classer les unités.
-  const surfaceRef = new Map();
-  liste.forEach((o) => {
-    if (o.codeParcelle && !surfaceRef.has(o.codeParcelle)) {
-      surfaceRef.set(o.codeParcelle, Number(o.contenance) || 0);
-    }
-  });
-
-  const parRacine = new Map();
-  refs.forEach((r) => {
-    const g = trouver(r);
-    if (!parRacine.has(g)) parRacine.set(g, []);
-    parRacine.get(g).push(r);
-  });
-  // Numérotées par surface décroissante : l'unité 1 est la plus vaste.
-  const unites = [...parRacine.values()]
-    .map((membres) => ({
-      membres: membres.sort(),
-      surface: membres.reduce((t, r) => t + (surfaceRef.get(r) || 0), 0),
-    }))
-    .sort((a, b) => b.surface - a.surface || b.membres.length - a.membres.length);
-
-  const numero = new Map();
-  unites.forEach((u, i) => u.membres.forEach((r) => numero.set(r, i + 1)));
-  return {
-    unites, numero, mitoyennetes, sansContour,
-    groupees: unites.filter((u) => u.membres.length > 1).length,
-    isolees: unites.filter((u) => u.membres.length === 1).length,
-  };
-};
-
-function surfaceDistincte(liste) {
-  const vues = new Set();
-  let m2 = 0;
-  liste.forEach((p) => {
-    if (!p.codeParcelle || vues.has(p.codeParcelle)) return;
-    vues.add(p.codeParcelle);
-    m2 += (p.contenance || 0);
-  });
-  return m2;
-}
-
-// Conversion GeoJSON -> Leaflet. Les GeoJSON du cadastre sont en WGS84 avec
-// l'ordre [longitude, latitude] ; Leaflet attend [latitude, longitude].
-// Inverser est l'erreur classique : on se retrouve au large de la Somalie.
-function anneauxLeaflet(geom) {
-  if (!geom) return [];
-  const inverse = (anneau) => anneau.map(([lng, lat]) => [lat, lng]);
-  if (geom.type === 'Polygon') return [geom.coordinates.map(inverse)];
-  if (geom.type === 'MultiPolygon') return geom.coordinates.map((p) => p.map(inverse));
-  return [];
-}
-
-function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) {
-  const mapRef = useRef(null);
-  const mapInstanceRef = useRef(null);
-
-  useEffect(() => {
-    if (!window.L || !mapRef.current) return;
-    if (mapInstanceRef.current) {
-      mapInstanceRef.current.remove();
-      mapInstanceRef.current = null;
-    }
-    const L = window.L;
-    const validParcelles = parcelles.filter(p => parseCoords(p.coordonnees));
-    // Les locaux sont regroupés par parcelle : plusieurs milliers de lots sur
-    // le même immeuble donneraient autant de marqueurs superposés, illisibles.
-    const immeublesMap = new Map();
-    locaux.forEach((l) => {
-      if (!parseCoords(l.coordonnees) || !l.codeParcelle) return;
-      if (!immeublesMap.has(l.codeParcelle)) immeublesMap.set(l.codeParcelle, { ...l, lots: 0 });
-      immeublesMap.get(l.codeParcelle).lots += 1;
-    });
-    const validImmeubles = [...immeublesMap.values()];
-    if (validParcelles.length === 0 && validImmeubles.length === 0) return;
-
-    const map = L.map(mapRef.current).setView([46.5, 2.5], 6);
-    mapInstanceRef.current = map;
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      maxZoom: 19,
-      attribution: '© OpenStreetMap',
-    }).addTo(map);
-
-    const fidalIcon = L.divIcon({
-      className: 'custom-fidal-icon',
-      html: '<div style="background:#1e2952;color:#fbbf24;width:24px;height:24px;border-radius:50%;border:2px solid white;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;box-shadow:0 2px 4px rgba(0,0,0,0.3)">●</div>',
-      iconSize: [24, 24],
-      iconAnchor: [12, 12],
-    });
-
-    // Bâti en bleu canard de la charte, non bâti en navy : la distinction doit
-    // être lisible sans cliquer.
-    const batiIcon = L.divIcon({
-      className: 'custom-bati-icon',
-      html: '<div style="background:#33838B;color:#fff;width:24px;height:24px;border-radius:4px;border:2px solid white;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;box-shadow:0 2px 4px rgba(0,0,0,0.3)">■</div>',
-      iconSize: [24, 24],
-      iconAnchor: [12, 12],
-    });
-
-    const markers = L.markerClusterGroup({
-      chunkedLoading: true,
-      iconCreateFunction: (cluster) => {
-        const count = cluster.getChildCount();
-        return L.divIcon({
-          html: `<div style="background:#1e2952;color:#fbbf24;width:40px;height:40px;border-radius:50%;border:3px solid #fbbf24;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,0.3)">${count}</div>`,
-          className: 'custom-cluster-icon',
-          iconSize: [40, 40],
-        });
-      },
-    });
-
-    const bounds = [];
-    validParcelles.forEach((p, i) => {
-      const coords = parseCoords(p.coordonnees);
-      if (!coords) return;
-      bounds.push(coords);
-      const satLink = lienVueAerienne(p.codeParcelle, p.commune,
-          contours?.get(p.codeParcelle), p.contenance, null, p.adresse)
-        || buildSatelliteLink(p.coordonnees);
-      const marker = L.marker(coords, { icon: fidalIcon });
-      const popupContent = `
-        <div style="font-family:system-ui;min-width:220px">
-          <div style="font-weight:700;color:#1e2952;margin-bottom:6px;border-bottom:2px solid #fbbf24;padding-bottom:4px">Parcelle ${i + 1}</div>
-          <div style="font-size:12px;color:#1e2952;margin-bottom:3px"><strong>📍 ${p.adresse || ''}</strong></div>
-          <div style="font-size:12px;color:#475569;margin-bottom:3px">${p.commune || ''} (${p.departement || ''})</div>
-          <div style="font-size:12px;color:#475569;margin-bottom:3px">📐 ${(p.contenance || 0).toLocaleString('fr-FR')} m² • ${p.natureCulture || ''}</div>
-          <div style="font-family:monospace;font-size:10px;color:#94a3b8;margin-bottom:6px">${p.codeParcelle || ''}</div>
-          ${satLink ? `<a href="${satLink}" target="_blank" rel="noreferrer" style="display:inline-block;background:#1e2952;color:#fbbf24;padding:4px 10px;border-radius:4px;font-size:11px;font-weight:600;text-decoration:none">Vue aérienne ↗</a>` : ''}
-        </div>
-      `;
-      marker.bindPopup(popupContent);
-      markers.addLayer(marker);
-    });
-    map.addLayer(markers);
-
-    // ---- Contours de parcelles ----------------------------------------------
-    // Tracés par-dessus le fond, sous les marqueurs. Carmin de la charte de
-    // colorisation, pour que l'écran et le plan colorié parlent la même langue.
-    let groupeContours = null;
-    if (contours && contours.size > 0) {
-      groupeContours = L.layerGroup();
-      let tracees = 0;
-      parcelles.forEach((p) => {
-        const geom = contours.get(p.codeParcelle);
-        if (!geom) return;
-        anneauxLeaflet(geom).forEach((anneaux) => {
-          const poly = L.polygon(anneaux, {
-            color: '#A01040', weight: 2, opacity: 0.9,
-            fillColor: '#A01040', fillOpacity: 0.25,
-          });
-          poly.bindPopup(`
-            <div style="font-family:system-ui;min-width:200px">
-              <div style="font-weight:700;color:#A01040;margin-bottom:6px;border-bottom:2px solid #A01040;padding-bottom:4px">Contour cadastral</div>
-              <div style="font-family:monospace;font-size:11px;color:#1e2952">${p.codeParcelle || ''}</div>
-              <div style="font-size:12px;color:#475569;margin-top:3px">${p.commune || ''} — ${(p.contenance || 0).toLocaleString('fr-FR')} m²</div>
-              <div style="font-size:11px;color:#94a3b8;margin-top:3px">${p.adresse || ''}</div>
-            </div>`);
-          groupeContours.addLayer(poly);
-          anneaux[0].forEach((pt) => bounds.push(pt));
-          tracees++;
-        });
-      });
-      if (tracees > 0) map.addLayer(groupeContours);
-    }
-
-    if (validImmeubles.length > 0) {
-      const groupeBati = L.markerClusterGroup({
-        chunkedLoading: true,
-        iconCreateFunction: (cluster) => L.divIcon({
-          html: `<div style="background:#33838B;color:#fff;width:40px;height:40px;border-radius:6px;border:3px solid #6DD5DC;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;box-shadow:0 2px 6px rgba(0,0,0,0.3)">${cluster.getChildCount()}</div>`,
-          className: 'custom-cluster-bati',
-          iconSize: [40, 40],
-        }),
-      });
-      validImmeubles.forEach((im) => {
-        const c = parseCoords(im.coordonnees);
-        if (!c) return;
-        bounds.push(c);
-        const m = L.marker(c, { icon: batiIcon });
-        m.bindPopup(`
-          <div style="font-family:system-ui;min-width:220px">
-            <div style="font-weight:700;color:#33838B;margin-bottom:6px;border-bottom:2px solid #6DD5DC;padding-bottom:4px">Immeuble bâti</div>
-            <div style="font-size:12px;color:#1e2952;margin-bottom:3px"><strong>📍 ${im.adresse || ''}</strong></div>
-            <div style="font-size:12px;color:#475569;margin-bottom:3px">${im.commune || ''} (${im.departement || ''})</div>
-            <div style="font-size:12px;color:#475569;margin-bottom:3px">🏢 ${im.lots.toLocaleString('fr-FR')} lot(s) au nom de la société</div>
-            <div style="font-family:monospace;font-size:10px;color:#94a3b8">${im.codeParcelle || ''}</div>
-          </div>`);
-        groupeBati.addLayer(m);
-      });
-      map.addLayer(groupeBati);
-      const couches = { 'Parcelles (non bâti)': markers, 'Immeubles (bâti)': groupeBati };
-      if (groupeContours) couches['Contours cadastraux'] = groupeContours;
-      L.control.layers(null, couches, { collapsed: false }).addTo(map);
-    } else if (groupeContours) {
-      L.control.layers(null, {
-        'Parcelles (non bâti)': markers,
-        'Contours cadastraux': groupeContours,
-      }, { collapsed: false }).addTo(map);
-    }
-
-    if (bounds.length > 0) {
-      map.fitBounds(bounds, { padding: [30, 30], maxZoom: 14 });
-    }
-
-    return () => {
-      if (mapInstanceRef.current) {
-        mapInstanceRef.current.remove();
-        mapInstanceRef.current = null;
-      }
-    };
-  }, [parcelles, locaux, contours, companyName]);
-
-  return <div ref={mapRef} style={{ height: '500px', width: '100%' }} />;
-}
-
-export default function App() {
-  const [step, setStep] = useState(1);
-  const [companyName, setCompanyName] = useState('');
-  const [isListening, setIsListening] = useState(false);
-  const [speechSupported, setSpeechSupported] = useState(true);
-  const [pappersResults, setPappersResults] = useState([]);
-  const [selectedCompany, setSelectedCompany] = useState(null);
-  const [pappersLoading, setPappersLoading] = useState(false);
-  const [pappersError, setPappersError] = useState(null);
-  const [parcellesLoading, setParcellesLoading] = useState(false);
-  const [parcellesError, setParcellesError] = useState(null);
-  const [parcellesBrutes, setParcellesBrutes] = useState([]);
-  const [totalParcelles, setTotalParcelles] = useState(0);
-  const [truncated, setTruncated] = useState(false);
-  const [locauxBruts, setLocauxBruts] = useState([]);
-  const [totalLocaux, setTotalLocaux] = useState(0);
-  const [locauxLoading, setLocauxLoading] = useState(false);
-  const [locauxError, setLocauxError] = useState(null);
-  const [locauxTronque, setLocauxTronque] = useState(false);
-  const [geoStatus, setGeoStatus] = useState(null);
-  // Millésime annoncé par le backend, jamais codé en dur côté interface.
-  const [millesime, setMillesime] = useState('2025');
-
-  // ----------------------------------------------------------------------
-  // FILTRE PAR TITRE DE DROIT
-  // Le fichier DGFiP ne recense pas que des propriétaires : 8,5 % des lignes
-  // portent un autre titre — gérant, gestionnaire d'un bien de l'État, syndic,
-  // emphytéote, nu-propriétaire, usufruitier... Confondre les deux fausse la
-  // lecture : l'ONF apparaît avec 5,85 millions d'hectares alors qu'il n'en
-  // possède que 216 250, et le Ministère des Armées avec 188 162 hectares pour
-  // 23 parcelles en propriété. Les agrégats ne portent donc que sur les titres
-  // RETENUS, la propriété étant sélectionnée par défaut.
-  // Le nu-propriétaire, l'emphytéote ou le preneur à construction détiennent
-  // aussi des droits réels : c'est au notaire de décider s'il les inclut, d'où
-  // un sélecteur plutôt qu'une règle figée.
-  // ----------------------------------------------------------------------
-  const [droitsChoisis, setDroitsChoisis] = useState(null);
-  const [qParcelles, setQParcelles] = useState('');
-  const [triParcelles, setTriParcelles] = useState({ champ: '', sens: 'asc' });
-  const [qLocaux, setQLocaux] = useState('');
-  const [triLocaux, setTriLocaux] = useState({ champ: '', sens: 'asc' });
-  const [locauxGroupes, setLocauxGroupes] = useState(true);
-  // Contours : chargés À LA DEMANDE et non avec le relevé. Sur un portefeuille de
-  // mille six cents parcelles, les géométries représentent plusieurs mégaoctets —
-  // inutile de les imposer à qui veut seulement le tableau et les exports.
-  const [contours, setContours] = useState(null);
-  // Plan à la carte : commune verrouillée, sections dépliées, panier de parcelles.
-  const [carteOuverte, setCarteOuverte] = useState(false);
-  const [carteCommune, setCarteCommune] = useState(null);
-  const [carteSel, setCarteSel] = useState(() => new Set());
-  const [carteDepliees, setCarteDepliees] = useState(() => new Set());
-  const [qCarteCommune, setQCarteCommune] = useState('');
-  // Dossier complet : un document PAR COMMUNE pour TOUT le relevé (filtré),
-  // communes triées alphabétiquement, parcelles triées section puis numéro.
-  // Contrainte de fond (mémo PAINT) : plan d'ensemble et zone conique = UNE
-  // commune ; le dossier complet est donc une SUITE de documents, pas un seul.
-  const [dossierOuvert, setDossierOuvert] = useState(false);
-  const [dossierFaits, setDossierFaits] = useState(() => new Set());
-  const [dossierNum, setDossierNum] = useState('');
-
-  const droitsPresents = (() => {
-    const m = new Map();
-    [...parcellesBrutes, ...locauxBruts].forEach((o) => {
-      const d = o.codeDroit || '(non renseigné)';
-      m.set(d, (m.get(d) || 0) + 1);
-    });
-    return [...m.entries()].sort((a, b) => b[1] - a[1]);
-  })();
-
-  const propriete = droitsPresents.filter(([d]) => d.startsWith('P')).map(([d]) => d);
-  // Par défaut TOUS les titres sont retenus : un relevé de patrimoine doit
-  // d'abord montrer tout ce sur quoi la société apparaît, y compris les droits
-  // réels autres que la propriété — emphytéose, bail à construction, usufruit.
-  // On exclut ensuite en conscience, plutôt que de risquer d'omettre un bien.
-  // Contrepartie assumée : les agrégats mêlent alors propriété et gestion, d'où
-  // la part de propriété affichée en permanence sous les indicateurs (voir plus
-  // bas), pour que la distinction ne puisse pas passer inaperçue.
-  const droitsActifs = droitsChoisis ?? droitsPresents.map(([d]) => d);
-
-  // Part de la propriété au sein de ce qui est affiché, pour lecture immédiate.
-  const estPropriete = (o) => (o.codeDroit || '').startsWith('P');
-  const parcellesPropriete = parcellesBrutes.filter(estPropriete);
-  const surfaceEnPropriete = surfaceDistincte(parcellesPropriete);
-  const localsPropriete = locauxBruts.filter(estPropriete).length;
-  // Vrai dès qu'un titre autre que la propriété est retenu : c'est là que la
-  // distinction doit être rappelée à l'écran.
-  const melangeDesTitres = droitsActifs.some((d) => !d.startsWith('P'));
-
-  const retenu = (o) => droitsActifs.includes(o.codeDroit || '(non renseigné)');
-  const parcelles = parcellesBrutes.filter(retenu);
-  const locaux = locauxBruts.filter(retenu);
-  const ecartesParcelles = parcellesBrutes.length - parcelles.length;
-  const ecartesLocaux = locauxBruts.length - locaux.length;
-  const filtreActif = ecartesParcelles + ecartesLocaux > 0;
-  const libelleFiltre = droitsActifs.length === droitsPresents.length
-    ? `tous titres de droit (${droitsPresents.length} titre(s) présent(s) dans ce relevé)`
-    : `titres retenus : ${droitsActifs.join(' ; ')}`;
-
-  const basculerDroit = (d) => setDroitsChoisis(
-    droitsActifs.includes(d) ? droitsActifs.filter((x) => x !== d) : [...droitsActifs, d]);
-  const [exportingExcel, setExportingExcel] = useState(false);
-  const [exportingPdf, setExportingPdf] = useState(false);
-  const recognitionRef = useRef(null);
-
-  useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setSpeechSupported(false); return; }
-    const r = new SR();
-    r.lang = 'fr-FR'; r.continuous = false; r.interimResults = false;
-    r.onresult = (e) => { setCompanyName(e.results[0][0].transcript); setIsListening(false); };
-    r.onerror = () => setIsListening(false);
-    r.onend = () => setIsListening(false);
-    recognitionRef.current = r;
-  }, []);
-
-  useEffect(() => {
-    if (window.__fidalLogoData) return;
-    fetch('/logo-fidal.png')
-      .then(r => r.blob())
-      .then(blob => new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      }))
-      .then(dataUrl => { window.__fidalLogoData = dataUrl; })
-      .catch(err => console.warn('Logo non préchargé', err));
-  }, []);
-
-  const toggleMicrophone = () => {
-    if (!recognitionRef.current) return;
-    if (isListening) { recognitionRef.current.stop(); setIsListening(false); }
-    else { setIsListening(true); try { recognitionRef.current.start(); } catch (e) { setIsListening(false); } }
-  };
-
-  const searchSiren = async () => {
-    setPappersLoading(true); setPappersError(null); setPappersResults([]);
-    const query = companyName.trim();
-    try {
-      const r = await fetch(`${BACKEND_URL}/api/search?q=${encodeURIComponent(query)}`);
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
-      const data = await r.json();
-      if (data.results && data.results.length > 0) setPappersResults(data.results);
-      else setPappersError(`Aucune entreprise trouvée pour "${query}"`);
-    } catch (e) { setPappersError(`Erreur : ${e.message}`); }
-    finally { setPappersLoading(false); }
-  };
-
-  // Géocodage à la parcelle. Les fichiers DGFiP ne portent aucune coordonnée :
-  // on les obtient du plan cadastral via /api/geo, commune par commune.
-  // Une SEULE passe couvre les deux volets : un local et une parcelle peuvent
-  // partager la même référence cadastrale, il serait absurde de la demander
-  // deux fois. Les listes s'affichent d'abord, la carte se remplit ensuite.
-  const geocoderTout = async (listeParcelles, listeLocaux) => {
-    const parCommune = new Map();
-    [...listeParcelles, ...listeLocaux].forEach((o) => {
-      if (!o.codeInsee || !o.codeParcelle) return;
-      if (!parCommune.has(o.codeInsee)) parCommune.set(o.codeInsee, new Set());
-      parCommune.get(o.codeInsee).add(o.codeParcelle);
-    });
-    if (parCommune.size === 0) return;
-
-    const taches = [];
-    for (const [insee, refs] of parCommune) {
-      const liste = [...refs];
-      for (let i = 0; i < liste.length; i += 400) taches.push([insee, liste.slice(i, i + 400)]);
-    }
-    setGeoStatus({ communes: parCommune.size, faites: 0, trouvees: 0, demandees: 0 });
-
-    // On mémorise aussi la contenance renvoyée par le PLAN cadastral : comparée
-    // à celle de la MATRICE, elle alimente le contrôle de cohérence. Les deux
-    // sources sont mises à jour par des chaînes distinctes, un écart signale
-    // donc une parcelle qui a bougé — division, réunion, remembrement,
-    // arpentage — et qu'il faut instruire.
-    const infos = new Map();
-    const geometries = new Map();
-    let faites = 0, trouvees = 0, demandees = 0;
-    let curseur = 0;
-    const travailleur = async () => {
-      while (curseur < taches.length) {
-        const [insee, refs] = taches[curseur++];
-        demandees += refs.length;
-        try {
-          const suffixes = refs.map((r) => r.slice(5)).join(',');
-          // contours=1 : la géométrie voyage AVEC le géocodage. Les deux
-          // interrogeaient le même endpoint, les mêmes communes, les mêmes
-          // références — c'était deux séries d'appels pour rien.
-          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}&contours=1`);
-          if (r.ok) {
-            const d = await r.json();
-            Object.entries(d.geo || {}).forEach(([ref, g]) => {
-              infos.set(ref, {
-                coordonnees: `${g.lat}, ${g.lng}`,
-                contenanceCadastre: g.contenance_cadastre ?? null,
-              });
-              if (g.contour) geometries.set(ref, g.contour);
-              trouvees++;
-            });
-          }
-        } catch { /* une commune absente du plan ne doit pas casser la carte */ }
-        faites++;
-        setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees });
-        setContours(new Map(geometries));   // tracé progressif : la carte se garnit
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(6, taches.length) }, travailleur));
-
-    const poser = (o) => (infos.has(o.codeParcelle)
-      ? { ...o, ...infos.get(o.codeParcelle), _planLu: true }
-      : { ...o, _planLu: true, _absenteDuPlan: true });
-    setParcellesBrutes((prev) => prev.map(poser));
-    setLocauxBruts((prev) => prev.map(poser));
-    setContours(new Map(geometries));
-    setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees, termine: true });
-  };
-
-  const fetchParcelles = async (siren) => {
-    setParcellesLoading(true); setParcellesError(null); setParcellesBrutes([]); setTotalParcelles(0); setTruncated(false); setGeoStatus(null);
-    try {
-      const r = await fetch(`${BACKEND_URL}/api/parcelles?siren=${encodeURIComponent(siren)}&maxResults=10000`);
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
-      const data = await r.json();
-      const liste = data.parcelles || [];
-      setParcellesBrutes(liste);
-      setTotalParcelles(data.total || 0);
-      setTruncated(data.truncated || false);
-      setMillesime(data.millesime || '2025');
-      setParcellesLoading(false);
-      return liste;
-    } catch (e) {
-      setParcellesError(`Erreur : ${e.message}`); setParcellesLoading(false); return [];
-    }
-  };
-
-  // Volet bâti, inexistant avant le passage aux fichiers DGFiP 2025.
-  const fetchLocaux = async (siren) => {
-    setLocauxLoading(true); setLocauxError(null); setLocauxBruts([]); setTotalLocaux(0);
-    try {
-      const r = await fetch(`${BACKEND_URL}/api/locaux?siren=${encodeURIComponent(siren)}&maxResults=20000`);
-      if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.erreur || e.error || `HTTP ${r.status}`); }
-      const data = await r.json();
-      const liste = data.locaux || [];
-      setLocauxBruts(liste);
-      setTotalLocaux(data.total || 0);
-      setLocauxTronque(!!data.tronque);
-      return liste;
-    } catch (e) { setLocauxError(`Erreur : ${e.message}`); return []; }
-    finally { setLocauxLoading(false); }
-  };
-
-  const goToStep1 = () => setStep(1);
-  const goToStep2 = () => { if (companyName.trim().length < 2) return; setStep(2); searchSiren(); };
-  const selectCompany = (c) => setSelectedCompany(c);
-  const confirmCompany = () => {
-    if (!selectedCompany) return;
-    setStep(3);
-    setDroitsChoisis(null);
-    setQParcelles(''); setQLocaux('');
-    setContours(null);
-    setDossierFaits(new Set()); setDossierOuvert(false);
-    setTriParcelles({ champ: '', sens: 'asc' }); setTriLocaux({ champ: '', sens: 'asc' });
-    // Les deux relevés partent ensemble ; le géocodage attend les deux pour
-    // n'interroger chaque commune qu'une fois.
-    Promise.all([
-      fetchParcelles(selectedCompany.siren),
-      fetchLocaux(selectedCompany.siren),
-    ]).then(([lp, ll]) => geocoderTout(lp, ll));
-  };
-
-  const resetAll = () => {
-    setStep(1); setCompanyName(''); setPappersResults([]); setSelectedCompany(null);
-    setPappersError(null); setParcellesBrutes([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
-    setLocauxBruts([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null); setLocauxTronque(false);
-    setDroitsChoisis(null);
-  };
-
-  // ----------------------------------------------------------------------
-  // CONTRÔLE DE COHÉRENCE MATRICE / PLAN CADASTRAL
-  // La contenance figure dans deux produits DGFiP distincts : la matrice, qui
-  // porte la propriété, et le plan, qui porte la géométrie. Ils sont mis à jour
-  // par des chaînes différentes et à des rythmes différents. Un écart sur une
-  // même référence signale donc que la parcelle a bougé — division, réunion,
-  // remembrement, document d'arpentage — et que la désignation qu'on s'apprête
-  // à reprendre ne décrit peut-être plus le même objet.
-  // Utilité : sur un portefeuille de mille six cents parcelles, personne ne
-  // demande mille six cents relevés de propriété. Ce contrôle produit la liste
-  // COURTE de celles qui méritent qu'on s'y arrête.
-  // ----------------------------------------------------------------------
-  const TOLERANCE_M2 = 2;          // en deçà, arrondi ou précision géométrique
-  const TOLERANCE_PCT = 0.01;      // 1 %
-
-  const ecartDe = (o) => {
-    if (o.contenanceCadastre == null || o.contenance == null) return null;
-    return Number(o.contenance) - Number(o.contenanceCadastre);
-  };
-
-  const classerEcart = (o) => {
-    if (!o._planLu) return 'attente';
-    if (o._absenteDuPlan || o.contenanceCadastre == null) return 'absente';
-    const m = Number(o.contenance || 0);
-    const pl = Number(o.contenanceCadastre);
-    const e = m - pl;
-    if (e === 0) return 'concordante';
-    return Math.abs(e) <= Math.max(TOLERANCE_M2, m * TOLERANCE_PCT) ? 'mineur' : 'notable';
-  };
-
-  // Une parcelle détenue à deux titres apparaît deux fois : on ne la contrôle
-  // et ne la compte qu'une seule fois.
-  const coherence = (() => {
-    const vues = new Map();
-    parcelles.forEach((o) => {
-      if (!o.codeParcelle || vues.has(o.codeParcelle)) return;
-      vues.set(o.codeParcelle, { ...o, _classe: classerEcart(o) });
-    });
-    const tout = [...vues.values()];
-    const parClasse = (c) => tout.filter((o) => o._classe === c);
-    const ecarts = [...parClasse('notable'), ...parClasse('mineur')]
-      .map((o) => ({ ...o, _ecart: Number(o.contenance || 0) - Number(o.contenanceCadastre) }))
-      .sort((a, b) => Math.abs(b._ecart) - Math.abs(a._ecart));
-    return {
-      controlees: tout.length,
-      concordantes: parClasse('concordante').length,
-      mineurs: parClasse('mineur').length,
-      notables: parClasse('notable').length,
-      absentes: parClasse('absente').length,
-      attente: parClasse('attente').length,
-      ecarts,
-    };
-  })();
-
-  // Unités foncières, calculées sur les parcelles AFFICHÉES — donc dans le
-  // périmètre des titres de droit retenus, ce qui est cohérent avec l'exigence
-  // d'identité de propriétaire.
-  // DÉCLARÉE ICI, ET NON PLUS BAS : les vues des tableaux joignent le numéro
-  // d'unité à chaque ligne, donc elles la consomment. Une constante lue avant son
-  // initialisation lève une exception et laisse un écran blanc.
-  const unitesF = calculerUnites(parcelles, contours);
-  // Contenance de la matrice par référence : alimente le tableau de l'unité.
-  const surfaceParRef = (() => {
-    const m = new Map();
-    parcelles.forEach((o) => {
-      if (o.codeParcelle && !m.has(o.codeParcelle)) m.set(o.codeParcelle, Number(o.contenance) || 0);
-    });
-    return m;
-  })();
-
-  // Adresse cadastrale par référence : alimente le 4e champ de « tab », donc la
-  // colonne « Lieudit » de la désignation. Même construction que ci-dessus, la
-  // première occurrence gagne — une parcelle détenue à deux titres apparaît
-  // deux fois mais porte la même adresse.
-  const adresseParRef = (() => {
-    const m = new Map();
-    parcelles.forEach((o) => {
-      if (o.codeParcelle && !m.has(o.codeParcelle)) m.set(o.codeParcelle, o.adresse || '');
-    });
-    return m;
-  })();
-
-  // Sélecteur du plan à la carte. Calculé seulement quand le panneau est ouvert :
-  // inutile de regrouper mille six cents parcelles à chaque frappe au clavier.
-  const carteGroupes = carteOuverte ? grouperPourCarte(parcelles) : null;
-  const carteCommuneObj = (carteGroupes && carteCommune) ? carteGroupes.find((c) => c.insee === carteCommune) : null;
-  const carteRefs = [...carteSel];
-  const carteApercu = (carteOuverte && carteRefs.length) ? mesurerSelection(carteRefs, contours) : null;
-  const carteSurface = carteRefs.reduce((t, r) => t + (Number(surfaceParRef.get(r)) || 0), 0);
-
-  const basculerParcelleCarte = (r) => setCarteSel((s) => {
-    const n = new Set(s);
-    if (n.has(r)) n.delete(r); else n.add(r);
-    return n;
-  });
-  const basculerSectionCarte = (cle) => setCarteDepliees((d) => {
-    const n = new Set(d);
-    if (n.has(cle)) n.delete(cle); else n.add(cle);
-    return n;
-  });
-  const cocherSectionCarte = (s, on) => setCarteSel((sel) => {
-    const n = new Set(sel);
-    s.lignes.forEach((l) => { if (on) n.add(l.ref); else n.delete(l.ref); });
-    return n;
-  });
-  // Une ou deux sections seulement : on les déplie d'office. La plupart des
-  // dossiers n'en concernent qu'une, autant ne pas imposer un clic pour rien.
-  const choisirCommuneCarte = (c) => {
-    setCarteCommune(c.insee);
-    setCarteSel(new Set());
-    setCarteDepliees(new Set(c.sectionsTriees.length <= 2 ? c.sectionsTriees.map((s) => s.cle) : []));
-  };
-  const ouvrirCarte = () => {
-    setCarteOuverte(true);
-    setQCarteCommune('');
-    const g = grouperPourCarte(parcelles);
-    // Une seule commune au relevé : la question ne se pose pas, on entre direct.
-    if (g.length === 1) choisirCommuneCarte(g[0]); else { setCarteCommune(null); setCarteSel(new Set()); }
-  };
-  /* ⚠ TROU COMBLÉ LE 31/07/2026 : le plan à la carte ne produisait QUE le plan
-     cadastral, alors que le tableau de détail offrait déjà vue aérienne et
-     document. Une sélection de plusieurs parcelles n'avait donc accès à aucune
-     des deux — c'était l'usage le plus utile qui en était privé.
-     Réparation sans duplication : lienPaintUnite fabrique déjà le poly
-     multi-parcelles et le pt de l'ensemble ; il suffit de lui adjoindre les
-     suffixes. Les paramètres cadastraux qu'il émet (echelle, format, dim) sont
-     sans effet en mode ortho, c'est acquis au contrat. */
-  const genererCarte = (mode = 'plan') => {
-    if (!carteRefs.length) return;
-    const nom = carteCommuneObj ? carteCommuneObj.nom : '';
-    const avecContour = carteRefs.filter((r) => contours?.get(r));
-    let lien = avecContour.length >= 2
-      ? lienPaintUnite(carteRefs, surfaceParRef, contours, nom, adresseParRef)
-      : null;
-    // Repli : une seule parcelle coloriable, ou lienPaintUnite qui refuse. Le plan
-    // est alors centré sur elle, mais le TABLEAU porte toute la sélection — on ne
-    // perd pas la désignation des parcelles restées sans contour.
-    if (!lien) {
-      const pivot = avecContour[0] || carteRefs[0];
-      const autres = carteRefs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r), adresse: adresseParRef.get(r) }));
-      lien = lienPaintAnnote(pivot, nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
-    }
-    if (!lien) return;
-    // trace=rond pose UN repère sur l'ensemble : une sélection est une propriété,
-    // pas une collection. PAINT avertit de lui-même si les parcelles sont trop
-    // dispersées pour qu'un repère unique ait du sens.
-    if (mode === 'ortho') lien += '&fond=ortho&trace=rond&cadre=contexte';
-    else if (mode === 'doc') lien += '&doc=1' + suffixeDossier
-      + suffixeBati(carteRefs, batiParRef) + suffixePP(carteRefs, contours);
-    window.open(lien, '_blank', 'noreferrer');
-  };
-
-  // ---- DOSSIER COMPLET — demandé par JFD le 01/08/2026 --------------------
-  // Même chemin que le panier du plan à la carte (lienPaintUnite + doc=1 +
-  // suffixes), appliqué commune par commune à TOUT le relevé filtré : ZÉRO
-  // machinerie nouvelle, uniquement de l'orchestration. Chaque « Générer »
-  // ouvre PAINT prérempli ; le clic « Document » y reste volontaire (contrat
-  // doc=1). PAS DE PLAFOND de parcelles — décision JFD — mais un AVERTISSEMENT
-  // de délai : chaque parcelle coûte un extrait SCPC (~6 s) plus les vues IGN.
-  // ⚠ DÉCOUPAGE EN VOLUMES — décision JFD du 01/08 : au-delà de 50 parcelles,
-  // une commune se livre en PLUSIEURS documents. Règle hybride : des SECTIONS
-  // ENTIÈRES regroupées tant que le volume tient sous 50 (on ne coupe jamais
-  // une section qui tient), et une section qui dépasse 50 se TRANCHE en
-  // volumes successifs. Bénéfices en cascade : ~7 min par volume, ~20 Mo par
-  // PDF, et 14 sommets par contour (au lieu de 5 à 150 parcelles) — les vraies
-  // limites reviennent sur les plans de section.
-  const TAILLE_VOLUME = 50;
-  // Tri section puis numéro À L'INTÉRIEUR de la commune : le préfixe précède la
-  // section dans la clé de tri (communes fusionnées : deux sections « A » de
-  // préfixes différents ne doivent pas s'entremêler). ⚠ DÉCLARÉ AVANT volumesDe
-  // qui l'appelle AU RENDU : le 01/08, sa déclaration laissée plus bas a fait
-  // une zone morte temporelle — ReferenceError, page blanche à l'ouverture du
-  // panneau. L'ordre des const d'un composant est un ordre d'EXÉCUTION.
-  const refsTrieesDe = (c) => [...c.vues].sort((a, b) =>
-    a.slice(5, 10).localeCompare(b.slice(5, 10)) ||
-    ((Number(a.slice(10, 14)) || 0) - (Number(b.slice(10, 14)) || 0)));
-  const volumesDe = (c) => {
-    const refs = refsTrieesDe(c);
-    const sections = [];
-    refs.forEach((r) => {
-      const k = r.slice(5, 10);
-      const d = sections[sections.length - 1];
-      if (d && d.k === k) d.refs.push(r); else sections.push({ k, refs: [r] });
-    });
-    const vols = []; let cur = [];
-    sections.forEach((s) => {
-      if (s.refs.length > TAILLE_VOLUME) {
-        if (cur.length) { vols.push(cur); cur = []; }
-        for (let i = 0; i < s.refs.length; i += TAILLE_VOLUME) vols.push(s.refs.slice(i, i + TAILLE_VOLUME));
-      } else if (cur.length + s.refs.length > TAILLE_VOLUME) { vols.push(cur); cur = [...s.refs]; }
-      else cur.push(...s.refs);
-    });
-    if (cur.length) vols.push(cur);
-    return vols;
-  };
-  const dossierLignes = dossierOuvert
-    ? grouperPourCarte(parcelles).slice().sort((a, b) => a.nom.localeCompare(b.nom, 'fr'))
-        .flatMap((c) => {
-          const vols = volumesDe(c);
-          return vols.map((refs, i) => ({
-            cle: c.insee + '_' + (i + 1), insee: c.insee, nom: c.nom,
-            volume: vols.length > 1 ? (i + 1) + '/' + vols.length : '',
-            refs, nb: refs.length,
-            surface: refs.reduce((t, r) => t + (Number(surfaceParRef.get(r)) || 0), 0),
-          }));
-        })
-    : null;
-  const lienDossierCommune = (lg) => {
-    const refs = lg.refs;   // déjà triées et tranchées en volume
-    const avecContour = refs.filter((r) => contours?.get(r));
-    let lien = avecContour.length >= 2
-      ? lienPaintUnite(refs, surfaceParRef, contours, lg.nom, adresseParRef)
-      : null;
-    // Repli identique à genererCarte : une seule parcelle coloriable, ou
-    // lienPaintUnite qui refuse — le tableau porte alors tout le volume.
-    if (!lien) {
-      const pivot = avecContour[0] || refs[0];
-      const autres = refs.map((r) => ({ codeParcelle: r, contenance: surfaceParRef.get(r), adresse: adresseParRef.get(r) }));
-      lien = lienPaintAnnote(pivot, lg.nom, contours?.get(pivot), surfaceParRef.get(pivot), autres, adresseParRef.get(pivot));
-    }
-    if (!lien) return null;
-    return lien + '&doc=1&docauto=1' + suffixeDossier
-      + (lg.volume ? '&vol=' + encodeURIComponent(lg.volume) : '')
-      + suffixeBati(refs, batiParRef) + suffixePP(refs, contours);
-  };
-  const genererDossierCommune = (lg) => {
-    const lien = lienDossierCommune(lg);
-    if (!lien) return;
-    // ⚠ VERCEL REFUSE LES URL AU-DELÀ DE ~14 ko (URI_TOO_LONG, constaté le
-    // 01/08 sur Watten, 152 parcelles). Au-delà de 7 000 caractères — marge
-    // large —, les paramètres partent par postMessage : PAINT s'ouvre sur une
-    // URL LÉGÈRE (charge=message), envoie « paint-pret » dès qu'il écoute, et
-    // reçoit la chaîne complète qu'il pose lui-même dans sa barre d'adresse
-    // (history.replaceState, aucune requête). ⚠ PAS de 'noreferrer' ici :
-    // il couperait window.opener, donc le canal.
-    if (lien.length > 7000) {
-      const u = new URL(lien);
-      const w = window.open(u.origin + u.pathname + '?charge=message&cb=' + Date.now(), '_blank');
-      if (w) {
-        const qs = u.search.slice(1);
-        const h = (e) => {
-          if (e.source !== w || !e.data || e.data.type !== 'paint-pret') return;
-          w.postMessage({ type: 'paint-params', qs }, u.origin);
-          window.removeEventListener('message', h);
-        };
-        window.addEventListener('message', h);
-        setTimeout(() => window.removeEventListener('message', h), 30000);
-      }
-    } else {
-      window.open(lien, '_blank', 'noreferrer');
-    }
-    setDossierFaits((s) => new Set(s).add(lg.cle));
-  };
-  const basculerDossierFait = (insee) => setDossierFaits((s) => {
-    const n = new Set(s);
-    if (n.has(insee)) n.delete(insee); else n.add(insee);
-    return n;
-  });
-  // N° de dossier — 01/08 : saisi dans le panneau Dossier complet, il vaut pour
-  // TOUS les documents (liens unitaires, unités foncières, panier, dossier
-  // complet) : mêmes pièces, même pied de page.
-  const suffixeDossier = dossierNum.trim()
-    ? '&dossier=' + encodeURIComponent(dossierNum.trim()) : '';
-  const dureeDossier = (nb) => {
-    // ~18 s par parcelle depuis les extraits COLORIÉS (01/08 au soir) :
-    // extrait recentré + calage OCR + peinture, par iframe, pour chaque fiche.
-    const s = nb * 18;
-    if (s < 60) return `≈ ${s} s`;
-    if (s < 3600) return `≈ ${Math.round(s / 60)} min`;
-    return `≈ ${(s / 3600).toFixed(1)} h`;
-  };
-
-  // Vues des tableaux : filtrées puis triées. Les agrégats, la carte et les
-  // exports continuent de porter sur l'ensemble — seul l'affichage est réduit,
-  // sans quoi un filtre de lecture fausserait un livrable.
-  // Le numéro d'unité est joint aux lignes affichées pour que le tri de la
-  // colonne fonctionne comme les autres.
-  const parcellesAffichees = trierListe(
-    filtrerTexte(parcelles.map((o) => ({ ...o, _unite: unitesF?.numero.get(o.codeParcelle) || 0 })), qParcelles,
-      ['codeParcelle', 'commune', 'departement', 'region', 'adresse', 'natureCulture', 'codeDroit']),
-    triParcelles);
-
-  // Vue par immeuble : un lot par ligne devient illisible passé quelques
-  // centaines. On regroupe par parcelle en comptant les lots.
-  const immeublesListe = (() => {
-    const m = new Map();
-    locaux.forEach((l) => {
-      const k = l.codeParcelle || '(sans référence)';
-      if (!m.has(k)) {
-        m.set(k, { ...l, nbLots: 0, titres: new Set(), batiments: new Set() });
-      }
-      const e = m.get(k);
-      e.nbLots += 1;
-      if (l.codeDroit) e.titres.add(l.codeDroit);
-      if (l.batiment) e.batiments.add(l.batiment);
-      return e;
-    });
-    return [...m.values()].map((e) => ({
-      ...e,
-      titresTxt: [...e.titres].join(' ; '),
-      batimentsTxt: [...e.batiments].sort().join(', '),
-    }));
-  })();
-
-  // Locaux par parcelle, pour le bloc « LOCAUX BÂTIS » de la page 2 du document.
-  // Même source que la vue par immeuble, structurée pour l'URL.
-  const batiParRef = (() => {
-    const m = new Map();
-    locaux.forEach((l) => {
-      if (!l.codeParcelle) return;
-      if (!m.has(l.codeParcelle)) m.set(l.codeParcelle, { bats: new Set(), lots: [] });
-      const e = m.get(l.codeParcelle);
-      if (l.batiment) e.bats.add(l.batiment);
-      e.lots.push([l.batiment, l.entree, l.niveau, l.porte]);
-    });
-    return m;
-  })();
-
-  const locauxAffiches = trierListe(
-    filtrerTexte(locaux, qLocaux,
-      ['codeParcelle', 'commune', 'departement', 'adresse', 'batiment', 'entree', 'niveau', 'porte', 'codeDroit']),
-    triLocaux);
-  const immeublesAffiches = trierListe(
-    filtrerTexte(immeublesListe, qLocaux,
-      ['codeParcelle', 'commune', 'departement', 'adresse', 'batimentsTxt', 'titresTxt']),
-    triLocaux);
-
-  // Nombre d'immeubles distincts : un même lot peut apparaître deux fois à des
-  // titres différents (propriétaire ET gérant), ce ne sont pas des doublons.
-  const immeubles = new Set(locaux.map((l) => l.codeParcelle).filter(Boolean)).size;
-
-  // Forme juridique affichable, une seule fois pour l'interface et les exports.
-  // ⚠ L'API Recherche d'Entreprises renvoie la CHAÎNE « N/C » quand elle ne la
-  // connaît pas : un repli par « || » ne se déclenche donc pas. Il faut tester
-  // la valeur, pas seulement sa présence.
-  const formeJuridiqueAffichee = () => {
-    const api = (selectedCompany?.formeJuridique || '').trim();
-    if (api && api.toUpperCase() !== 'N/C') return api;
-    const src = parcelles[0] || locaux[0] || {};
-    return src.formeJuridiqueLibelle
-      ? `${src.formeJuridiqueLibelle} (${src.formeJuridique})`
-      : 'forme juridique non communiquée';
-  };
-
-  const computeStats = () => {
-    const byDept = {};
-    const byCommune = {};
-    const vuesDept = new Set(), vuesComm = new Set();
-    parcelles.forEach(p => {
-      const dept = p.departement || 'N/C';
-      const comm = p.commune || 'N/C';
-      // Les surfaces ne s'additionnent qu'une fois par parcelle (cf. surfaceDistincte).
-      const cleD = dept + '|' + p.codeParcelle, cleC = comm + '|' + p.codeParcelle;
-      const neufD = p.codeParcelle && !vuesDept.has(cleD);
-      const neufC = p.codeParcelle && !vuesComm.has(cleC);
-      if (neufD) vuesDept.add(cleD);
-      if (neufC) vuesComm.add(cleC);
-      if (!byDept[dept]) byDept[dept] = { count: 0, surface: 0 };
-      byDept[dept].count++;
-      if (neufD) byDept[dept].surface += (p.contenance || 0);
-      if (!byCommune[comm]) byCommune[comm] = { count: 0, surface: 0, departement: dept };
-      byCommune[comm].count++;
-      if (neufC) byCommune[comm].surface += (p.contenance || 0);
-    });
-    const totalCount = parcelles.length;
-    const depts = Object.entries(byDept)
-      .map(([nom, d]) => ({ nom, ...d, pct: Math.round((d.count / totalCount) * 100) }))
-      .sort((a, b) => b.count - a.count);
-    const communes = Object.entries(byCommune)
-      .map(([nom, c]) => ({ nom, ...c, pct: Math.round((c.count / totalCount) * 100) }))
-      .sort((a, b) => b.count - a.count);
-    return { depts, communes };
-  };
-
-  // Dessine le bandeau de marque sur un canvas et renvoie un PNG (dataURL)
-  const drawBannerDataUrl = (wPx, hPx) => {
-    const scale = 2;
-    const cv = document.createElement('canvas');
-    cv.width = wPx * scale;
-    cv.height = hPx * scale;
-    const ctx = cv.getContext('2d');
-    ctx.scale(scale, scale);
-    const drawSpaced = (text, x, y, gap) => {
-      let cx = x;
-      for (const ch of text) { ctx.fillText(ch, cx, y); cx += ctx.measureText(ch).width + gap; }
-      return cx;
-    };
-    ctx.fillStyle = '#0F2238';
-    ctx.fillRect(0, 0, wPx, hPx);
-    ctx.fillStyle = '#E3CC7A';
-    ctx.fillRect(0, hPx - 3, wPx, 3);
-    ctx.textBaseline = 'middle';
-    let x = 40;
-    ctx.fillStyle = '#ffffff';
-    ctx.font = "bold 34px Georgia, 'Times New Roman', serif";
-    ctx.fillText('FIDAL', x, 70);
-    x += ctx.measureText('FIDAL').width + 10;
-    ctx.fillStyle = '#E3CC7A';
-    ctx.font = "bold 40px Georgia, 'Times New Roman', serif";
-    ctx.fillText('/', x, 70);
-    x += ctx.measureText('/').width + 12;
-    ctx.fillStyle = '#ffffff';
-    ctx.font = "15px 'Segoe UI', Arial, sans-serif";
-    x = drawSpaced('NOTAIRES', x, 70, 3) + 22;
-    ctx.strokeStyle = 'rgba(101,125,150,0.6)';
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(x, 42); ctx.lineTo(x, 108); ctx.stroke();
-    x += 26;
-    ctx.fillStyle = '#ffffff';
-    ctx.font = "bold 46px Georgia, 'Times New Roman', serif";
-    ctx.fillText('REDPAR', x, 62);
-    ctx.fillStyle = '#6DD5DC';
-    ctx.font = "14px 'Segoe UI', Arial, sans-serif";
-    drawSpaced('PATRIMOINE FONCIER DES PERSONNES MORALES', x + 2, 98, 3);
-    const ps = 54, px = wPx - 40 - ps, py = 48;
-    const poly = [[5, 4], [19, 7], [20, 17], [8, 20], [4, 11]].map(([a, b]) => [px + (a / 24) * ps, py + (b / 24) * ps]);
-    ctx.strokeStyle = '#33838B';
-    ctx.fillStyle = '#33838B';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    poly.forEach((pt, i) => (i ? ctx.lineTo(pt[0], pt[1]) : ctx.moveTo(pt[0], pt[1])));
-    ctx.closePath(); ctx.stroke();
-    poly.forEach(pt => { ctx.beginPath(); ctx.arc(pt[0], pt[1], 2.4, 0, Math.PI * 2); ctx.fill(); });
-    return cv.toDataURL('image/png');
-  };
-
-  // Fabrique d'onglet à la charte FIDAL, partagée par les deux volets : même
-  // bandeau, même ligne de sujet, mêmes en-têtes navy et or, même filtre
-  // automatique. Un seul endroit à corriger le jour où la charte bouge.
-  const ajouterOnglet = (wb, { nom, headers, widths, sujet, lignes, remplir, aligner }) => {
-    const numCols = headers.length;
-    const ws = wb.addWorksheet(nom, { views: [{ state: 'frozen', ySplit: 3 }] });
-    ws.columns = widths.map((w) => ({ width: w }));
-
-    // Largeur du bandeau = largeur RÉELLE du tableau, et non une valeur fixe.
-    // Une colonne Excel de largeur w (en caractères) mesure environ w × 7 + 5
-    // pixels avec Calibri 11. Les deux onglets n'ayant pas les mêmes colonnes
-    // (190 unités pour les parcelles, 200 pour les locaux), un bandeau figé à
-    // 1 240 px s'arrêtait avant le bord droit du tableau, différemment sur
-    // chacun. L'ancrage « br » sur la dernière colonne verrouille le bord.
-    const bannerW = widths.reduce((t, w) => t + Math.round(w * 7) + 5, 0);
-    const bannerH = 150;
-    ws.getRow(1).height = bannerH * 0.75;   // px -> points
-    const imgId = wb.addImage({ base64: drawBannerDataUrl(bannerW, bannerH), extension: 'png' });
-    // editAs: 'twoCell' est INDISPENSABLE. Par défaut ExcelJS écrit
-    // editAs="oneCell", qui signifie « déplacer l'image avec les cellules mais
-    // ne pas la redimensionner » : Excel conserve alors la taille propre de
-    // l'image et ignore le coin inférieur droit de l'ancrage, si bien que le
-    // bandeau s'arrêtait avant le bord du tableau. Avec 'twoCell', l'image est
-    // dimensionnée sur la zone ancrée, donc de A1 au bord de la dernière
-    // colonne, quelles que soient les largeurs choisies.
-    ws.addImage(imgId, {
-      tl: { col: 0, row: 0 },
-      br: { col: numCols, row: 1 },
-      editAs: 'twoCell',
-    });
-
-    ws.mergeCells(2, 1, 2, numCols);
-    const sujetCell = ws.getCell(2, 1);
-    sujetCell.value = sujet;
-    sujetCell.font = { name: 'Calibri', size: 9.5, italic: true, color: { argb: 'FF0F2238' } };
-    sujetCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF8F4E0' } };
-    sujetCell.alignment = { horizontal: 'center', vertical: 'middle' };
-    ws.getRow(2).height = 18;
-
-    // Hauteur de l'en-tête calculée depuis le repli de chaque intitulé dans sa
-    // colonne : à 24 points figés, « Nature culture » ou « Lot (bât./entrée/
-    // niv./porte) » se renvoyaient à la ligne puis se faisaient rogner.
-    const lignesEntete = Math.max(...headers.map((h, i) =>
-      Math.ceil(String(h).length / Math.max(widths[i] - 1, 4))));
-    const headerRow = ws.getRow(3);
-    headers.forEach((h, i) => {
-      const cell = headerRow.getCell(i + 1);
-      cell.value = h;
-      cell.font = { name: 'Calibri', size: 11, bold: true, color: { argb: 'FFE3CC7A' } };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF0F2238' } };
-      cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
-      cell.border = { bottom: { style: 'medium', color: { argb: 'FFE3CC7A' } } };
-    });
-    headerRow.height = Math.max(24, lignesEntete * 14 + 10);
-
-    const navy = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
-    lignes.forEach((item, i) => {
-      const row = ws.getRow(i + 4);
-      remplir(row, item, i);
-      for (let c = 1; c <= numCols; c++) {
-        const cell = row.getCell(c);
-        const a = aligner(c);
-        if (!a.styleLibre) cell.font = navy;
-        if (a.nombre) { cell.alignment = { horizontal: 'right', vertical: 'middle' }; cell.numFmt = '#,##0'; }
-        else if (a.centre) cell.alignment = { horizontal: 'center', vertical: 'middle' };
-        else cell.alignment = { vertical: 'middle' };
-      }
-    });
-
-    ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + lignes.length, column: numCols } };
-    return ws;
-  };
-
-  // Lien cartographique : par coordonnées si la parcelle est géocodée, sinon
-  // par adresse. Sans repli, la colonne resterait vide pour les 3 % de
-  // parcelles absentes du plan cadastral.
-  // Distinguer « sans objet » de « non renseigné » : un local n'a pas de nature
-  // de culture, une parcelle n'a pas de numéro de lot. Un blanc laisserait
-  // croire à une donnée manquante.
-  const SANS_OBJET = '—';
-
-  // VUE AÉRIENNE IGN d'abord, Google en repli. Le repli n'est pas un confort :
-  // sans contour, lienVueAerienne rend null, et une colonne vide priverait la
-  // parcelle de toute vue du ciel.
-  const lienCarte = (o) => lienVueAerienne(o.codeParcelle, o.commune,
-      contours?.get(o.codeParcelle), o.contenance, null, o.adresse)
-    || buildSatelliteLink(o.coordonnees)
-    || (o.adresse && o.commune
-      ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${o.adresse} ${o.commune}`)}`
-      : null);
-
-  const exportExcel = async () => {
-    if (!parcelles.length || !window.ExcelJS) {
-      if (!window.ExcelJS) alert("Librairie Excel (ExcelJS) non chargée");
-      return;
-    }
-    setExportingExcel(true);
-    try {
-      const ExcelJS = window.ExcelJS;
-      const wb = new ExcelJS.Workbook();
-      const fj = formeJuridiqueAffichee();
-      const sujet = (quoi, n) => `${selectedCompany?.nom || ''}  |  SIREN : ${selectedCompany?.siren || ''}`
-        + `  |  ${selectedCompany?.statut === 'Cessée' ? 'SOCIÉTÉ CESSÉE' : 'société active'}`
-        + `  |  ${fj}  |  ${n.toLocaleString('fr-FR')} ${quoi}`
-        + `  |  Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime}`
-        + ` — Licence Ouverte 2.0  |  ${libelleFiltre}`
-        + `  |  Généré le ${new Date().toLocaleDateString('fr-FR')}`;
-
-      // --- Onglet 1 : tous les biens, bâti et non bâti confondus ---
-      // Placé EN PREMIER : c'est la vue d'ensemble, celle qu'on ouvre pour
-      // instruire un dossier. Les deux onglets de détail suivent.
-      // Tri par commune puis référence cadastrale : l'ordre dans lequel on
-      // instruit un dossier. Le code INSEE départage les communes homonymes de
-      // départements différents.
-      const tousBiens = [
-        ...parcelles.map((o) => ({ ...o, _bati: false })),
-        ...locaux.map((o) => ({ ...o, _bati: true })),
-      ].sort((a, b) =>
-        (a.commune || '').localeCompare(b.commune || '', 'fr')
-        || (a.codeInsee || '').localeCompare(b.codeInsee || '')
-        || (a.codeParcelle || '').localeCompare(b.codeParcelle || '')
-        || (a._bati ? 1 : 0) - (b._bati ? 1 : 0)
-        || `${a.batiment || ''}${a.entree || ''}${a.niveau || ''}${a.porte || ''}`
-          .localeCompare(`${b.batiment || ''}${b.entree || ''}${b.niveau || ''}${b.porte || ''}`));
-
-      // Surface à sommer : renseignée UNE SEULE FOIS par parcelle. Une parcelle
-      // revient autant de fois qu'elle a de titulaires de droits — la SNCF
-      // compte 315 234 lignes pour 159 723 parcelles — donc totaliser la
-      // contenance répétée surévaluerait la surface de près du double.
-      const dejaComptee = new Set();
-      tousBiens.forEach((o) => {
-        o._surfaceASommer = (!o._bati && o.codeParcelle && !dejaComptee.has(o.codeParcelle)
-          && o.contenance) ? o.contenance : null;
-        if (o._surfaceASommer) dejaComptee.add(o.codeParcelle);
-      });
-
-      if (tousBiens.length) {
-        // Fonds CLAIRS : sur un dossier où 15 451 lignes sur 17 087 sont du
-        // bâti, des aplats saturés écrasent la lecture. Le beige et le cyan
-        // pâle de la charte suffisent, le symbole et le mot portant le reste.
-        const BEIGE_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5EDD3' } };
-        const CYAN_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDFF1F3' } };
-        const NAVY_TEXTE = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF0F2238' } };
-        ajouterOnglet(wb, {
-          nom: 'Tous les biens',
-          headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
-            'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
-            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit',
-            'Unité foncière', 'Vue aérienne', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
-          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
-          sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
-          lignes: tousBiens,
-          aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13 || c === 15,
-            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
-          remplir: (row, o, i) => {
-            row.getCell(1).value = i + 1;
-            // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
-            // reste lisible imprimé en noir et blanc, ou par un daltonien.
-            const nat = row.getCell(2);
-            nat.value = o._bati ? '■ BÂTI' : '● NON BÂTI';
-            nat.fill = o._bati ? CYAN_FILL : BEIGE_FILL;
-            nat.font = NAVY_TEXTE;
-            nat.alignment = { horizontal: 'center', vertical: 'middle' };
-            row.getCell(3).value = o.codeParcelle || '';
-            row.getCell(4).value = o.commune || '';
-            row.getCell(5).value = o.departement || '';
-            row.getCell(6).value = o.region || '';
-            row.getCell(7).value = o.adresse || '';
-            // Un tiret marque le SANS OBJET ; une cellule vide en colonne 9
-            // signifie « surface déjà comptée sur une ligne précédente ».
-            row.getCell(8).value = o._bati ? SANS_OBJET : (o.contenance || 0);
-            row.getCell(9).value = o._bati ? SANS_OBJET : (o._surfaceASommer || '');
-            // Contrôle de cohérence : contenance du PLAN et écart avec la matrice.
-            const ec = o._bati ? null : ecartDe(o);
-            row.getCell(10).value = o._bati ? SANS_OBJET
-              : (o.contenanceCadastre != null ? Number(o.contenanceCadastre) : '');
-            row.getCell(11).value = ec == null ? (o._bati ? SANS_OBJET : '') : ec;
-            row.getCell(12).value = o._bati ? SANS_OBJET : (o.natureCulture || '');
-            row.getCell(13).value = o._bati
-              ? [o.batiment, o.entree, o.niveau, o.porte].filter(Boolean).join(' / ')
-              : SANS_OBJET;
-            row.getCell(14).value = o.codeDroit || '';
-            // Unité foncière : numéro, et nombre de parcelles quand il y en a
-            // plusieurs d'un seul tenant. Un tiret pour le bâti et pour les
-            // parcelles sans contour, qui n'ont pas pu être regroupées.
-            const nU = unitesF?.numero.get(o.codeParcelle);
-            const uu = nU ? unitesF.unites[nU - 1] : null;
-            row.getCell(15).value = !uu ? SANS_OBJET
-              : uu.membres.length > 1 ? `${nU} (${uu.membres.length} parcelles)` : String(nU);
-            const lien = lienCarte(o);
-            const cell = row.getCell(16);
-            if (lien) {
-              cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
-              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
-              cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cell.value = '';
-            // Deux liens, deux usages. « Extrait DGFiP » livre le PDF brut, pièce
-            // autonome qu'on peut joindre à un dossier. « Plan colorisé » ouvre
-            // PAINT, qui génère l'extrait ET colorie la parcelle en carmin — c'est
-            // l'outil de travail, et c'est de là que part l'utilisateur en pratique.
-            const extrait = lienExtraitCadastral(o.codeParcelle, contours?.get(o.codeParcelle));
-            const cellEx = row.getCell(17);
-            if (extrait) {
-              cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
-              cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
-              cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cellEx.value = '';
-            const colorise = lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle));
-            const cellCo = row.getCell(18);
-            if (colorise) {
-              cellCo.value = { text: 'Colorier', hyperlink: colorise };
-              cellCo.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
-              cellCo.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cellCo.value = '';
-            // Plan colorié ET annoté : désignation cadastrale et contenance en
-            // hectares, ares, centiares, portées sous le titre de l'extrait.
-            const annote = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance, null, o.adresse);
-            const cellAn = row.getCell(19);
-            if (annote) {
-              cellAn.value = { text: 'Annoté', hyperlink: annote };
-              cellAn.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
-              cellAn.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cellAn.value = '';
-          },
-        });
-      }
-
-      // --- Onglet 2 : la liste courte des écarts de contenance ---
-      // C'est la feuille qu'on emporte : les parcelles à instruire, et elles
-      // seules. Absente du classeur s'il n'y a rien à signaler.
-      if (coherence.ecarts.length) {
-        ajouterOnglet(wb, {
-          nom: 'Écarts de contenance',
-          headers: ['#', 'Ampleur', 'Référence cadastrale', 'Commune', 'Département',
-            'Adresse', 'Matrice (m²)', 'Plan (m²)', 'Écart (m²)', 'Écart (%)', 'Droit', 'Vue aérienne',
-            'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
-          widths: [5, 12, 19, 22, 18, 32, 14, 13, 13, 12, 26, 16, 16, 16, 16],
-          sujet: `${selectedCompany?.nom || ''}  |  ${coherence.ecarts.length} écart(s) sur `
-            + `${coherence.controlees} parcelle(s) contrôlée(s)  |  ${coherence.concordantes} concordante(s)`
-            + `  |  Matrice DGFiP contre plan cadastral (version Etalab)  |  Écart notable au-delà de 2 m² ou 1 %`,
-          lignes: coherence.ecarts,
-          aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c >= 12 }),
-          remplir: (row, o, i) => {
-            row.getCell(1).value = i + 1;
-            row.getCell(2).value = o._classe === 'notable' ? 'NOTABLE' : 'mineur';
-            row.getCell(3).value = o.codeParcelle || '';
-            row.getCell(4).value = o.commune || '';
-            row.getCell(5).value = o.departement || '';
-            row.getCell(6).value = o.adresse || '';
-            row.getCell(7).value = Number(o.contenance || 0);
-            row.getCell(8).value = Number(o.contenanceCadastre || 0);
-            row.getCell(9).value = o._ecart;
-            row.getCell(10).value = o.contenance
-              ? Math.round(1000 * o._ecart / Number(o.contenance)) / 10 : '';
-            row.getCell(11).value = o.codeDroit || '';
-            const lien = lienCarte(o);
-            const cell = row.getCell(12);
-            if (lien) {
-              cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
-              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
-              cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cell.value = '';
-            const extrait = lienExtraitCadastral(o.codeParcelle, contours?.get(o.codeParcelle));
-            const cellEx = row.getCell(13);
-            if (extrait) {
-              cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
-              cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
-              cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cellEx.value = '';
-            const annote2 = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance, null, o.adresse);
-            const cellAn2 = row.getCell(15);
-            if (annote2) {
-              cellAn2.value = { text: 'Annoté', hyperlink: annote2 };
-              cellAn2.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
-              cellAn2.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cellAn2.value = '';
-            const colorise = lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle));
-            const cellCo = row.getCell(14);
-            if (colorise) {
-              cellCo.value = { text: 'Colorier', hyperlink: colorise };
-              cellCo.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
-              cellCo.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cellCo.value = '';
-          },
-        });
-      }
-
-      // --- Onglet 3 : le non bâti seul ---
-      ajouterOnglet(wb, {
-        nom: 'Parcelles',
-        headers: ['#', 'Référence cadastrale', 'Commune', 'Département', 'Région', 'Adresse', 'Surface (m²)', 'Nature culture', 'Droit', 'Vue aérienne'],
-        widths: [5, 18, 22, 18, 22, 35, 12, 14, 26, 18],
-        sujet: sujet('parcelle(s)', totalParcelles),
-        lignes: parcelles,
-        aligner: (c) => ({ centre: c === 1 || c === 8, nombre: c === 7, styleLibre: c === 10 }),
-        remplir: (row, p, i) => {
-          row.getCell(1).value = i + 1;
-          row.getCell(2).value = p.codeParcelle || '';
-          row.getCell(3).value = p.commune || '';
-          row.getCell(4).value = p.departement || '';
-          row.getCell(5).value = p.region || '';
-          row.getCell(6).value = p.adresse || '';
-          row.getCell(7).value = p.contenance || 0;
-          row.getCell(8).value = p.natureCulture || '';
-          row.getCell(9).value = p.codeDroit || '';
-          const lien = lienCarte(p);
-          const cell = row.getCell(10);
-          if (lien) {
-            cell.value = { text: p.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
-            cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
-            cell.alignment = { horizontal: 'center', vertical: 'middle' };
-          } else cell.value = '';
-        },
-      });
-
-      // --- Onglet 4 : le bâti seul. Ni surface ni invariant dans la source : un lot
-      // s'identifie par bâtiment / entrée / niveau / porte sur sa parcelle. ---
-      if (locaux.length) {
-        ajouterOnglet(wb, {
-          nom: 'Locaux',
-          headers: ['#', 'Référence parcelle', 'Commune', 'Département', 'Région', 'Adresse', 'Bâtiment', 'Entrée', 'Niveau', 'Porte', 'Droit', 'Vue aérienne'],
-          widths: [5, 18, 22, 18, 22, 35, 10, 8, 8, 10, 26, 18],
-          sujet: sujet('local(aux)', totalLocaux),
-          lignes: locaux,
-          aligner: (c) => ({ centre: c === 1 || (c >= 7 && c <= 10), nombre: false, styleLibre: c === 12 }),
-          remplir: (row, l, i) => {
-            row.getCell(1).value = i + 1;
-            row.getCell(2).value = l.codeParcelle || '';
-            row.getCell(3).value = l.commune || '';
-            row.getCell(4).value = l.departement || '';
-            row.getCell(5).value = l.region || '';
-            row.getCell(6).value = l.adresse || '';
-            row.getCell(7).value = l.batiment || '';
-            row.getCell(8).value = l.entree || '';
-            row.getCell(9).value = l.niveau || '';
-            row.getCell(10).value = l.porte || '';
-            row.getCell(11).value = l.codeDroit || '';
-            const lien = lienCarte(l);
-            const cell = row.getCell(12);
-            if (lien) {
-              cell.value = { text: l.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
-              cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
-              cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cell.value = '';
-          },
-        });
-      }
-
-      // --- Onglet 5 : mentions, à conserver dans tout livrable ---
-      const wsM = wb.addWorksheet('Sources et limites');
-      wsM.columns = [{ width: 120 }];
-      [
-        ['Source', `Fichiers des locaux et des parcelles des personnes morales (DGFiP), situation au 1er janvier ${millesime}.`],
-        ['Licence', 'Licence Ouverte 2.0 (Etalab). Attribution requise.'],
-        ['Géolocalisation', 'Plan cadastral informatisé (DGFiP, version Etalab). Position au centroïde de la parcelle.'],
-        ['Portée', "Donnée de pré-contrôle. Seul le relevé de propriété ou l'état hypothécaire fait foi."],
-        ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
-        ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
-        ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
-        ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
-        ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export. Lorsque le contour est connu, l'échelle, le format et, s'il y a lieu, une rotation de la zone d'impression sont choisis pour que la parcelle tienne au plus près du 1/1000 ; la rotation n'est appliquée que si elle permet une échelle plus fine, et le plan porte alors sa flèche du nord inclinée d'autant. Les échelles vont du 1/1000 au 1/5000, plafond du service."],
-        ['Unités foncières', `Une unité foncière est, au sens de la jurisprudence administrative, l'îlot de propriété d'un seul tenant appartenant au même propriétaire. Le regroupement est calculé sur les contours du plan cadastral : deux parcelles sont réunies lorsqu'elles partagent au moins deux sommets, donc une limite commune — un simple contact par un angle ne suffit pas. Résultat sur ce relevé : ${unitesF ? `${unitesF.unites.length} unité(s), dont ${unitesF.groupees} d'un seul tenant de plusieurs parcelles et ${unitesF.isolees} isolée(s)` : 'non calculé, faute de contours chargés'}. LIMITE ESSENTIELLE : ce relevé ne connaît que les parcelles de la société interrogée. Une parcelle voisine appartenant au même propriétaire mais détenue sous un autre SIREN, ou par une personne physique, n'y figure pas et n'a donc pas été regroupée. L'unité indiquée est l'unité au sein du portefeuille, non l'unité foncière au sens plein.`],
-        ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
-          ? "Société CESSÉE au répertoire Sirene, et pourtant encore inscrite à la documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation postérieure au 1er janvier " + millesime + ". À instruire avant toute reprise."
-          : "Société active au répertoire Sirene à la date de génération du présent document."} Source du statut : API Recherche d'Entreprises (gouv.fr), distincte des fichiers cadastraux.`],
-        ['Contrôle de cohérence', `La contenance figure dans deux produits DGFiP distincts, mis à jour par des chaînes différentes : la matrice, qui porte la propriété, et le plan cadastral, qui porte la géométrie. Résultat sur ce relevé : ${coherence.concordantes} parcelle(s) concordante(s), ${coherence.notables} écart(s) notable(s), ${coherence.mineurs} écart(s) mineur(s), ${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s). Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Rappel : la contenance cadastrale n'est qu'indicative, seul un arpentage fait foi.`],
-        ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
-        ['Liens cartographiques', (() => {
-          const tousDont = [...parcelles, ...locaux];
-          const localises = tousDont.filter((o) => o.coordonnees).length;
-          const base = `${localises.toLocaleString('fr-FR')} enregistrement(s) sur ${tousDont.length.toLocaleString('fr-FR')} pointent le centroïde de la parcelle ; les autres pointent l'adresse.`;
-          return geoStatus && !geoStatus.termine
-            ? `${base} ATTENTION : ce classeur a été produit AVANT la fin du géocodage. Réexporter une fois la localisation terminée pour obtenir des liens à la parcelle.`
-            : base;
-        })()],
-      ].forEach(([titre, texte], i) => {
-        const r = wsM.getRow(i + 1);
-        r.getCell(1).value = `${titre} — ${texte}`;
-        r.getCell(1).font = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
-        r.getCell(1).alignment = { vertical: 'top', wrapText: true };
-        r.height = 30;
-      });
-
-      const buf = await wb.xlsx.writeBuffer();
-      const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-      const dateStr = new Date().toISOString().split('T')[0];
-      const cleanName = (selectedCompany?.nom || 'export').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `REDPAR_${cleanName}_${dateStr}.xlsx`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) { alert("Erreur Excel : " + err.message); }
-    finally { setExportingExcel(false); }
-  };
-
-  const exportPdf = () => {
-    if (!parcelles.length || !window.jspdf || !window.jspdf.jsPDF) {
-      alert("Librairie PDF non chargée");
-      return;
-    }
-    setExportingPdf(true);
-    try {
-      const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      const margin = 12;
-      const stats = computeStats();
-      const dateStr = new Date().toLocaleDateString('fr-FR');
-
-      // ===== Palette charte FIDAL =====
-      const NAVY = [15, 34, 56];      // #0F2238
-      const OCRE = [227, 204, 122];   // #E3CC7A (slash, accents)
-      const CYAN = [109, 213, 220];   // #6DD5DC (sous-titre)
-      const TEAL = [51, 131, 139];    // #33838B (polygone)
-      const GREYBLUE = [101, 125, 150];
-      const GOLD = OCRE;              // accents du corps (sections, tableaux)
-      const BEIGE = [248, 244, 224];  // teinte ocre très pâle
-
-      // ===== Bandeau marque (même identité que le web) =====
-      const bandH = 26;
-      doc.setFillColor(...NAVY);
-      doc.rect(0, 0, pageWidth, bandH, 'F');
-      doc.setFillColor(...OCRE);
-      doc.rect(0, bandH, pageWidth, 1.2, 'F');
-
-      // Lockup FIDAL / NOTAIRES
-      let lx = margin;
-      doc.setFont('times', 'bold');
-      doc.setFontSize(15);
-      doc.setTextColor(255, 255, 255);
-      doc.text('FIDAL', lx, 13);
-      lx += doc.getTextWidth('FIDAL') + 2;
-      doc.setTextColor(...OCRE);
-      doc.setFontSize(17);
-      doc.text('/', lx, 13.5);
-      lx += doc.getTextWidth('/') + 3;
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(7);
-      doc.setTextColor(255, 255, 255);
-      doc.text('NOTAIRES', lx, 12.5, { charSpace: 0.8 });
-      lx += doc.getTextWidth('NOTAIRES') + 0.8 * 7 + 6;
-
-      // Séparateur vertical
-      doc.setDrawColor(...GREYBLUE);
-      doc.setLineWidth(0.3);
-      doc.line(lx, 5, lx, 21);
-      const titleX = lx + 6;
-
-      // REDPAR + sous-titre
-      doc.setFont('times', 'bold');
-      doc.setFontSize(22);
-      doc.setTextColor(255, 255, 255);
-      doc.text('REDPAR', titleX, 14);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(6.5);
-      doc.setTextColor(...CYAN);
-      doc.text('PATRIMOINE FONCIER DES PERSONNES MORALES', titleX + 0.5, 20, { charSpace: 0.7 });
-
-      // Emblème polygone (à droite)
-      try {
-        const ps = 14, px = pageWidth - margin - ps, py = 6;
-        const poly = [[5, 4], [19, 7], [20, 17], [8, 20], [4, 11]].map(([a, b]) => [px + (a / 24) * ps, py + (b / 24) * ps]);
-        doc.setDrawColor(...TEAL);
-        doc.setFillColor(...TEAL);
-        doc.setLineWidth(0.5);
-        for (let i = 0; i < poly.length; i++) {
-          const a = poly[i], b = poly[(i + 1) % poly.length];
-          doc.line(a[0], a[1], b[0], b[1]);
-        }
-        poly.forEach(pt => doc.circle(pt[0], pt[1], 0.7, 'F'));
-      } catch (e) { /* polygone optionnel */ }
-
-      // ===== Sujet du rapport =====
-      doc.setTextColor(...TEAL);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7);
-      doc.text('RAPPORT REDPAR', margin, bandH + 7, { charSpace: 0.5 });
-      doc.setTextColor(...NAVY);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(13);
-      doc.text(selectedCompany?.nom || '', margin, bandH + 13);
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
-      doc.setTextColor(...GREYBLUE);
-      doc.text(`SIREN : ${selectedCompany?.siren} • ${formeJuridiqueAffichee()}`, margin, bandH + 18);
-      doc.setFontSize(7.5);
-      doc.text(libelleFiltre.charAt(0).toUpperCase() + libelleFiltre.slice(1)
-        + (selectedCompany?.statut === 'Cessée'
-          ? ' — SOCIÉTÉ CESSÉE au répertoire Sirene, encore inscrite à la documentation cadastrale'
-          : ''), margin, bandH + 23);
-      doc.setFontSize(9);
-      doc.setTextColor(...NAVY);
-      doc.text(dateStr, pageWidth - margin, bandH + 18, { align: 'right' });
-
-      // + 31 et non + 26 : la mention des titres de droit occupe la ligne
-      // bandH + 23, le cadre beige doit démarrer sous elle.
-      let y = bandH + 31;
-
-      // Le cadre doit couvrir le titre PLUS les quatre lignes de mentions, qui
-      // descendent jusqu'à y + 14,5. Sous-dimensionné, il laissait les mentions
-      // déborder sur le fond blanc.
-      const hMentions = 26;   // cinq lignes de mentions
-      doc.setFillColor(...BEIGE);
-      doc.rect(margin, y - 4, pageWidth - 2 * margin, hMentions, 'F');
-      doc.setDrawColor(...GOLD);
-      doc.setLineWidth(1.5);
-      doc.line(margin, y - 4, margin, y - 4 + hMentions);
-      doc.setTextColor(...NAVY);
-      doc.setFontSize(8);
-      doc.setFont('helvetica', 'bold');
-      doc.text(`${formatNumberForPdf(totalParcelles)} parcelle(s) au total`, margin + 3, y);
-      doc.setFont('helvetica', 'italic');
-      doc.setFontSize(7);
-      // Accents conservés : jsPDF les rend correctement en Helvetica, comme le
-      // montre la ligne « Généré par REDPAR » du pied de page. Un document
-      // remis à un client ne se lit pas en texte désaccentué.
-      doc.text(`Source : fichiers des personnes morales (DGFiP), situation au 1er janvier ${millesime} • Licence Ouverte 2.0`, margin + 3, y + 4);
-      doc.text('Géolocalisation : plan cadastral informatisé (DGFiP, version Etalab), position au centroïde de la parcelle.', margin + 3, y + 7.5);
-      doc.text('Donnée de pré-contrôle : seul le relevé de propriété ou l\'état hypothécaire fait foi. Personnes physiques,', margin + 3, y + 11);
-      doc.text('entreprises individuelles et sociétés unipersonnelles hors périmètre ; simples locataires absents.', margin + 3, y + 14.5);
-      doc.text(`Cohérence matrice / plan cadastral : ${coherence.concordantes} concordante(s), `
-        + `${coherence.notables} écart(s) notable(s), ${coherence.mineurs} mineur(s), `
-        + `${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s).`,
-        margin + 3, y + 18);
-      y += 21;   // le bloc de mentions compte désormais cinq lignes
-
-      const cellW = (pageWidth - 2 * margin - 8) / 3;
-      const totalSurfaceCalc = surfaceDistincte(parcelles);
-      const stats3 = [
-        { label: 'PARCELLES', value: formatNumberForPdf(totalParcelles) },
-        { label: 'SURFACE TOTALE', value: formatNumberForPdf(totalSurfaceCalc) + ' m2' },
-        { label: 'COMMUNES', value: formatNumberForPdf(stats.communes.length) },
-      ];
-      stats3.forEach((s, i) => {
-        const x = margin + i * (cellW + 4);
-        doc.setDrawColor(...NAVY);
-        doc.setLineWidth(0.3);
-        doc.rect(x, y, cellW, 16);
-        doc.setFillColor(...NAVY);
-        doc.rect(x, y, cellW, 5, 'F');
-        doc.setTextColor(...GOLD);
-        doc.setFontSize(7);
-        doc.setFont('helvetica', 'bold');
-        doc.text(s.label, x + cellW / 2, y + 3.5, { align: 'center' });
-        doc.setTextColor(...NAVY);
-        doc.setFont('helvetica', 'bold');
-        doc.setFontSize(13);
-        doc.text(s.value, x + cellW / 2, y + 12, { align: 'center' });
-      });
-      y += 22;
-
-      doc.setFillColor(...NAVY);
-      doc.rect(margin, y, pageWidth - 2 * margin, 6, 'F');
-      doc.setTextColor(...GOLD);
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      doc.text(stats.depts.length > 1 ? `REPARTITION PAR DEPARTEMENT (${stats.depts.length})` : 'DEPARTEMENT', margin + 2, y + 4);
-      y += 8;
-
-      doc.autoTable({
-        startY: y,
-        head: [['Département', 'Parcelles', 'Surface (m2)', '%']],
-        body: stats.depts.map(d => [d.nom, formatNumberForPdf(d.count), formatNumberForPdf(d.surface), d.pct + '%']),
-        theme: 'grid',
-        headStyles: { fillColor: NAVY, textColor: GOLD, fontStyle: 'bold', fontSize: 8 },
-        bodyStyles: { fontSize: 8, textColor: NAVY },
-        alternateRowStyles: { fillColor: [250, 250, 249] },
-        columnStyles: { 1: { halign: 'right' }, 2: { halign: 'right' }, 3: { halign: 'right' } },
-        margin: { left: margin, right: margin },
-      });
-      y = doc.lastAutoTable.finalY + 6;
-
-      const showCommunes = stats.communes.length <= 10 ? stats.communes : stats.communes.slice(0, 10);
-      const communeTitle = stats.communes.length <= 10
-        ? `REPARTITION PAR COMMUNE (${stats.communes.length})`
-        : `TOP 10 COMMUNES (sur ${stats.communes.length})`;
-
-      if (y > pageHeight - 50) { doc.addPage(); y = margin; }
-      doc.setFillColor(...NAVY);
-      doc.rect(margin, y, pageWidth - 2 * margin, 6, 'F');
-      doc.setTextColor(...GOLD);
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      doc.text(communeTitle, margin + 2, y + 4);
-      y += 8;
-
-      doc.autoTable({
-        startY: y,
-        head: [['Commune', 'Département', 'Parcelles', 'Surface (m2)', '%']],
-        body: showCommunes.map(c => [c.nom, c.departement, formatNumberForPdf(c.count), formatNumberForPdf(c.surface), c.pct + '%']),
-        theme: 'grid',
-        headStyles: { fillColor: NAVY, textColor: GOLD, fontStyle: 'bold', fontSize: 8 },
-        bodyStyles: { fontSize: 8, textColor: NAVY },
-        alternateRowStyles: { fillColor: [250, 250, 249] },
-        columnStyles: { 2: { halign: 'right' }, 3: { halign: 'right' }, 4: { halign: 'right' } },
-        margin: { left: margin, right: margin },
-      });
-      y = doc.lastAutoTable.finalY + 8;
-
-      doc.addPage();
-      y = margin;
-      doc.setFillColor(...NAVY);
-      doc.rect(margin, y, pageWidth - 2 * margin, 6, 'F');
-      doc.setTextColor(...GOLD);
-      doc.setFontSize(9);
-      doc.setFont('helvetica', 'bold');
-      doc.text(`DETAIL DES PARCELLES (${formatNumberForPdf(parcelles.length)})`, margin + 2, y + 4);
-      y += 8;
-
-      doc.autoTable({
-        startY: y,
-        head: [['#', 'Référence', 'Commune', 'Département', 'Adresse', 'Surface', 'Nat.']],
-        body: parcelles.map((p, i) => [
-          i + 1,
-          p.codeParcelle || '',
-          p.commune || '',
-          p.departement || '',
-          p.adresse || '',
-          formatNumberForPdf(p.contenance || 0) + ' m2',
-          p.natureCulture || '',
-        ]),
-        theme: 'grid',
-        headStyles: { fillColor: NAVY, textColor: GOLD, fontStyle: 'bold', fontSize: 7 },
-        bodyStyles: { fontSize: 7, textColor: NAVY },
-        alternateRowStyles: { fillColor: [250, 250, 249] },
-        columnStyles: {
-          0: { halign: 'center', cellWidth: 8 },
-          1: { cellWidth: 28, font: 'courier', fontSize: 6 },
-          2: { cellWidth: 30 },
-          3: { cellWidth: 25 },
-          4: { cellWidth: 'auto' },
-          5: { halign: 'right', cellWidth: 18 },
-          6: { halign: 'center', cellWidth: 10 },
-        },
-        margin: { left: margin, right: margin, top: 14 },
-        didDrawPage: () => {
-          const ph = doc.internal.pageSize.getHeight();
-          doc.setFontSize(7);
-          doc.setTextColor(...NAVY);
-          doc.text(`REDPAR — ${selectedCompany?.nom} — SIREN ${selectedCompany?.siren}`, margin, 8);
-          doc.text(`Page ${doc.internal.getCurrentPageInfo().pageNumber}`, pageWidth - margin, 8, { align: 'right' });
-          doc.setDrawColor(...GOLD);
-          doc.setLineWidth(0.5);
-          doc.line(margin, ph - 8, pageWidth - margin, ph - 8);
-          doc.setTextColor(100);
-          doc.setFontSize(6);
-          doc.text(`Généré par REDPAR — FIDAL Notaires — ${dateStr}`, pageWidth / 2, ph - 4, { align: 'center' });
-        },
-      });
-
-      const cleanName = (selectedCompany?.nom || 'export').replace(/[^a-zA-Z0-9]/g, '_').substring(0, 40);
-      const isoDate = new Date().toISOString().split('T')[0];
-      doc.save(`REDPAR_${cleanName}_${isoDate}.pdf`);
-    } catch (err) {
-      alert("Erreur PDF : " + err.message);
-    } finally {
-      setExportingPdf(false);
-    }
-  };
-
-  const totalSurface = surfaceDistincte(parcelles);
-  const parcellesDistinctes = new Set(parcelles.map((p) => p.codeParcelle).filter(Boolean)).size;
-  const stats = parcelles.length > 0 ? computeStats() : { depts: [], communes: [] };
-  const showAllCommunes = stats.communes.length <= 10;
-  const displayedCommunes = showAllCommunes ? stats.communes : stats.communes.slice(0, 10);
-
-  return (
-    <div className="min-h-screen bg-stone-50 p-4 md:p-8">
-      <div className="max-w-6xl mx-auto">
-        {/* ===== En-tête REDPAR — charte FIDAL ===== */}
-        <div className="mb-8">
-          <header className="redpar-header">
-            <style>{`
-              .redpar-header{background:#0F2238;border-radius:12px;height:120px;display:flex;align-items:center;gap:26px;padding:0 30px;color:#fff;box-sizing:border-box;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;animation:redpar-rise .5s ease both;}
-              @keyframes redpar-rise{from{opacity:0;transform:translateY(-6px);}to{opacity:1;transform:none;}}
-              @media (prefers-reduced-motion:reduce){.redpar-header{animation:none;}}
-              .redpar-lockup{display:flex;align-items:baseline;gap:6px;}
-              .redpar-divider{width:1px;height:52px;background:#657D96;opacity:.55;}
-              .redpar-wordmark{font-family:Georgia,'Times New Roman',serif;font-size:34px;line-height:1;}
-              .redpar-subtitle{font-size:12px;letter-spacing:4px;color:#6DD5DC;margin-top:7px;}
-              @media (max-width:640px){.redpar-header{gap:16px;padding:0 18px;}.redpar-wordmark{font-size:26px;}.redpar-subtitle{font-size:10px;letter-spacing:2.5px;}.redpar-divider,.redpar-mark{display:none;}}
-            `}</style>
-            <div className="redpar-lockup" aria-label="FIDAL Notaires">
-              <span style={{ fontFamily: "Georgia, serif", fontSize: 26, letterSpacing: ".5px" }}>FIDAL</span>
-              <span style={{ fontFamily: "Georgia, serif", fontSize: 30, color: "#E3CC7A" }}>/</span>
-              <span style={{ fontSize: 11, letterSpacing: "3px" }}>NOTAIRES</span>
-            </div>
-            <div className="redpar-divider" aria-hidden="true" />
-            <div style={{ display: "flex", flexDirection: "column" }}>
-              <span className="redpar-wordmark">REDPAR</span>
-              <span className="redpar-subtitle">PATRIMOINE FONCIER DES PERSONNES MORALES</span>
-            </div>
-            <div style={{ flex: 1 }} />
-            <svg className="redpar-mark" width="46" height="46" viewBox="0 0 24 24" fill="none" stroke="#33838B" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
-              <polygon points="5,4 19,7 20,17 8,20 4,11" />
-              <circle cx="5" cy="4" r="1.7" fill="#33838B" stroke="none" />
-              <circle cx="19" cy="7" r="1.7" fill="#33838B" stroke="none" />
-              <circle cx="20" cy="17" r="1.7" fill="#33838B" stroke="none" />
-              <circle cx="8" cy="20" r="1.7" fill="#33838B" stroke="none" />
-              <circle cx="4" cy="11" r="1.7" fill="#33838B" stroke="none" />
-            </svg>
-          </header>
-        </div>
-
-        {step < 3 && (
-          <div className="mb-8">
-            <div className="flex items-center justify-between">
-              {['Entreprise', 'Vérification SIREN', 'Parcelles'].map((label, i) => {
-                const n = i + 1, active = step === n, done = step > n;
-                return (
-                  <React.Fragment key={label}>
-                    <div className="flex items-center gap-2">
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${done ? 'bg-blue-950 text-amber-400' : active ? 'bg-blue-900 text-white' : 'bg-white border border-stone-300 text-stone-400'}`}>
-                        {done ? <CheckCircle2 className="w-4 h-4" /> : n}
-                      </div>
-                      <span className={`text-sm font-medium hidden md:block ${active ? 'text-blue-950' : done ? 'text-blue-900' : 'text-stone-400'}`}>{label}</span>
-                    </div>
-                    {i < 2 && <div className={`flex-1 h-px mx-2 ${step > n ? 'bg-blue-950' : 'bg-stone-200'}`} />}
-                  </React.Fragment>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {step === 1 && (
-          <div className="bg-white rounded-xl border border-stone-200 p-6 md:p-8 shadow-sm">
-            <h2 className="text-lg font-semibold text-blue-950 mb-1">Nom de l'entreprise</h2>
-            <p className="text-sm text-stone-500 mb-6">Saisissez le nom au clavier ou utilisez le micro</p>
-            <div className="relative">
-              <input type="text" value={companyName} onChange={(e) => setCompanyName(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && goToStep2()} placeholder="Ex : LOGIS METROPOLE" className="w-full px-4 py-4 pr-14 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-400 text-blue-950 text-lg" autoFocus />
-              {speechSupported && (
-                <button onClick={toggleMicrophone} className={`absolute right-2 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full flex items-center justify-center ${isListening ? 'bg-red-500 text-white animate-pulse' : 'bg-blue-950 text-amber-400 hover:bg-blue-900'}`}>
-                  {isListening ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-                </button>
-              )}
-            </div>
-            {isListening && <div className="mt-3 flex items-center gap-2 text-sm text-red-600"><div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />Écoute en cours...</div>}
-            <div className="flex justify-end mt-6">
-              <button onClick={goToStep2} disabled={companyName.trim().length < 2} className="flex items-center gap-2 px-5 py-2.5 bg-blue-950 text-white rounded-lg font-medium hover:bg-blue-900 disabled:bg-stone-300">Rechercher <ChevronRight className="w-4 h-4" /></button>
-            </div>
-          </div>
-        )}
-
-        {step === 2 && (
-          <div className="bg-white rounded-xl border border-stone-200 p-6 md:p-8 shadow-sm">
-            <h2 className="text-lg font-semibold text-blue-950 mb-1">Vérification SIREN</h2>
-            <p className="text-sm text-stone-500 mb-2">Recherche pour : <span className="font-medium text-blue-950">{companyName}</span></p>
-            <div className="mb-6 inline-flex items-center gap-1.5 px-2 py-1 bg-green-50 border border-green-200 rounded text-xs text-green-800">
-              <CheckCircle2 className="w-3.5 h-3.5" />Source : API officielle gouv.fr
-            </div>
-            {pappersLoading && <div className="flex items-center justify-center py-12"><Loader2 className="w-8 h-8 text-amber-500 animate-spin" /><span className="ml-3 text-stone-600">Recherche en cours...</span></div>}
-            {pappersError && <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3"><AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" /><div><div className="font-medium text-red-900">Erreur</div><div className="text-sm text-red-700">{pappersError}</div></div></div>}
-            {!pappersLoading && pappersResults.length > 0 && (
-              <>
-                <div className="mb-4 text-sm text-stone-600"><CheckCircle2 className="w-4 h-4 text-blue-950 inline" /> {pappersResults.length} entreprises trouvées</div>
-                <div className="space-y-3">
-                  {pappersResults.map((c) => {
-                    const sel = selectedCompany?.siren === c.siren;
-                    return (
-                      <button key={c.siren} onClick={() => selectCompany(c)} className={`w-full text-left p-4 rounded-lg border-2 ${sel ? 'border-blue-950 bg-blue-50' : 'border-stone-200 hover:border-blue-900'}`}>
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-2 flex-wrap">
-                              <Building2 className="w-4 h-4 text-blue-950" />
-                              <div className="font-semibold text-blue-950">{c.nom}</div>
-                              <span className="text-xs px-2 py-0.5 bg-stone-100 text-stone-700 rounded">{c.formeJuridique}</span>
-                              <span className={`text-xs px-2 py-0.5 rounded border ${c.statut === 'Active' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-stone-100 text-stone-600 border-stone-200'}`}>{c.statut}</span>
-                            </div>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1 text-sm">
-                              <div><span className="text-stone-500">SIREN : </span><span className="text-blue-950 font-mono">{c.siren}</span></div>
-                              <div><span className="text-stone-500">Créée : </span><span className="text-blue-950">{c.dateCreation}</span></div>
-                              <div className="md:col-span-2"><span className="text-stone-500">Adresse : </span><span className="text-blue-950">{c.adresse}</span></div>
-                              <div className="md:col-span-2"><span className="text-stone-500">APE : </span><span className="text-blue-950">{c.codeApe}</span></div>
-                              <div className="md:col-span-2"><span className="text-stone-500">Dirigeants : </span><span className="text-blue-950">{c.dirigeants.join(', ')}</span></div>
-                            </div>
-                          </div>
-                          {sel && <CheckCircle2 className="w-6 h-6 text-blue-950 flex-shrink-0" />}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-            <div className="flex justify-between mt-8">
-              <button onClick={goToStep1} className="flex items-center gap-2 px-5 py-2.5 text-blue-950 rounded-lg font-medium hover:bg-stone-100"><ChevronLeft className="w-4 h-4" />Retour</button>
-              <button onClick={confirmCompany} disabled={!selectedCompany} className="flex items-center gap-2 px-5 py-2.5 bg-blue-950 text-white rounded-lg font-medium hover:bg-blue-900 disabled:bg-stone-300">Rechercher parcelles <ArrowRight className="w-4 h-4" /></button>
-            </div>
-          </div>
-        )}
-
-        {step === 3 && (
-          <div className="space-y-6">
-            <div className="bg-white rounded-xl border border-stone-200 p-4 shadow-sm flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2 text-sm text-blue-950">
-                {parcellesLoading ? <Loader2 className="w-4 h-4 text-amber-500 animate-spin" /> : <CheckCircle2 className="w-4 h-4 text-amber-500" />}
-                {parcellesLoading ? 'Recherche dans les fichiers DGFiP...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
-              </div>
-              <div className="flex items-center gap-2 flex-wrap">
-                {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
-                  <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    localisation en cours — attendez pour des liens à la parcelle
-                  </span>
-                )}
-                {!parcellesLoading && parcelles.length > 0 && (
-                  <>
-                    <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
-                      {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
-                    </button>
-                    <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
-                      {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
-                    </button>
-                  </>
-                )}
-                <button onClick={resetAll} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-950 rounded-lg hover:bg-stone-100"><RotateCcw className="w-4 h-4" />Nouvelle recherche</button>
-              </div>
-            </div>
-
-            <div className="bg-blue-950 text-white rounded-xl shadow-sm overflow-hidden relative">
-              <div className="absolute top-0 left-0 w-full h-1 bg-amber-400" />
-              <div className="p-6">
-                <div className="flex items-center gap-2 text-xs text-amber-400 mb-2"><FileText className="w-3.5 h-3.5" />RAPPORT REDPAR</div>
-                <h2 className="text-2xl font-semibold mb-1">{selectedCompany?.nom}</h2>
-                <div className="text-sm text-blue-200 flex items-center gap-2 flex-wrap">
-                  <span>SIREN : <span className="font-mono text-white">{selectedCompany?.siren}</span></span>
-                  {selectedCompany?.statut && (
-                    <span className={`text-xs px-2 py-0.5 rounded border ${selectedCompany.statut === 'Active'
-                      ? 'bg-green-900/40 text-green-200 border-green-700'
-                      : 'bg-amber-400 text-blue-950 border-amber-300 font-semibold'}`}>
-                      {selectedCompany.statut}
-                    </span>
-                  )}
-                  <span>{' • '}</span>
-                  {/* L'API Recherche d'Entreprises ne renvoie pas toujours la forme
-                      juridique (« N/C ») : on retombe alors sur celle des fichiers
-                      DGFiP, avec son code entre parenthèses pour rester vérifiable. */}
-                  <span>{formeJuridiqueAffichee()}</span>
-                </div>
-                {selectedCompany?.statut === 'Cessée' && (
-                  <div className="mt-3 text-xs bg-amber-400 text-blue-950 rounded-lg px-3 py-2">
-                    <strong>Société cessée</strong> au répertoire Sirene, et pourtant encore inscrite à la
-                    documentation cadastrale : liquidation non clôturée, biens non liquidés, ou radiation
-                    postérieure au 1er janvier {millesime}. À instruire avant toute reprise.
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {parcellesLoading && (
-              <div className="bg-white rounded-xl border border-stone-200 p-12 shadow-sm flex flex-col items-center gap-3">
-                <Loader2 className="w-8 h-8 text-amber-500 animate-spin" />
-                <span className="text-stone-600">Interrogation des fichiers des personnes morales (DGFiP, millésime 2025)...</span>
-              </div>
-            )}
-
-            {!parcellesLoading && parcellesError && (
-              <div className="bg-red-50 border border-red-200 rounded-lg p-4 flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
-                <div><div className="font-medium text-red-900">Erreur</div><div className="text-sm text-red-700">{parcellesError}</div></div>
-              </div>
-            )}
-
-            {!parcellesLoading && !parcellesError && parcelles.length === 0 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
-                <AlertCircle className="w-8 h-8 text-amber-600 mx-auto mb-2" />
-                <div className="font-semibold text-amber-900 mb-1">Aucune parcelle trouvée</div>
-                <div className="text-sm text-amber-800">Cette personne morale n'apparaît pas dans les fichiers DGFiP des personnes morales (situation au 1er janvier 2025). Rappel : les personnes physiques, les entreprises individuelles et les sociétés unipersonnelles en sont absentes par construction.</div>
-              </div>
-            )}
-
-            {!parcellesLoading && droitsPresents.length > 0 && (
-              <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-sm">
-                <div className="flex items-baseline gap-2 flex-wrap mb-3">
-                  <h3 className="font-semibold text-blue-950 text-sm">Titres de droit retenus</h3>
-                  <span className="text-xs text-stone-500">
-                    les indicateurs, la carte et les exports ne portent que sur les titres cochés
-                  </span>
-                  <div className="ml-auto flex items-center gap-3">
-                    {propriete.length > 0 && propriete.length < droitsPresents.length && (
-                      <button onClick={() => setDroitsChoisis(propriete)} className="text-xs text-blue-900 underline hover:text-blue-700">
-                        propriété seule
-                      </button>
-                    )}
-                    {droitsActifs.length < droitsPresents.length && (
-                      <button onClick={() => setDroitsChoisis(null)} className="text-xs text-blue-900 underline hover:text-blue-700">
-                        tous les titres
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {droitsPresents.map(([d, n]) => {
-                    const actif = droitsActifs.includes(d);
-                    return (
-                      <button key={d} onClick={() => basculerDroit(d)}
-                        className={`px-2.5 py-1 rounded-lg text-xs border transition ${actif
-                          ? 'bg-blue-950 text-amber-400 border-blue-950 font-medium'
-                          : 'bg-white text-stone-500 border-stone-300 hover:border-stone-400'}`}>
-                        {actif ? '✓ ' : ''}{d} <span className="opacity-70">({n.toLocaleString('fr-FR')})</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                {filtreActif && (
-                  <div className="mt-3 text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                    {ecartesParcelles.toLocaleString('fr-FR')} parcelle(s) et {ecartesLocaux.toLocaleString('fr-FR')} local(aux) écartés par ce filtre : la société y figure à un autre titre que ceux retenus.
-                  </div>
-                )}
-                {melangeDesTitres && (
-                  <div className="mt-3 text-xs text-blue-900 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
-                    Titres autres que la propriété retenus : les totaux mêlent donc les biens détenus en propriété et ceux sur lesquels la société n'a qu'un autre droit réel ou une mission de gestion. La part de propriété est rappelée sous chaque indicateur.
-                  </div>
-                )}
-                {droitsActifs.length === 0 && (
-                  <div className="mt-3 text-xs text-red-700">Aucun titre retenu : cochez-en au moins un.</div>
-                )}
-              </div>
-            )}
-
-            {!parcellesLoading && parcelles.length > 0 && (
-              <>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Parcelles</div>
-                    <div className="text-2xl font-semibold text-blue-950">{parcelles.length.toLocaleString('fr-FR')}</div>
-                    {ecartesParcelles > 0 && (
-                      <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
-                    )}
-                    {melangeDesTitres && (
-                      <div className="text-xs text-blue-900 mt-1">dont {parcellesPropriete.length.toLocaleString('fr-FR')} au titre de la propriété</div>
-                    )}
-                    {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Surface totale</div>
-                    <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
-                    {melangeDesTitres && (
-                      <div className="text-xs text-blue-900 mt-1">dont {surfaceEnPropriete.toLocaleString('fr-FR')} m² en propriété</div>
-                    )}
-                    {parcellesDistinctes < parcelles.length && (
-                      <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
-                    )}
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Communes</div>
-                    <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
-                    <div className="text-2xl font-semibold text-blue-950">
-                      {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : locaux.length.toLocaleString('fr-FR')}
-                    </div>
-                    {!locauxLoading && totalLocaux > 0 && (
-                      <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
-                    )}
-                    {ecartesLocaux > 0 && (
-                      <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
-                    )}
-                    {melangeDesTitres && !locauxLoading && (
-                      <div className="text-xs text-blue-900 mt-1">dont {localsPropriete.toLocaleString('fr-FR')} au titre de la propriété</div>
-                    )}
-                    {locauxTronque && (
-                      <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
-                    )}
-                  </div>
-                  {unitesF && (
-                    <div className="bg-white border border-stone-200 rounded-lg p-4">
-                      <div className="text-xs text-stone-500 mb-1">Unités foncières</div>
-                      <div className="text-2xl font-semibold text-blue-950">
-                        {unitesF.unites.length.toLocaleString('fr-FR')}
-                      </div>
-                      <div className="text-xs text-stone-500 mt-1">
-                        {unitesF.groupees.toLocaleString('fr-FR')} d'un seul tenant de plusieurs parcelles,
-                        {' '}{unitesF.isolees.toLocaleString('fr-FR')} isolée(s)
-                      </div>
-                      {unitesF.sansContour > 0 && (
-                        <div className="text-xs text-stone-500">{unitesF.sansContour.toLocaleString('fr-FR')} sans contour, donc non regroupée(s)</div>
-                      )}
-                    </div>
-                  )}
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
-                    <div className="text-2xl font-semibold text-blue-950">
-                      {coherence.attente > 0 ? '—' : (coherence.notables + coherence.mineurs).toLocaleString('fr-FR')}
-                    </div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      {coherence.attente > 0
-                        ? 'en attente du géocodage'
-                        : `écart(s) sur ${coherence.controlees.toLocaleString('fr-FR')} parcelles · ${coherence.concordantes.toLocaleString('fr-FR')} concordantes`}
-                    </div>
-                    {coherence.absentes > 0 && coherence.attente === 0 && (
-                      <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
-                    )}
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Géocodage</div>
-                    <div className="text-2xl font-semibold text-blue-950">
-                      {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
-                    </div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      {!geoStatus ? 'en attente'
-                        : geoStatus.termine
-                          ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
-                          : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
-                    <MapIcon className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950">Carte interactive</h3>
-                    <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
-                    <div className="ml-auto flex items-center gap-3">
-                      {geoStatus && !geoStatus.termine && (
-                        <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                          <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
-                        </span>
-                      )}
-                      {/* Les contours arrivent AVEC le géocodage : même endpoint,
-                          mêmes communes, mêmes références. Ne pas les redissocier. */}
-                      {contours && contours.size > 0 && (
-                        <span className="flex items-center gap-2 text-xs text-stone-600">
-                          <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: '#A01040', opacity: 0.55 }} />
-                          {contours.size.toLocaleString('fr-FR')} contour(s) tracé(s)
-                          <span className="text-stone-400">— décochez la couche pour les masquer</span>
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
-                  <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
-                    Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
-                    {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les lots détenus sur la parcelle.
-                    {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
-                    {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
-                    {geoStatus?.termine && geoStatus.trouvees < (geoStatus.demandees || 0) && (
-                      <span className="text-amber-700"> {((geoStatus.demandees || 0) - geoStatus.trouvees).toLocaleString('fr-FR')} référence(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
-                    )}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
-                      <BarChart3 className="w-4 h-4 text-blue-950" />
-                      <h3 className="font-semibold text-blue-950">
-                        {stats.depts.length > 1 ? `Répartition par département (${stats.depts.length})` : 'Département'}
-                      </h3>
-                    </div>
-                    <div className="p-4 space-y-3">
-                      {stats.depts.map((d) => (
-                        <div key={d.nom}>
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="font-medium text-blue-950">{d.nom}</span>
-                            <span className="text-sm text-stone-600">{d.count.toLocaleString('fr-FR')} • {d.surface.toLocaleString('fr-FR')} m²</span>
-                          </div>
-                          <div className="w-full bg-stone-100 rounded-full h-3 overflow-hidden">
-                            <div className="h-full bg-blue-950 rounded-full" style={{ width: `${d.pct}%` }} />
-                          </div>
-                          <div className="text-right text-xs text-blue-950 font-medium mt-0.5">{d.pct}%</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
-                      <MapPin className="w-4 h-4 text-blue-950" />
-                      <h3 className="font-semibold text-blue-950">
-                        {showAllCommunes ? `Communes (${stats.communes.length})` : `Top 10 communes (sur ${stats.communes.length})`}
-                      </h3>
-                    </div>
-                    <div className="p-4">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-stone-200">
-                            <th className="text-left text-xs font-semibold text-stone-500 uppercase pb-2">Commune</th>
-                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Parc.</th>
-                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Surface</th>
-                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">%</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {displayedCommunes.map((c, i) => (
-                            <tr key={c.nom} className="border-b border-stone-100 last:border-0">
-                              <td className="py-2 flex items-center gap-2">
-                                <div className="w-5 h-5 rounded bg-blue-950 text-amber-400 text-[10px] font-semibold flex items-center justify-center">{i + 1}</div>
-                                <span className="text-blue-950">{c.nom}</span>
-                              </td>
-                              <td className="py-2 text-right text-blue-950">{c.count}</td>
-                              <td className="py-2 text-right text-stone-600">{c.surface.toLocaleString('fr-FR')} m²</td>
-                              <td className="py-2 text-right text-blue-950 font-medium">{c.pct}%</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-
-                {coherence.ecarts.length > 0 && (
-                  <div className="bg-white border border-amber-300 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 border-b border-amber-200 bg-amber-50 flex items-center gap-2 flex-wrap">
-                      <AlertCircle className="w-4 h-4 text-amber-700" />
-                      <h3 className="font-semibold text-blue-950">Écarts de contenance entre matrice et plan cadastral</h3>
-                      <span className="text-xs text-amber-800">— {coherence.ecarts.length.toLocaleString('fr-FR')} parcelle(s) à instruire</span>
-                    </div>
-                    <div className="px-6 py-3 text-xs text-stone-600 border-b border-stone-200">
-                      Les deux sources DGFiP ne se synchronisent pas au même rythme. Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Écart qualifié de notable au-delà de 2 m² ou de 1 % de la contenance.
-                    </div>
-                    <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
-                      <table className="w-full text-sm">
-                        <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Référence</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Adresse</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Matrice</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Écart</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Ampleur</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Colorier</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {coherence.ecarts.map((o) => {
-                            const pct = o.contenance ? (100 * o._ecart / Number(o.contenance)) : 0;
-                            return (
-                              <tr key={o.codeParcelle} className="border-b border-stone-100 hover:bg-stone-50">
-                                <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{o.codeParcelle}</td>
-                                <td className="px-4 py-3 text-blue-950">{o.commune}</td>
-                                <td className="px-4 py-3 text-blue-950 text-xs">{o.adresse}</td>
-                                <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{Number(o.contenance || 0).toLocaleString('fr-FR')} m²</td>
-                                <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{Number(o.contenanceCadastre || 0).toLocaleString('fr-FR')} m²</td>
-                                <td className={`px-4 py-3 text-right whitespace-nowrap font-medium ${o._classe === 'notable' ? 'text-amber-800' : 'text-stone-500'}`}>
-                                  {o._ecart > 0 ? '+' : ''}{o._ecart.toLocaleString('fr-FR')} m²
-                                </td>
-                                <td className="px-4 py-3 text-center text-xs">
-                                  <span className={`px-2 py-0.5 rounded border ${o._classe === 'notable'
-                                    ? 'bg-amber-50 text-amber-800 border-amber-300'
-                                    : 'bg-stone-50 text-stone-600 border-stone-300'}`}>
-                                    {o._classe === 'notable' ? 'notable' : 'mineur'} · {pct > 0 ? '+' : ''}{pct.toFixed(1)} %
-                                  </span>
-                                </td>
-                                <td className="px-4 py-3 text-center">
-                                  {lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle)) && (
-                                    <a href={lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle))} target="_blank" rel="noreferrer"
-                                      title="Ouvre PAINT pour confronter l'écart au plan, parcelle déjà coloriée"
-                                      className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-
-                {/* ------------------------------------------------------------
-                    PLAN À LA CARTE — commune, puis sections en accordéon.
-                    La commune est VERROUILLANTE : le service ne sert qu'une
-                    emprise, donc un plan ne porte que sur une commune. Le code
-                    INSEE est affiché parce qu'il départage les homonymes, comme
-                    dans le classeur. Les sections ne sont qu'un accordéon de
-                    navigation : le panier traverse les sections, une unité
-                    foncière enjambant volontiers une limite de section.
-                    ------------------------------------------------------------ */}
-                {dossierOuvert && (
-                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
-                    <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
-                      <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-3">
-                        <MapPin className="w-4 h-4" style={{ color: '#33838B' }} />
-                        <h3 className="font-semibold text-blue-950">Dossier complet</h3>
-                        <span className="text-sm text-stone-600">
-                          {dossierLignes ? dossierLignes.length : 0} document(s) · {parcelles.length.toLocaleString('fr-FR')} parcelle(s)
-                        </span>
-                        <button onClick={() => setDossierOuvert(false)}
-                          className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
-                      </div>
-                      <div className="px-6 py-3 text-xs text-amber-800 bg-amber-50 border-b border-amber-100">
-                        Un document par volume — sections entières regroupées par 50 parcelles. Chaque parcelle
-                        coûte un extrait officiel colorié (~18 s : service du cadastre à débit limité, calage et
-                        peinture) plus ses vues : la durée estimée figure par ligne. Le document se génère et se
-                        télécharge tout seul dans l'onglet PAINT — la coche suit votre avancement.
-                      </div>
-                      <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3">
-                        <label className="text-xs text-stone-600 whitespace-nowrap" htmlFor="dossierNum">N° de dossier</label>
-                        <input id="dossierNum" type="text" value={dossierNum}
-                          onChange={(e) => setDossierNum(e.target.value)}
-                          placeholder="porté au pied de page de tous les documents (dossier complet, panier, liens unitaires)"
-                          className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
-                      </div>
-                      <div className="overflow-y-auto px-6 py-3">
-                        {(dossierLignes || []).map((lg) => {
-                          const lienOk = !!lienDossierCommune(lg);
-                          const aContour = lg.refs.some((r) => contours?.get(r));
-                          return (
-                            <div key={lg.cle} className="flex items-center gap-3 py-2 border-b border-stone-100">
-                              <input type="checkbox" checked={dossierFaits.has(lg.cle)}
-                                onChange={() => basculerDossierFait(lg.cle)}
-                                title="Fait / à faire" className="accent-teal-700" />
-                              <div className="flex-1 min-w-0">
-                                <span className={dossierFaits.has(lg.cle) ? 'text-stone-400' : 'text-blue-950 font-medium'}>
-                                  {dossierFaits.has(lg.cle) && <span style={{ color: '#33838B' }}>✓ </span>}{lg.nom}
-                                  {lg.volume && <span className="font-normal text-stone-500"> — volume {lg.volume.replace('/', ' de ')}</span>}
-                                </span>
-                                <span className="text-stone-400 text-xs ml-2">({lg.insee})</span>
-                                {!aContour && contours && (
-                                  <div className="text-xs" style={{ color: '#A01040' }}>Aucun contour pour ce volume — plan centré sur une parcelle, sans colorisation.</div>
-                                )}
-                                {!lienOk && contours && aContour && (
-                                  <div className="text-xs" style={{ color: '#A01040' }}>Volume à cheval sur deux zones coniques conformes : document impossible d'un tenant.</div>
-                                )}
-                              </div>
-                              <span className="text-xs text-stone-600 whitespace-nowrap">{lg.nb.toLocaleString('fr-FR')} parc. · {contenanceNotariale(lg.surface)}</span>
-                              <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(lg.nb)}</span>
-                              <button onClick={() => genererDossierCommune(lg)}
-                                disabled={!contours || !lienOk}
-                                className="px-3 py-1.5 text-xs font-semibold text-white rounded-lg disabled:opacity-40"
-                                style={{ backgroundColor: '#33838B' }}>
-                                Générer
-                              </button>
-                            </div>
-                          );
-                        })}
-                        {!contours && (
-                          <div className="text-xs text-stone-500 py-3">Les contours se chargent avec le relevé — patientez, les boutons s'activeront d'eux-mêmes.</div>
-                        )}
-                      </div>
-                      <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
-                        {dossierFaits.size} / {dossierLignes ? dossierLignes.length : 0} document(s) généré(s)
-                      </div>
-                    </div>
-                  </div>
-                )}
-                {carteOuverte && (
-                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
-                    <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
-
-                      <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-3">
-                        <MapPin className="w-4 h-4" style={{ color: '#A01040' }} />
-                        <h3 className="font-semibold text-blue-950">Plan à la carte</h3>
-                        {carteCommuneObj && (
-                          <span className="text-sm text-stone-600">
-                            {carteCommuneObj.nom} <span className="text-stone-400">({carteCommuneObj.insee})</span>
-                          </span>
-                        )}
-                        {carteCommuneObj && carteGroupes.length > 1 && (
-                          <button onClick={() => { setCarteCommune(null); setCarteSel(new Set()); }}
-                            className="text-xs underline text-blue-900">changer de commune</button>
-                        )}
-                        <button onClick={() => setCarteOuverte(false)}
-                          className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
-                      </div>
-
-                      {!contours && (
-                        <div className="px-6 py-2 text-xs text-amber-800 bg-amber-50 border-b border-amber-200">
-                          ⚠ Contours non chargés : la colorisation et le choix de l'échelle en dépendent. Lancer le géocodage d'abord.
-                        </div>
-                      )}
-                      {melangeDesTitres && (
-                        <div className="px-6 py-2 text-xs text-blue-900 bg-blue-50 border-b border-blue-200">
-                          Sélection prise dans le périmètre des titres de droit retenus, propriété et gestion mêlées.
-                        </div>
-                      )}
-
-                      {/* ÉTAPE 1 — la commune */}
-                      {!carteCommuneObj && (
-                        <div className="flex-1 overflow-y-auto">
-                          <div className="px-6 py-3 border-b border-stone-100">
-                            <input value={qCarteCommune} onChange={(e) => setQCarteCommune(e.target.value)}
-                              placeholder="Rechercher une commune..."
-                              className="w-full px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
-                            <div className="text-xs text-stone-500 mt-2">
-                              {carteGroupes.length.toLocaleString('fr-FR')} commune(s) au relevé. Un plan ne peut porter que sur une seule.
-                            </div>
-                          </div>
-                          {carteGroupes
-                            .filter((c) => !qCarteCommune || normTexte(`${c.nom} ${c.insee}`).includes(normTexte(qCarteCommune)))
-                            .map((c) => (
-                              <button key={c.insee} onClick={() => choisirCommuneCarte(c)}
-                                className="w-full text-left px-6 py-3 border-b border-stone-100 hover:bg-stone-50 flex items-baseline gap-3">
-                                <span className="font-medium text-blue-950">{c.nom}</span>
-                                <span className="text-xs text-stone-400">{c.insee}</span>
-                                <span className="ml-auto text-xs text-stone-600">
-                                  {c.nb.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(c.surface)}
-                                </span>
-                              </button>
-                            ))}
-                        </div>
-                      )}
-
-                      {/* ÉTAPE 2 — sections en accordéon, panier traversant */}
-                      {carteCommuneObj && (
-                        <div className="flex-1 overflow-y-auto">
-                          {carteCommuneObj.sectionsTriees.map((s) => {
-                            const deplie = carteDepliees.has(s.cle);
-                            const cochees = s.lignes.filter((l) => carteSel.has(l.ref)).length;
-                            return (
-                              <div key={s.cle} className="border-b border-stone-100">
-                                <div className="px-6 py-2 flex items-center gap-3 bg-stone-50">
-                                  <input type="checkbox" checked={cochees === s.lignes.length && cochees > 0}
-                                    onChange={(e) => cocherSectionCarte(s, e.target.checked)}
-                                    title="Toute la section" />
-                                  <button onClick={() => basculerSectionCarte(s.cle)}
-                                    className="flex-1 text-left flex items-baseline gap-2">
-                                    <span className="text-stone-400 text-xs">{deplie ? '▾' : '▸'}</span>
-                                    <span className="font-medium text-blue-950">Section {s.cle}</span>
-                                    <span className="text-xs text-stone-500">
-                                      {s.lignes.length.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(s.surface)}
-                                    </span>
-                                    {cochees > 0 && (
-                                      <span className="ml-auto text-xs font-semibold" style={{ color: '#A01040' }}>
-                                        {cochees} cochée(s)
-                                      </span>
-                                    )}
-                                  </button>
-                                </div>
-                                {deplie && s.lignes.map((l) => (
-                                  <label key={l.ref}
-                                    className="px-6 py-1.5 flex items-center gap-3 text-sm hover:bg-stone-50 cursor-pointer">
-                                    <input type="checkbox" checked={carteSel.has(l.ref)}
-                                      onChange={() => basculerParcelleCarte(l.ref)} />
-                                    <span className="font-medium text-blue-950 w-16">n° {l.numero}</span>
-                                    <span className="text-xs text-stone-500 flex-1 truncate">{l.adresse || '—'}</span>
-                                    {!contours?.get(l.ref) && (
-                                      <span className="text-xs text-amber-700">sans contour</span>
-                                    )}
-                                    <span className="text-xs text-stone-600">{contenanceNotariale(l.m2)}</span>
-                                  </label>
-                                ))}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-
-                      {/* LE PANIER — visible en permanence, échelle prévisionnelle comprise */}
-                      {carteCommuneObj && (
-                        <div className="px-6 py-3 border-t border-stone-200 bg-white rounded-b-xl">
-                          <div className="flex items-center gap-3 flex-wrap text-sm">
-                            <span className="font-semibold text-blue-950">
-                              {carteRefs.length.toLocaleString('fr-FR')} parcelle(s)
-                            </span>
-                            <span className="text-stone-600">{contenanceNotariale(carteSurface)}</span>
-                            {carteApercu && carteApercu.mesurable && (
-                              <span className="text-xs px-2 py-0.5 rounded border"
-                                style={carteApercu.deborde
-                                  ? { color: '#92400e', backgroundColor: '#fffbeb', borderColor: '#fde68a' }
-                                  : { color: '#0F2238', backgroundColor: '#f5f5f4', borderColor: '#e7e5e4' }}>
-                                {carteApercu.deborde
-                                  ? `emprise ${carteApercu.largeur} × ${carteApercu.hauteur} m — ne tient pas au 1/5000`
-                                  : `1/${carteApercu.echelle} · ${carteApercu.format.replace('|', ' ')} · ${carteApercu.largeur} × ${carteApercu.hauteur} m`}
-                              </span>
-                            )}
-                            {carteRefs.length > 0 && (
-                              <button onClick={() => setCarteSel(new Set())}
-                                className="text-xs underline text-stone-500">tout décocher</button>
-                            )}
-                            <button onClick={() => genererCarte('plan')}
-                              disabled={!carteRefs.length || !contours || (carteApercu && carteApercu.horsZone)}
-                              className="ml-auto px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                              style={{ backgroundColor: '#A01040' }}>
-                              Générer le plan
-                            </button>
-                            {/* ⚠ Ces deux boutons exigent AU MOINS UN CONTOUR : sans poly ni pt,
-                                la vue aérienne n'a pas d'emprise à commander et PAINT ne
-                                pourrait qu'afficher un message d'échec. */}
-                            <button onClick={() => genererCarte('ortho')}
-                              disabled={!carteRefs.length || !contours || !carteRefs.some((r) => contours?.get(r))}
-                              title="Vue aérienne IGN de la sélection, avec un repère sur l'ensemble"
-                              className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                              style={{ backgroundColor: '#0F2238' }}>
-                              Vue aérienne
-                            </button>
-                            <button onClick={() => genererCarte('doc')}
-                              disabled={!carteRefs.length || !contours || !carteRefs.some((r) => contours?.get(r))}
-                              title="Un seul PDF : le plan cadastral de la sélection, puis la vue aérienne et la carte de situation"
-                              className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                              style={{ backgroundColor: '#33838B' }}>
-                              Document
-                            </button>
-                          </div>
-                          {carteApercu && carteApercu.horsZone && (
-                            <div className="text-xs text-amber-800 mt-2">
-                              ⚠ Sélection hors métropole ou à cheval sur deux zones coniques conformes : le plan ne peut pas être calé. Restreindre la sélection.
-                            </div>
-                          )}
-                          {carteApercu && carteApercu.sansContour > 0 && (
-                            <div className="text-xs text-amber-800 mt-2">
-                              ⚠ {carteApercu.sansContour} parcelle(s) sans contour au plan : elles figureront au tableau mais ne seront pas coloriées.
-                            </div>
-                          )}
-                          {carteApercu && carteApercu.minuscules && carteApercu.minuscules.length > 0 && (
-                            <div className="text-xs text-amber-800 mt-2">
-                              ⚠ {carteApercu.minuscules.length} parcelle(s) sous {carteApercu.seuilMm} mm au 1/{carteApercu.echelle} —{' '}
-                              {carteApercu.minuscules.slice(0, 6).map((c) => {
-                                const sn = sectionEtNumero(c.ref);
-                                return (sn ? sn.section + ' ' + sn.numero : c.ref) + ' (' + c.mm.toFixed(1) + ' mm)';
-                              }).join(', ')}
-                              {carteApercu.minuscules.length > 6 ? '…' : ''}. Elles figureront au tableau mais seront
-                              indiscernables sur le plan. Envisager un plan séparé à plus grande échelle.
-                            </div>
-                          )}
-                          {carteApercu && carteApercu.deborde && (
-                            <div className="text-xs text-amber-800 mt-2">
-                              ⚠ Au-delà du 1/5000, plafond du service : l'extrait cadastral n'est plus le bon document. Scinder la sélection en deux plans.
-                            </div>
-                          )}
-                          <div className="text-xs text-stone-500 mt-2">
-                            Contenances tirées de la matrice, jamais de l'aire mesurée sur le contour. Ligne de total à partir de deux parcelles.
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
-                    <MapPin className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950">Détail des parcelles</h3>
-                    <input value={qParcelles} onChange={(e) => setQParcelles(e.target.value)}
-                      placeholder="Rechercher : commune, adresse, référence, droit..."
-                      className="ml-2 px-3 py-1.5 text-sm border border-stone-300 rounded-lg w-72 focus:outline-none focus:border-blue-900" />
-                    {qParcelles && (
-                      <span className="text-xs text-stone-500">{parcellesAffichees.length.toLocaleString('fr-FR')} sur {parcelles.length.toLocaleString('fr-FR')}</span>
-                    )}
-                    <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Fichiers DGFiP des personnes morales — millésime 2025</span>
-                    <button onClick={ouvrirCarte} disabled={!parcelles.length}
-                      title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
-                      className="ml-auto px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                      style={{ backgroundColor: '#A01040' }}>
-                      Plan à la carte
-                    </button>
-                    <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
-                      title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
-                      className="px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                      style={{ backgroundColor: '#33838B' }}>
-                      Dossier complet
-                    </button>
-                  </div>
-                  <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
-                        <tr>
-                          <EnTete label="#" champ="" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Référence" champ="codeParcelle" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Commune" champ="commune" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Département" champ="departement" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Adresse" champ="adresse" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Surface" champ="contenance" tri={triParcelles} onTri={setTriParcelles} align="text-right" />
-                          <EnTete label="Nature" champ="natureCulture" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Droit" champ="codeDroit" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Unité" champ="_unite" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Vue aérienne" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Colorier" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Annoté" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                          <EnTete label="Document" champ="" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {parcellesAffichees.map((p, i) => {
-                          const link = lienVueAerienne(p.codeParcelle, p.commune,
-                              contours?.get(p.codeParcelle), p.contenance, null, p.adresse)
-                            || buildSatelliteLink(p.coordonnees);
-                          return (
-                            <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
-                              <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
-                              <td className="px-4 py-3 text-blue-950">{p.commune}</td>
-                              <td className="px-4 py-3 text-stone-600">{p.departement}</td>
-                              <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
-                              <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
-                              <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
-                              <td className="px-4 py-3 text-stone-600 text-xs">{p.codeDroit}</td>
-                              <td className="px-4 py-3 text-center text-xs">
-                                {(() => {
-                                  const n = unitesF?.numero.get(p.codeParcelle);
-                                  if (!n) return <span className="text-stone-400">—</span>;
-                                  const u = unitesF.unites[n - 1];
-                                  const groupe = u.membres.length > 1;
-                                  const lienU = groupe
-                                    ? lienPaintUnite(u.membres, surfaceParRef, contours, p.commune, adresseParRef)
-                                    : null;
-                                  const pastille = (
-                                    <span className={groupe ? 'px-1.5 py-0.5 rounded border font-medium' : 'text-stone-500'}
-                                      style={groupe ? { backgroundColor: '#FDF2F6', color: '#A01040', borderColor: '#E8B9CB' } : undefined}>
-                                      {n}{groupe ? ` · ${u.membres.length} p.` : ''}
-                                    </span>
-                                  );
-                                  if (!lienU) {
-                                    return (
-                                      <span title={groupe
-                                        ? `Unité de ${u.membres.length} parcelles : ${u.membres.join(', ')}`
-                                        : 'Parcelle isolée, sans mitoyenneté dans ce portefeuille'}>
-                                        {pastille}
-                                      </span>
-                                    );
-                                  }
-                                  return (
-                                    <>
-                                      <a href={lienU} target="_blank" rel="noreferrer"
-                                        title={`Éditer le plan de l'unité entière : ${u.membres.length} parcelles coloriées, `
-                                          + `désignation et total au cartouche — ${u.membres.join(', ')}`}>
-                                        {pastille}
-                                      </a>
-                                      {/* ⚠ TROU COMBLÉ : la cellule n'offrait QUE le plan cadastral, alors que
-                                        la ligne par parcelle porte quatre liens. L'entrée la plus
-                                        naturelle vers le multi-parcelles était donc la plus pauvre.
-                                        Mêmes suffixes que le plan à la carte, aucun calcul nouveau. */}
-                                      <div className="mt-0.5 flex gap-1.5 justify-center">
-                                        <a href={`${lienU}&fond=ortho&trace=rond&cadre=contexte`} target="_blank" rel="noreferrer"
-                                          title="Vue aérienne de l'unité entière, un repère sur l'ensemble"
-                                          className="text-[10px] underline" style={{ color: '#0F2238' }}>aérienne</a>
-                                        <a href={`${lienU}&doc=1${suffixeDossier}${suffixeBati(u.membres, batiParRef)}${suffixePP(u.membres, contours)}`} target="_blank" rel="noreferrer"
-                                          title="Document deux pages de l'unité entière"
-                                          className="text-[10px] underline" style={{ color: '#33838B' }}>doc</a>
-                                      </div>
-                                    </>
-                                  );
-                                })()}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {link && (
-                                  <a href={link} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 underline text-xs font-medium">Voir</a>
-                                )}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle)) && (
-                                  <a href={lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle))} target="_blank" rel="noreferrer"
-                                    title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
-                                    className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
-                                )}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse) && (
-                                  <a href={lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse)} target="_blank" rel="noreferrer"
-                                    title="Plan colorié ET annoté : désignation cadastrale et contenance en hectares, ares, centiares portées sous le titre"
-                                    className="underline text-xs font-semibold" style={{ color: '#0F2238' }}>Annoté</a>
-                                )}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) && (
-                                  <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) + suffixeDossier} target="_blank" rel="noreferrer"
-                                    title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
-                                    className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
-                    <Building2 className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950">Détail des locaux</h3>
-                    <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Volet bâti — millésime {millesime}</span>
-                    <input value={qLocaux} onChange={(e) => setQLocaux(e.target.value)}
-                      placeholder="Rechercher : commune, adresse, référence..."
-                      className="ml-2 px-3 py-1.5 text-sm border border-stone-300 rounded-lg w-64 focus:outline-none focus:border-blue-900" />
-                    <div className="flex rounded-lg overflow-hidden border border-stone-300 text-xs">
-                      <button onClick={() => setLocauxGroupes(true)}
-                        className={`px-3 py-1.5 ${locauxGroupes ? 'bg-blue-950 text-amber-400 font-medium' : 'bg-white text-stone-600'}`}>
-                        par immeuble
-                      </button>
-                      <button onClick={() => setLocauxGroupes(false)}
-                        className={`px-3 py-1.5 ${!locauxGroupes ? 'bg-blue-950 text-amber-400 font-medium' : 'bg-white text-stone-600'}`}>
-                        lot par lot
-                      </button>
-                    </div>
-                    {!locauxLoading && locaux.length > 0 && (
-                      <span className="ml-auto text-xs text-stone-500">Inclus dans l'export Excel, onglet « Locaux »</span>
-                    )}
-                  </div>
-
-                  {locauxLoading && (
-                    <div className="px-6 py-8 flex items-center justify-center gap-2 text-sm text-blue-950">
-                      <Loader2 className="w-4 h-4 text-amber-500 animate-spin" />Relevé du bâti en cours...
-                    </div>
-                  )}
-
-                  {locauxError && (
-                    <div className="px-6 py-6 text-sm text-red-700">{locauxError}</div>
-                  )}
-
-                  {!locauxLoading && !locauxError && locaux.length === 0 && (
-                    <div className="px-6 py-8 text-center text-sm text-stone-600">
-                      Aucun local bâti au nom de cette personne morale.
-                      <div className="text-xs text-stone-500 mt-1">Le fichier des locaux ne comporte ni surface ni numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte.</div>
-                    </div>
-                  )}
-
-                  {!locauxLoading && locaux.length > 0 && (
-                    <>
-                      <div className="px-6 py-3 border-b border-stone-200 text-xs text-stone-500">
-                        {locaux.length.toLocaleString('fr-FR')} lot{locaux.length > 1 ? 's' : ''} sur {immeubles.toLocaleString('fr-FR')} parcelle{immeubles > 1 ? 's' : ''} bâtie{immeubles > 1 ? 's' : ''}.
-                        {qLocaux && ` Filtre actif : ${(locauxGroupes ? immeublesAffiches.length : locauxAffiches.length).toLocaleString('fr-FR')} ligne(s) affichée(s).`}
-                        {' '}Un même lot peut figurer deux fois à des titres de droit différents.
-                      </div>
-                      <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
-                        <table className="w-full text-sm">
-                          <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
-                            {locauxGroupes ? (
-                              <tr>
-                                <EnTete label="#" champ="" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Lots" champ="nbLots" tri={triLocaux} onTri={setTriLocaux} align="text-right" />
-                                <EnTete label="Bâtiments" champ="batimentsTxt" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
-                                <EnTete label="Titres" champ="titresTxt" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Extrait" champ="" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
-                              </tr>
-                            ) : (
-                              <tr>
-                                <EnTete label="#" champ="" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Bât." champ="batiment" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
-                                <EnTete label="Entrée" champ="entree" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
-                                <EnTete label="Niv." champ="niveau" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
-                                <EnTete label="Porte" champ="porte" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
-                                <EnTete label="Droit" champ="codeDroit" tri={triLocaux} onTri={setTriLocaux} />
-                              </tr>
-                            )}
-                          </thead>
-                          <tbody>
-                            {locauxGroupes
-                              ? immeublesAffiches.map((im, i) => (
-                                <tr key={(im.codeParcelle || '') + '-g' + i} className="border-b border-stone-100 hover:bg-stone-50">
-                                  <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{im.codeParcelle}</td>
-                                  <td className="px-4 py-3 text-blue-950">{im.commune}</td>
-                                  <td className="px-4 py-3 text-blue-950 text-xs">{im.adresse}</td>
-                                  <td className="px-4 py-3 text-right text-blue-950 font-medium whitespace-nowrap">{im.nbLots.toLocaleString('fr-FR')}</td>
-                                  <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
-                                  <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
-                                  <td className="px-4 py-3 text-center">
-                                    {lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle)) && (
-                                      <a href={lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle))} target="_blank" rel="noreferrer"
-                                        title="Ouvre PAINT : extrait généré et parcelle coloriée"
-                                        className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
-                                    )}
-                                  </td>
-                                </tr>
-                              ))
-                              : locauxAffiches.map((l, i) => (
-                                <tr key={(l.codeParcelle || '') + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
-                                  <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
-                                  <td className="px-4 py-3 text-blue-950">{l.commune}</td>
-                                  <td className="px-4 py-3 text-blue-950 text-xs">{l.adresse}</td>
-                                  <td className="px-4 py-3 text-center text-blue-950">{l.batiment}</td>
-                                  <td className="px-4 py-3 text-center text-blue-950">{l.entree}</td>
-                                  <td className="px-4 py-3 text-center text-blue-950">{l.niveau}</td>
-                                  <td className="px-4 py-3 text-center text-blue-950">{l.porte}</td>
-                                  <td className="px-4 py-3 text-stone-600 text-xs">{l.codeDroit}</td>
-                                </tr>
-                              ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-        )}
+  <div class="hbar">
+    <div class="pagenav" id="pagenav" style="display:none">
+      <button class="hbtn" id="prev">‹</button>
+      <span id="pagelbl">— / —</span>
+      <button class="hbtn" id="next">›</button>
+    </div>
+    <button class="hbtn" id="rotate" title="Pivoter 90° (sens horaire)" style="display:none">↻</button>
+    <button class="hbtn" id="zoomout" title="Dézoomer" style="display:none">−</button>
+    <span id="zoomlbl" style="display:none;font-size:13px;min-width:42px;text-align:center">100%</span>
+    <button class="hbtn" id="zoomin" title="Zoomer" style="display:none">+</button>
+    <button class="hbtn" id="genbtn" title="Générer un extrait depuis des références" style="display:none">🗺 Références</button>
+    <button class="hbtn" id="pngbtn" disabled>⬇ PNG</button>
+    <button class="hbtn primary" id="pdfbtn" disabled>⬇ PDF</button>
+    <button class="hbtn" id="brutbtn" title="Diagnostic : enregistre le PDF exactement tel que PAINT l'a reçu du service, octet pour octet — la pièce qui manquait à chaque rendu fautif" style="display:none">💾 PDF reçu</button>
+    <button class="hbtn primary" id="docbtn" title="Un seul PDF : le plan cadastral colorié puis la vue aérienne" style="display:none">⬇ Document 2 pages</button>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <div class="grp">
+      <h3>Outils</h3>
+      <div class="tools" id="toolbox">
+        <button class="tool active" data-tool="fill">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 12 12 5l7 7-7 7z"/><path d="M19 13c1.2 1.4 2 2.5 2 3.5a2 2 0 0 1-4 0c0-1 .8-2.1 2-3.5z" fill="currentColor" stroke="none"/></svg>
+          Remplir
+        </button>
+        <button class="tool" data-tool="brush">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 20s2-1 4-3 4-5 4-5"/><path d="M14 4l6 6-7 4-3-3z"/></svg>
+          Pinceau
+        </button>
+        <button class="tool" data-tool="erase">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 16 14 6l5 5-7 7H8z"/><path d="M6 20h12"/></svg>
+          Gomme
+        </button>
+        <button class="tool" data-tool="text">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 6h14M12 6v13M9 19h6"/></svg>
+          Texte
+        </button>
       </div>
     </div>
-  );
+
+    <div class="grp">
+      <h3>Couleur</h3>
+      <div class="swatches" id="swatches"></div>
+      <div class="colorrow">
+        <input type="color" id="picker" value="#FF982D">
+        <label for="picker">Personnalisée</label>
+      </div>
+    </div>
+
+    <div class="grp">
+      <h3>Parcelles par numéro</h3>
+      <div class="numrow">
+        <input id="numinput" type="text" placeholder="Ex. 123, 124, 45" autocomplete="off">
+      </div>
+      <button class="findbtn" id="findbtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        Trouver et coloriser
+      </button>
+      <div class="status" id="status"></div>
+      <p class="legend-hint" style="margin-top:8px">Séparez les numéros par une virgule. La couleur sélectionnée ci-dessus est appliquée. Le 1<sup>er</sup> appel charge l'OCR (quelques secondes).</p>
+    </div>
+
+    <div class="grp">
+      <div class="slider">
+        <label>Opacité <span id="opaval">45%</span></label>
+        <input type="range" id="opacity" min="10" max="100" value="45">
+      </div>
+      <div class="slider">
+        <label>Sensibilité des bords <span id="thrval">42</span></label>
+        <input type="range" id="threshold" min="20" max="160" value="100">
+      </div>
+      <div class="slider" id="sizewrap">
+        <label>Taille pinceau / gomme <span id="szval">14 px</span></label>
+        <input type="range" id="brushsize" min="3" max="60" value="14">
+      </div>
+      <div class="slider" id="fontwrap">
+        <label>Taille du texte <span id="fsval">36 px</span></label>
+        <input type="range" id="fontsize" min="12" max="100" value="36">
+      </div>
+    </div>
+
+    <div class="grp">
+      <h3>Actions</h3>
+      <div class="tools">
+        <button class="tool" id="undo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 7 4 12l5 5"/><path d="M4 12h11a5 5 0 0 1 0 10h-1"/></svg>Annuler</button>
+        <button class="tool" id="redo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M15 7l5 5-5 5"/><path d="M20 12H9a5 5 0 0 0 0 10h1"/></svg>Rétablir</button>
+        <button class="tool" id="clear" style="grid-column:span 2;color:#b23b3b;border-color:#f0d4d4"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M5 7h14M9 7V5h6v2M8 7l1 13h6l1-13"/></svg>Tout effacer</button>
+      </div>
+    </div>
+
+    <div class="grp">
+      <h3>Légende</h3>
+      <div id="legend"></div>
+      <p class="legend-hint">Nommez une teinte (ex. « Vendeur », « Acquéreur »). Cochez « Inclure » à l'export pour ajouter l'encart de légende sur le plan.</p>
+      <label style="display:flex;align-items:center;gap:7px;font-size:12px;color:var(--ink);margin-top:8px;cursor:pointer">
+        <input type="checkbox" id="inclegend" style="accent-color:var(--teal-deep)"> Inclure la légende à l'export
+      </label>
+      <select id="legendpos" style="width:100%;margin-top:9px;border:1.5px solid var(--line);border-radius:8px;padding:7px 8px;font-size:12px;font-family:inherit;color:var(--ink);background:#fff">
+        <option value="auto">Sous « cadastre.gouv.fr » (auto)</option>
+        <option value="tl">Coin haut gauche</option>
+        <option value="tr">Coin haut droit</option>
+        <option value="bl">Coin bas gauche</option>
+        <option value="br">Coin bas droit</option>
+      </select>
+    </div>
+  </aside>
+
+  <div class="stage" id="stage">
+    <div class="scroller">
+      <div id="cwrap">
+        <canvas id="base"></canvas>
+        <canvas id="overlay"></canvas>
+        <div id="anno"></div>
+      </div>
+    </div>
+
+    <div id="drop">
+      <div class="dropcard">
+        <svg class="pen" viewBox="0 0 78 78" fill="none">
+          <path d="M39 8 L52 40 L39 70 L26 40 Z" fill="#6DD5DC"/>
+          <circle cx="39" cy="44" r="4" fill="#E3CC7A"/>
+        </svg>
+        <h2>Charger un plan cadastral</h2>
+        <p style="font-size:13px;margin:2px 0 0">Trois façons d'obtenir un plan — puis cliquez dans une parcelle pour la coloriser.</p>
+
+        <div class="methods" id="genform" onclick="event.stopPropagation()">
+
+          <div class="method">
+            <div class="method-head"><span class="num">1</span> Par adresse</div>
+            <div class="gen-grid">
+              <label style="grid-column:1/-1">Commune
+                <div class="ac-wrap" id="g_commune_wrap">
+                  <input id="g_commune_nom" placeholder="Tapez le nom (ex. Saint-Omer)" autocomplete="off">
+                  <div class="ac-list" id="g_commune_list"></div>
+                </div>
+                <div id="g_commune_mark"></div>
+              </label>
+              <label style="grid-column:1/-1">Adresse
+                <div class="ac-wrap" id="g_adr_wrap">
+                  <input id="g_adr_nom" placeholder="Choisissez la commune, ou dictez ci-dessous" autocomplete="off" disabled>
+                  <div class="ac-list" id="g_adr_list"></div>
+                </div>
+                <div id="g_addr_mark" style="font-size:11px;margin-top:2px"></div>
+              </label>
+            </div>
+            <div class="dictee-or"><span>ou</span></div>
+            <button type="button" class="dictee-btn" id="dicteebtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span class="lbl">Dicter la ville et l'adresse</span></button>
+            <button class="gen-btn" id="genrun_adr">🗺 Générer depuis l'adresse</button>
+          </div>
+
+          <div class="method">
+            <div class="method-head"><span class="num">2</span> Par références cadastrales</div>
+            <div class="gen-grid">
+              <label style="grid-column:1/-1">Commune
+                <div class="ac-wrap" id="g2_commune_wrap">
+                  <input id="g2_commune_nom" placeholder="Tapez le nom (ex. Marcq-en-Barœul)" autocomplete="off">
+                  <div class="ac-list" id="g2_commune_list"></div>
+                </div>
+                <div id="g2_commune_mark"></div>
+              </label>
+              <label>Préfixe<input id="g_prefixe" placeholder="auto" maxlength="3"></label>
+              <label>Section<input id="g_section" placeholder="AV" maxlength="2"></label>
+              <label>Parcelle<input id="g_parcelle" placeholder="1" maxlength="4"></label>
+              <label>Échelle
+                <select id="g_echelle">
+                  <option>200</option><option>500</option><option>650</option>
+                  <option selected>1000</option><option>1250</option><option>1500</option>
+                  <option>2000</option><option>2500</option><option>4000</option><option>5000</option>
+                </select>
+              </label>
+              <label style="grid-column:span 2">Format
+                <select id="g_format">
+                  <option value="A4|portrait" selected>A4 portrait</option>
+                  <option value="A4|paysage">A4 paysage</option>
+                  <option value="A3|portrait">A3 portrait</option>
+                  <option value="A3|paysage">A3 paysage</option>
+                </select>
+              </label>
+            </div>
+            <div class="method-hint">Préfixe laissé vide = détecté automatiquement (utile pour les communes fusionnées). L'échelle et le format s'appliquent aussi à la génération par adresse.</div>
+            <button class="gen-btn" id="genrun_ref">🗺 Générer depuis les références</button>
+          </div>
+
+          <div class="gen-status" id="genstatus"></div>
+
+          <div class="method">
+            <div class="method-head"><span class="num">3</span> Par glissé de plan</div>
+            <div class="dropzone" id="dropzone">Glissez un <strong>PDF</strong> ici, ou cliquez pour choisir un fichier.</div>
+            <div class="method-hint">🔒 Traitement 100&nbsp;% local — aucun fichier n'est envoyé sur un serveur.</div>
+          </div>
+
+        </div>
+        <p class="privacy" style="margin-top:12px">Les méthodes ① et ② récupèrent l'extrait officiel via une fonction serveur (cadastre.gouv.fr).</p>
+      </div>
+    </div>
+
+    <div class="hint-bar" id="hintbar"></div>
+    <div class="spin" id="spin"><div class="ring"></div><span id="spinmsg">Lecture du plan…</span></div>
+  </div>
+</main>
+
+<input type="file" id="fileinput" accept="application/pdf">
+<div id="toolring"><div class="badge"></div></div>
+
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+/* ---------- État ---------- */
+// Palette. Premier élément = couleur active par défaut.
+// CONVENTION DE COULEURS DU PLAN CADASTRAL (rappelée par JFD, notaire) :
+//     BLANC        le non bâti
+//     JAUNE-ORANGE le bâti
+//     BLEU         l'eau
+// Le plan est donc DÉJÀ coloré : toute teinte de colorisation qui reprend l'une de
+// ces trois familles devient ambiguë sur une pièce remise à un client ou à un
+// confrère. Sont donc exclus de la tête de palette le jaune et l'orange (bâti)
+// AINSI QUE le bleu et le cyan (eau) — y compris le bleu canard de la charte
+// FIDAL, écarté pour cette raison et non par goût.
+// Le CARMIN PROFOND #A01040 passe en tête, sur demande de JFD (registre des rouges).
+// Il a été choisi par MESURE, et non au jugé : composée à 45 % d'opacité, chaque
+// teinte a été comparée au pêche que donne le bâti orange dans les mêmes
+// conditions (distance euclidienne RVB).
+//     orange #FF982D ......  0  -> confusion totale
+//     rouge doux #d35f5f ... 40  -> confusion
+//     rouge vif #E01B24 .... 59  -> limite
+//     framboise #C2185B .... 67  -> limite
+//     carmin #A01040 ....... 76  -> distinct   ← retenu
+// Ne pas « simplifier » en reprenant le rouge doux de l'ancienne palette : il est
+// justement dans la zone de confusion.
+// Toutes les teintes demeurent disponibles — seul l'ordre change.
+// PISTE NON EXPLOITÉE, notée pour plus tard : puisque le plan porte de l'orange et
+// du bleu alors que l'en-tête et le cartouche sont en noir sur blanc, on peut
+// délimiter la CARTE par la boîte englobante des pixels saturés. Ce serait un
+// repère plus robuste que la projection des pixels sombres, déjà mise en échec.
+// Limite : un plan rural sans bâti ni eau n'offre aucun pixel saturé, il faudrait
+// donc conserver un repli.
+const PALETTE = ["#A01040","#C2185B","#7a6fd3","#cf6fb0",
+                 "#33838B","#2F6FB0","#5fb37a","#6DD5DC","#657D96","#0F2238",
+                 "#FF982D","#9C6B3F"];
+const S = {
+  pdf:null, page:1, pageCount:1, ocrCache:null, anchorCache:null, recentrage:null,
+  ortho:null,                  // vue aérienne : { epsg, zz, bbox, cadre, mParPx }
+  couleursAnnot:null,          // teintes du tableau d'annotation, hors légende
+  tool:"fill", color:"#A01040", opacity:.45, threshold:100, brush:14, fontSize:36,
+  zoom:1, rotation:0, drawing:false, lastPt:null,
+  undoStack:[], redoStack:[],
+  notes:[], selNote:null, dragNote:null, dragOff:null,
+  legendLabels:{}, // hex -> texte
+  W:0, H:0
+};
+
+/* ---------- Éléments ---------- */
+const base = document.getElementById("base"), baseCtx = base.getContext("2d",{willReadFrequently:true});
+const overlay = document.getElementById("overlay"), oCtx = overlay.getContext("2d",{willReadFrequently:true});
+const anno = document.getElementById("anno");
+const cwrap = document.getElementById("cwrap");
+const stage = document.getElementById("stage");
+const drop = document.getElementById("drop");
+const hintbar = document.getElementById("hintbar");
+const spin = document.getElementById("spin");
+
+/* ---------- Palette & légende UI ---------- */
+const swatchEl = document.getElementById("swatches");
+PALETTE.forEach((c,i)=>{
+  const d = document.createElement("div");
+  d.className = "sw"+(i===0?" active":""); d.style.background=c; d.dataset.color=c;
+  d.title = c;
+  d.onclick = ()=>setColor(c,d);
+  swatchEl.appendChild(d);
+});
+function setColor(c,el){
+  S.color=c;
+  document.querySelectorAll(".sw").forEach(s=>s.classList.toggle("active",s===el));
+  document.getElementById("picker").value = /^#/.test(c)?c:S.color;
 }
+document.getElementById("picker").oninput = e=>{
+  S.color=e.target.value;
+  document.querySelectorAll(".sw").forEach(s=>s.classList.remove("active"));
+};
+
+function rebuildLegend(){
+  // teintes réellement utilisées dans l'overlay + palette nommée
+  const used = usedColors();
+  const lg = document.getElementById("legend");
+  lg.innerHTML="";
+  if(used.length===0){
+    lg.innerHTML='<p class="legend-hint" style="margin:0">Aucune teinte posée pour l’instant.</p>';
+    return;
+  }
+  used.forEach(hex=>{
+    const row=document.createElement("div"); row.className="legend-item";
+    const dot=document.createElement("div"); dot.className="dot"; dot.style.background=hex;
+    const inp=document.createElement("input");
+    inp.placeholder="Désignation…"; inp.value=S.legendLabels[hex]||"";
+    inp.oninput=()=>S.legendLabels[hex]=inp.value;
+    row.append(dot,inp); lg.appendChild(row);
+  });
+}
+function usedColors(){
+  if(!S.W) return [];
+  const d = oCtx.getImageData(0,0,S.W,S.H).data;
+  // NE RECENSER QUE LES COULEURS DE LA PALETTE, et seulement si elles couvrent
+  // une surface significative.
+  // Deux sources parasitaient la légende : le LISSAGE DES BORDS des polygones
+  // peints, qui crée des dizaines de teintes intermédiaires — le remplissage
+  // scanline, lui, écrivait des pixels exacts —, et le TABLEAU D'ANNOTATION, dont
+  // le fond blanc et le texte bleu nuit sont aussi sur le calque. On obtenait une
+  // quinzaine de champs « Désignation… » au lieu d'un.
+  // Le seuil d'un pixel sur dix mille écarte les traces résiduelles d'une gomme
+  // ou d'un coup de pinceau effacé, sans jamais écarter une parcelle coloriée.
+  const connues = new Set(PALETTE.map((h) => h.toLowerCase()));
+  const perso = document.getElementById("picker");
+  if(perso && perso.value) connues.add(String(perso.value).toLowerCase());
+  // Le tableau d'annotation écrit son texte en bleu nuit, qui appartient à la
+  // palette : sans cette exclusion il produirait une entrée de légende. On ne
+  // l'exclut que si un tableau a effectivement été dessiné, pour ne pas priver
+  // l'utilisateur du bleu nuit s'il en colorie une parcelle.
+  (S.couleursAnnot || []).forEach((h) => connues.delete(String(h).toLowerCase()));
+  const compte = new Map();
+  for(let i=0;i<d.length;i+=4){
+    if(d[i+3]>0){
+      const h = rgbToHex(d[i],d[i+1],d[i+2]).toLowerCase();
+      if(connues.has(h)) compte.set(h, (compte.get(h)||0)+1);
+    }
+  }
+  const seuil = Math.max(50, Math.round(S.W*S.H/10000));
+  return [...compte.entries()].filter(([,n])=>n>=seuil).map(([h])=>h);
+}
+
+/* ---------- Outils ---------- */
+document.querySelectorAll("#toolbox .tool").forEach(t=>{
+  t.onclick=()=>{
+    S.tool=t.dataset.tool;
+    document.querySelectorAll("#toolbox .tool").forEach(x=>x.classList.remove("active"));
+    t.classList.add("active");
+    setToolCursor();
+    document.getElementById("sizewrap").style.display = (S.tool==="brush"||S.tool==="erase")?"block":"none";
+    document.getElementById("fontwrap").style.display = S.tool==="text"?"block":"none";
+    showHint(S.tool==="fill"?"Cliquez dans une parcelle pour la remplir.":
+             S.tool==="brush"?"Maintenez et glissez pour peindre.":
+             S.tool==="erase"?"Glissez pour effacer la couleur.":
+             "Cliquez pour placer une annotation.");
+  };
+});
+/* ---------- Pointeurs thématiques (pinceau / gomme / texte) ---------- */
+const ring=document.getElementById("toolring");
+const ringBadge=ring.querySelector(".badge");
+const G_BRUSH=`<svg viewBox='0 0 24 24' fill='none' stroke='#4E98A0' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'><path d='M4 20s2-1 4-3 4-5 4-5'/><path d='M14 4l6 6-7 4-3-3z'/></svg>`;
+const G_ERASE=`<svg viewBox='0 0 24 24' fill='none' stroke='#16314f' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'><path d='M4 16 14 6l5 5-7 7H8z'/><path d='M6 20h12'/></svg>`;
+const TEXT_SVG=`<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'><path d='M2,4H16L26,14L16,24H2Z' fill='#ffffff' stroke='#16314f' stroke-width='2' stroke-linejoin='round'/><circle cx='7' cy='9' r='1.7' fill='#4E98A0'/><path d='M5,13H13M9,13V19' stroke='#16314f' stroke-width='2' fill='none' stroke-linecap='round'/></svg>`;
+const TEXT_CURSOR=`url("data:image/svg+xml,${encodeURIComponent(TEXT_SVG)}") 25 14, text`;
+
+function setToolCursor(){
+  if(S.tool==="text"){ overlay.style.cursor=TEXT_CURSOR; ring.style.display="none"; }
+  else if(S.tool==="fill"){ overlay.style.cursor="crosshair"; ring.style.display="none"; }
+  else { // pinceau / gomme : curseur natif masqué, anneau dimensionné
+    overlay.style.cursor="none";
+    ring.className=S.tool;
+    ringBadge.innerHTML = S.tool==="brush" ? G_BRUSH : G_ERASE;
+  }
+}
+function moveRing(e){
+  if(S.tool!=="brush" && S.tool!=="erase") return;
+  const r=overlay.getBoundingClientRect();
+  const d=Math.max(8, S.brush*(r.width/S.W));   // taille réelle à l'écran (suit le zoom)
+  ring.style.width=d+"px"; ring.style.height=d+"px";
+  ring.style.left=e.clientX+"px"; ring.style.top=e.clientY+"px";
+  ring.style.display="block";
+}
+overlay.addEventListener("mouseenter",e=>moveRing(e));
+overlay.addEventListener("mouseleave",()=>{ring.style.display="none";});
+
+document.getElementById("opacity").oninput=e=>{S.opacity=e.target.value/100;document.getElementById("opaval").textContent=e.target.value+"%";};
+document.getElementById("threshold").oninput=e=>{S.threshold=+e.target.value;document.getElementById("thrval").textContent=e.target.value;};
+document.getElementById("brushsize").oninput=e=>{S.brush=+e.target.value;document.getElementById("szval").textContent=e.target.value+" px";};
+document.getElementById("fontsize").oninput=e=>{
+  S.fontSize=+e.target.value;
+  document.getElementById("fsval").textContent=e.target.value+" px";
+  if(S.selNote!=null){
+    const n=S.notes.find(n=>n.id==S.selNote);
+    if(n){ n.size=S.fontSize; const el=anno.querySelector(`[data-id="${n.id}"]`); if(el) el.style.fontSize=n.size+"px"; }
+  }
+};
+
+/* ---------- Chargement PDF ---------- */
+
+/* ---------- Autocomplétion commune (geo.api.gouv.fr, vérif temps réel) ---------- */
+let selectedCommune=null, acTimer=null;
+const cNom=()=>document.getElementById("g_commune_nom");
+const cList=()=>document.getElementById("g_commune_list");
+const cMark=()=>document.getElementById("g_commune_mark");
+function acClear(){ cList().innerHTML=""; cList().classList.remove("show"); }
+function acMark(state,txt){ const m=cMark(); m.textContent=txt||""; m.className = state==="ok"?"ac-ok":(state==="bad"?"ac-bad":""); }
+async function acSearch(q){
+  try{
+    const r=await fetch("https://geo.api.gouv.fr/communes?nom="+encodeURIComponent(q)+"&fields=nom,code,codesPostaux,departement&boost=population&limit=7");
+    if(!r.ok) throw 0;
+    return await r.json();
+  }catch(e){ return null; }
+}
+function acRender(list){
+  const el=cList(); el.innerHTML="";
+  if(!list||!list.length){ acClear(); acMark("bad","Aucune commune trouvée"); return; }
+  list.forEach(c=>{
+    const cp=(c.codesPostaux&&c.codesPostaux[0])||"";
+    const dep=c.departement?c.departement.code:"";
+    const it=document.createElement("div");
+    it.className="ac-item";
+    it.innerHTML="<span>"+c.nom+"</span><small>"+dep+(cp?" · "+cp:"")+"</small>";
+    it.onclick=()=>{ selectedCommune={code:c.code,nom:c.nom}; cNom().value=c.nom; acClear(); acMark("ok","✓ "+c.nom+" — INSEE "+c.code); enableAddr(); };
+    el.appendChild(it);
+  });
+  el.classList.add("show");
+}
+function acOnInput(){
+  selectedCommune=null; acMark("",""); disableAddr();
+  const q=cNom().value.trim();
+  clearTimeout(acTimer);
+  if(q.length<2){ acClear(); return; }
+  acTimer=setTimeout(async()=>{
+    const list=await acSearch(q);
+    if(list===null){ acClear(); acMark("bad","Vérification indisponible (connexion ?)"); return; }
+    acRender(list);
+  },250);
+}
+document.getElementById("g_commune_nom").addEventListener("input",acOnInput);
+document.getElementById("g_commune_nom").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){ e.preventDefault(); const f=cList().querySelector(".ac-item"); if(f) f.click(); }
+});
+document.addEventListener("click",e=>{ if(!e.target.closest("#g_commune_wrap")) acClear(); });
+
+/* ---------- Autocomplétion commune — méthode ② (références), indépendante de ① ---------- */
+let selectedCommune2=null, ac2Timer=null;
+const c2Nom=()=>document.getElementById("g2_commune_nom");
+const c2List=()=>document.getElementById("g2_commune_list");
+const c2Mark=()=>document.getElementById("g2_commune_mark");
+function ac2Clear(){ c2List().innerHTML=""; c2List().classList.remove("show"); }
+function ac2Mark(state,txt){ const m=c2Mark(); m.textContent=txt||""; m.className = state==="ok"?"ac-ok":(state==="bad"?"ac-bad":""); }
+function ac2Render(list){
+  const el=c2List(); el.innerHTML="";
+  if(!list||!list.length){ ac2Clear(); ac2Mark("bad","Aucune commune trouvée"); return; }
+  list.forEach(c=>{
+    const cp=(c.codesPostaux&&c.codesPostaux[0])||"";
+    const dep=c.departement?c.departement.code:"";
+    const it=document.createElement("div");
+    it.className="ac-item";
+    it.innerHTML="<span>"+c.nom+"</span><small>"+dep+(cp?" · "+cp:"")+"</small>";
+    it.onclick=()=>{ selectedCommune2={code:c.code,nom:c.nom}; c2Nom().value=c.nom; ac2Clear(); ac2Mark("ok","✓ "+c.nom+" — INSEE "+c.code); };
+    el.appendChild(it);
+  });
+  el.classList.add("show");
+}
+function ac2OnInput(){
+  selectedCommune2=null; ac2Mark("","");
+  const q=c2Nom().value.trim();
+  clearTimeout(ac2Timer);
+  if(q.length<2){ ac2Clear(); return; }
+  ac2Timer=setTimeout(async()=>{
+    const list=await acSearch(q);
+    if(list===null){ ac2Clear(); ac2Mark("bad","Vérification indisponible (connexion ?)"); return; }
+    ac2Render(list);
+  },250);
+}
+document.getElementById("g2_commune_nom").addEventListener("input",ac2OnInput);
+document.getElementById("g2_commune_nom").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){ e.preventDefault(); const f=c2List().querySelector(".ac-item"); if(f) f.click(); }
+});
+document.addEventListener("click",e=>{ if(!e.target.closest("#g2_commune_wrap")) ac2Clear(); });
+
+/* ---------- Autocomplétion adresse (Base Adresse Nationale) ---------- */
+let resolvedRefs=null, adrTimer=null;
+const adrNom=()=>document.getElementById("g_adr_nom");
+const adrList=()=>document.getElementById("g_adr_list");
+function adrListClear(){ adrList().innerHTML=""; adrList().classList.remove("show"); }
+function addrMark(state,txt){ const m=document.getElementById("g_addr_mark"); m.textContent=txt||""; m.className = state==="ok"?"ac-ok":(state==="bad"?"ac-bad":""); }
+function enableAddr(){ const i=adrNom(); i.disabled=false; i.placeholder="N° et voie (ex. 65 Rue de Paris)"; }
+function disableAddr(){ const i=adrNom(); i.disabled=true; i.value=""; i.placeholder="Choisissez la commune, ou dictez ci-dessous"; resolvedRefs=null; addrMark("",""); adrListClear(); if(typeof recog!=="undefined" && recog && recActive){ try{recog.stop();}catch(e){} } }
+
+function centroid(geom){
+  try{
+    let ring;
+    if(geom.type==="Polygon") ring=geom.coordinates[0];
+    else if(geom.type==="MultiPolygon") ring=geom.coordinates[0][0];
+    else return null;
+    let sx=0,sy=0; ring.forEach(p=>{sx+=p[0];sy+=p[1];});
+    return [sx/ring.length, sy/ring.length];
+  }catch(e){ return null; }
+}
+// Point (lon,lat) → références cadastrales via API Carto IGN (petit carré ~10 m,
+// car le point de l'adresse tombe souvent sur l'axe de la voie, hors parcelle)
+async function parcelleAtPoint(lon,lat){
+  const m=10, dLat=m/111320, dLon=m/(111320*Math.cos(lat*Math.PI/180));
+  const poly={type:"Polygon",coordinates:[[
+    [lon-dLon,lat-dLat],[lon+dLon,lat-dLat],[lon+dLon,lat+dLat],[lon-dLon,lat+dLat],[lon-dLon,lat-dLat]
+  ]]};
+  const pr=await fetch("https://apicarto.ign.fr/api/cadastre/parcelle?geom="+encodeURIComponent(JSON.stringify(poly)));
+  if(!pr.ok) throw new Error("cadastre IGN indisponible");
+  const pj=await pr.json();
+  const feats=(pj.features)||[];
+  if(!feats.length) throw new Error("aucune parcelle à cette adresse");
+  let best=feats[0], bestD=Infinity;
+  for(const f of feats){ const c=centroid(f.geometry); if(!c) continue; const d=(c[0]-lon)*(c[0]-lon)+(c[1]-lat)*(c[1]-lat); if(d<bestD){bestD=d;best=f;} }
+  const p=best.properties||{};
+  return { prefixe:(p.com_abs||"000"), section:p.section, parcelle:String(parseInt(p.numero,10)||p.numero) };
+}
+async function adrSearch(q){
+  try{
+    const r=await fetch("https://api-adresse.data.gouv.fr/search/?q="+encodeURIComponent(q)+"&citycode="+selectedCommune.code+"&autocomplete=1&limit=7");
+    if(!r.ok) throw 0;
+    const j=await r.json(); return j.features||[];
+  }catch(e){ return null; }
+}
+function adrRender(list){
+  const el=adrList(); el.innerHTML="";
+  if(!list||!list.length){ adrListClear(); addrMark("bad","Aucune adresse trouvée"); return; }
+  const head=document.createElement("div"); head.className="ac-head";
+  head.textContent=list.length+" adresse"+(list.length>1?"s":"")+" trouvée"+(list.length>1?"s":"")+" — choisissez :";
+  el.appendChild(head);
+  list.forEach(f=>{
+    const p=f.properties||{};
+    const it=document.createElement("div"); it.className="ac-item";
+    it.innerHTML='<span class="lbl"><svg class="pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s7-6.3 7-11a7 7 0 1 0-14 0c0 4.7 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg><span>'+p.label+'</span></span>';
+    it.onclick=async()=>{
+      adrNom().value=p.label; adrListClear(); resolvedRefs=null;
+      const coords=f.geometry&&f.geometry.coordinates;
+      if(!coords){ addrMark("bad","adresse sans coordonnées"); return; }
+      addrMark("","Recherche de la parcelle…");
+      try{
+        const refs=await parcelleAtPoint(coords[0],coords[1]);
+        if(!refs.section||!refs.parcelle) throw new Error("parcelle non identifiée");
+        resolvedRefs=refs;
+        addrMark("ok","✓ Parcelle "+(refs.section||"").toUpperCase()+" "+refs.parcelle+" (préfixe "+refs.prefixe+")");
+      }catch(err){ resolvedRefs=null; addrMark("bad","✗ "+err.message); }
+    };
+    el.appendChild(it);
+  });
+  el.classList.add("show");
+}
+function adrOnInput(){
+  resolvedRefs=null; addrMark("","");
+  if(!selectedCommune) return;
+  const q=adrNom().value.trim();
+  clearTimeout(adrTimer);
+  if(q.length<3){ adrListClear(); return; }
+  adrTimer=setTimeout(async()=>{
+    const list=await adrSearch(q);
+    if(list===null){ adrListClear(); addrMark("bad","Vérification indisponible"); return; }
+    adrRender(list);
+  },250);
+}
+document.getElementById("g_adr_nom").addEventListener("input",adrOnInput);
+document.getElementById("g_adr_nom").addEventListener("keydown",e=>{
+  if(e.key==="Enter"){ e.preventDefault(); const f=adrList().querySelector(".ac-item"); if(f) f.click(); }
+});
+document.addEventListener("click",e=>{ if(!e.target.closest("#g_adr_wrap")) adrListClear(); });
+
+/* ---------- Dictée « ville + adresse » en une fois (Web Speech API, fr-FR) ---------- */
+let recog=null, recActive=false;
+async function resolveDictation(q){
+  q=(q||"").trim();
+  if(!q){ addrMark("bad","Rien entendu — réessayez."); return; }
+  addrMark("","Localisation de « "+q+" »…");
+  try{
+    const r=await fetch("https://api-adresse.data.gouv.fr/search/?q="+encodeURIComponent(q)+"&limit=1");
+    if(!r.ok) throw new Error("géocodage indisponible");
+    const j=await r.json();
+    const f=j.features&&j.features[0];
+    if(!f) throw new Error("adresse introuvable");
+    const p=f.properties||{};
+    selectedCommune={code:p.citycode,nom:p.city};
+    cNom().value=p.city||""; acMark("ok","✓ "+(p.city||"")+(p.citycode?" — INSEE "+p.citycode:""));
+    enableAddr();
+    adrNom().value=p.label||q;
+    const coords=f.geometry&&f.geometry.coordinates;
+    if(!coords) throw new Error("adresse sans coordonnées");
+    const refs=await parcelleAtPoint(coords[0],coords[1]);
+    if(!refs.section||!refs.parcelle) throw new Error("parcelle non identifiée");
+    resolvedRefs=refs;
+    addrMark("ok","✓ Parcelle "+(refs.section||"").toUpperCase()+" "+refs.parcelle+" (préfixe "+refs.prefixe+")");
+  }catch(err){ resolvedRefs=null; addrMark("bad","✗ "+err.message); }
+}
+(function initRecog(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  const btn=document.getElementById("dicteebtn");
+  if(!SR){ if(btn) btn.style.display="none"; return; } // navigateur sans dictée
+  const lbl=btn.querySelector(".lbl");
+  const reset=()=>{ if(lbl) lbl.textContent="Dicter la ville et l'adresse"; };
+  recog=new SR();
+  recog.lang="fr-FR"; recog.interimResults=true; recog.maxAlternatives=1; recog.continuous=false;
+  recog.onresult=e=>{ let t=""; for(let i=0;i<e.results.length;i++) t+=e.results[i][0].transcript; adrNom().value=t; };
+  recog.onend=()=>{ recActive=false; btn.classList.remove("rec"); reset(); resolveDictation(adrNom().value); };
+  recog.onerror=ev=>{ recActive=false; btn.classList.remove("rec"); reset(); addrMark("bad","Dictée : "+(ev.error==="not-allowed"?"accès micro refusé":(ev.error==="no-speech"?"rien entendu":ev.error))); };
+  btn.onclick=()=>{
+    if(recActive){ try{recog.stop();}catch(e){} return; }
+    selectedCommune=null; resolvedRefs=null; cNom().value=""; acMark("",""); enableAddr(); adrNom().value=""; addrMark("","🎤 Dictez la ville et l'adresse, puis patientez…");
+    try{ recog.start(); recActive=true; btn.classList.add("rec"); if(lbl) lbl.textContent="● Écoute… (cliquez pour arrêter)"; }
+    catch(e){ recActive=false; }
+  };
+})();
+
+/* ---------- Génération de l'extrait officiel ---------- */
+// Détecte le préfixe (code de la commune absorbée, "000" si aucune) d'une parcelle
+// via l'API Carto IGN. Gère les communes fusionnées sans saisie manuelle du préfixe.
+// Renvoie le préfixe, ou null si la parcelle n'est pas trouvée côté IGN.
+async function ignPrefixe(insee, section, parcelle){
+  const sec=(section||"").toUpperCase().padStart(2,"0");
+  const num=String(parseInt(parcelle,10)||parcelle).padStart(4,"0");
+  const url="https://apicarto.ign.fr/api/cadastre/parcelle?code_insee="+encodeURIComponent(insee)+"&section="+encodeURIComponent(sec)+"&numero="+encodeURIComponent(num);
+  const r=await fetch(url);
+  if(!r.ok) return null;
+  const j=await r.json();
+  const feats=(j&&j.features)||[];
+  if(!feats.length) return null;
+  return (feats[0].properties||{}).com_abs || "000";
+}
+function setGenStatus(t,cls){ const e=document.getElementById("genstatus"); e.textContent=t; e.className="gen-status"+(cls?" "+cls:""); }
+async function generateExtrait(mode){
+  const v=id=>document.getElementById(id).value.trim();
+  const commune = (mode==="adresse") ? selectedCommune : selectedCommune2;
+  if(!commune){ setGenStatus(mode==="adresse" ? "Indiquez d'abord une commune (section ①)." : "Indiquez d'abord une commune (section ②).","err"); return; }
+  let prefixe=v("g_prefixe"), section=v("g_section").toUpperCase(), parcelle=v("g_parcelle");
+  const [taille,orientation]=document.getElementById("g_format").value.split("|");
+  const echelle=document.getElementById("g_echelle").value;
+  if(mode==="adresse"){
+    if(!resolvedRefs){ setGenStatus("Choisissez une adresse dans la liste (section ①).","err"); return; }
+    prefixe=resolvedRefs.prefixe||prefixe||"000"; section=(resolvedRefs.section||"").toUpperCase(); parcelle=resolvedRefs.parcelle;
+  }else{ // références
+    if(!section||!parcelle){ setGenStatus("Renseignez une section et une parcelle (section ②).","err"); return; }
+  }
+  const b1=document.getElementById("genrun_adr"), b2=document.getElementById("genrun_ref");
+  b1.disabled=true; b2.disabled=true;
+  // Drapeau d'échec — 01/08 : S.pdf ne peut PAS servir de témoin, il garde le
+  // document PRÉCÉDENT quand la génération échoue en boucle multi-parcelles.
+  S.extraitEchec = null;
+  try{
+    // Préfixe non saisi (méthode ②) → détection automatique via IGN (communes fusionnées)
+    if(mode==="ref" && !prefixe){
+      setGenStatus("Détection du préfixe de la commune…","");
+      try{ const pfx=await ignPrefixe(commune.code, section, parcelle); if(pfx!=null) prefixe=pfx; }catch(e){}
+    }
+    if(!prefixe) prefixe="000";
+    setGenStatus(prefixe!=="000" ? ("Préfixe détecté : "+prefixe+" — récupération de l'extrait officiel…") : "Récupération de l'extrait officiel… (quelques secondes)","");
+    // RECENTRAGE. api/extrait.js accepte x et y et les substitue au centre de la
+    // parcelle interrogée. Indispensable pour une UNITÉ FONCIÈRE : le service
+    // centre sinon sur la parcelle demandée, qui peut être au bord de l'unité —
+    // c'est ce qui laissait le groupe colorié en marge du plan.
+    // Ces valeurs viennent de l'URL de PAINT et sont mémorisées dans S.recentrage
+    // par le préremplissage : generateExtrait construisant sa requête à partir des
+    // seuls champs du formulaire, elles ne lui parvenaient pas autrement.
+    const p0={commune:commune.code,prefixe,section,parcelle,echelle,taille,orientation};
+    if(S.recentrage && Number.isFinite(S.recentrage.x) && Number.isFinite(S.recentrage.y)){
+      p0.x=String(S.recentrage.x); p0.y=String(S.recentrage.y);
+    }
+    const qs=new URLSearchParams(p0).toString();
+    const r=await fetch("/api/extrait?"+qs);
+    if(!r.ok){
+      let msg="Erreur "+r.status;
+      try{ const j=await r.json(); if(j&&j.message) msg=j.message; }catch(e){}
+      throw new Error(msg);
+    }
+    const buf=await r.arrayBuffer();
+    if(buf.byteLength<1000) throw new Error("réponse vide");
+    // ⚠⚠ DIAGNOSTIC — CONSERVER LES OCTETS REÇUS, ET LES CONSERVER *ICI*,
+    // AVANT loadPDFData : pdf.js transfère le tampon à son worker et le
+    // NEUTRALISE (byteLength 0) — après l'appel il n'y a plus rien à saisir.
+    // Motif, 01/08 après-midi : charabia REPRODUCTIBLE à l'écran (Saint-Omer
+    // AV 1, Watten 0A 188) pendant que le téléchargement direct de la même URL
+    // livrait un PDF sain, rendu juste par le même pdf.js 3.11.174 au banc
+    // d'essai. On n'a donc JAMAIS tenu les octets exacts d'un rendu fautif :
+    // Adobe, Firefox et le banc regardaient tous une AUTRE copie que celle du
+    // symptôme. Le bouton « PDF reçu » livre CELLE-LÀ, octet pour octet.
+    // En boucle multi-parcelles, c'est le DERNIER extrait reçu qui est conservé.
+    S.brutRecu = buf.slice(0);
+    S.brutInfo = { qs: qs, quand: new Date().toISOString() };
+    montrerBoutonBrut();
+    setGenStatus("","");
+    await loadPDFData(buf);
+  }catch(err){
+    S.extraitEchec = (err && err.message) || String(err);
+    setGenStatus("Échec : "+err.message+".","err");
+  }finally{ b1.disabled=false; b2.disabled=false; }
+}
+document.getElementById("genrun_adr").onclick=()=>generateExtrait("adresse");
+document.getElementById("genrun_ref").onclick=()=>generateExtrait("ref");
+document.getElementById("genbtn").onclick=()=>{ drop.classList.remove("hide"); };
+document.getElementById("fileinput").onchange=e=>{ if(e.target.files[0]) loadPDF(e.target.files[0]); };
+["dragenter","dragover"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add("over");}));
+["dragleave","drop"].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove("over");}));
+drop.addEventListener("drop",e=>{const f=[...e.dataTransfer.files].find(x=>x.type==="application/pdf"); if(f) loadPDF(f);});
+stage.addEventListener("dragover",e=>e.preventDefault());
+stage.addEventListener("drop",e=>{e.preventDefault();const f=[...e.dataTransfer.files].find(x=>x.type==="application/pdf"); if(f) loadPDF(f);});
+// l'ouverture du sélecteur de PDF n'est déclenchée QUE par la zone de glissé (section ③)
+document.getElementById("dropzone").addEventListener("click",()=>document.getElementById("fileinput").click());
+
+async function loadPDF(file){
+  loadPDFData(await file.arrayBuffer());
+}
+async function loadPDFData(buf){
+  spin.classList.add("show"); spinmsg.textContent="Lecture du plan…";
+  try{
+    // ⚠⚠ DÉTRUIRE LE DOCUMENT PRÉCÉDENT AVANT D'EN OUVRIR UN AUTRE.
+    // pdf.js PARTAGE SON CACHE DE POLICES entre documents : sans cette
+    // destruction, les tables de glyphes se télescopent et le texte des extraits
+    // suivants sort en CHARABIA — « Ü7°¿®³ »²¬æ » — tandis que le PLAN reste
+    // juste, étant du tracé vectoriel qui ne dépend d'aucune police.
+    // Défaut LATENT DEPUIS TOUJOURS et invisible : PAINT ne chargeait qu'UN PDF
+    // par session. Révélé le 01/08 par la boucle par parcelle, qui en charge cinq.
+    // C'est le second défaut de la même racine que S.recentrage : faire boucler
+    // une chaîne conçue pour un seul passage expose ce qu'elle mémorisait.
+    // ⚠⚠ standardFontDataUrl EST INDISPENSABLE, ET SON CHEMIN A ÉTÉ VÉRIFIÉ.
+    // Le service du cadastre a cessé, entre le 31/07 et le 01/08, d'embarquer les
+    // polices de son cartouche : sans ces fichiers, pdf.js rend le TEXTE en
+    // charabia (« Ü7°¿®³ »²¬æ » pour « Département ») tandis que le PLAN reste
+    // juste, étant du tracé vectoriel. Diagnostic établi en constatant que le
+    // défaut touchait un extrait ISOLÉ, hors de toute boucle, sur des communes
+    // qui sortaient lisibles la veille — donc ni le code ni l'enchaînement.
+    // ⚠ LE CHEMIN COMPTE. Une première tentative vers cdnjs a ÉCHOUÉ : cdnjs
+    // distribue pdf.js sans le dossier standard_fonts. Vérifié depuis le registre
+    // npm : le paquet pdfjs-dist@3.11.174 contient bien standard_fonts/ avec ses
+    // seize fichiers Foxit et Liberation, servis par jsdelivr et unpkg.
+    // NE PAS changer d'hébergeur sans refaire cette vérification : une précaution
+    // non vérifiée n'est pas une précaution, elle aggrave.
+    // ⚠ Le destroy() reste nécessaire pour un autre motif : pdf.js partage son
+    // cache de polices entre documents, et la boucle par parcelle en charge cinq.
+    if(S.pdf){ try{ await S.pdf.destroy(); }catch(e){} S.pdf = null; }
+    // ⚠⚠ disableFontFace — LE CORRECTIF DU CHARABIA, posé le 01/08 APRÈS MESURE.
+    // Établi par élimination instrumentée : PDF prouvé sain (octets exacts reçus
+    // par PAINT, bouton « PDF reçu », empreinte 3adab25d), rendus JUSTES par le
+    // même pdf.js 3.11.174 au banc Node ; charabia dans Chrome (profil ET fenêtre
+    // Invité), lisible dans Firefox → le défaut est dans le CHROME du poste,
+    // vraisemblablement sa mise à jour de fin juillet 2026.
+    // MÉCANISME : pour une police non embarquée, pdf.js RÉ-ENCODE le texte puis
+    // installe dans la page une police traduite (FontFace) portant la table
+    // inverse. Quand Chrome rate cette installation, le canvas retombe sur une
+    // police système qui lit les codes ré-encodés LITTÉRALEMENT : « Ü7°¿®³ ».
+    // disableFontFace:true supprime toute la mécanique FontFace : les glyphes
+    // sont DESSINÉS EN TRACÉS depuis les fichiers de standardFontDataUrl —
+    // exactement le mode du banc Node, qui rend juste. Chrome n'a plus voix.
+    // COÛT : rendu un peu plus lourd ; sans objet ici, le canvas est déjà tout.
+    // ⚠ standardFontDataUrl devient INDISPENSABLE à ce mode : sans lui, plus
+    // aucun repli local — ne retirer NI l'un NI l'autre.
+    S.pdf = await pdfjsLib.getDocument({
+      data: buf,
+      disableFontFace: true,
+      standardFontDataUrl: "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/standard_fonts/"
+    }).promise;
+    S.pageCount = S.pdf.numPages; S.page=1;
+    S.notes=[]; anno.innerHTML=""; S.legendLabels={}; S.couleursAnnot=null;
+    await renderPage();
+    fitToScreen();
+    drop.classList.add("hide");
+    document.getElementById("pagenav").style.display = S.pageCount>1?"flex":"none";
+    ["genbtn","rotate","zoomout","zoomlbl","zoomin"].forEach(id=>document.getElementById(id).style.display="inline-flex");
+    document.getElementById("pngbtn").disabled=false;
+    document.getElementById("pdfbtn").disabled=false;
+    showHint("Cliquez dans une parcelle pour la remplir.");
+  }catch(err){
+    alert("Impossible de lire ce PDF. Vérifiez qu'il s'agit bien d'un extrait de plan cadastral au format PDF.\n\n"+err.message);
+  }finally{ spin.classList.remove("show"); }
+}
+
+async function renderBase(){
+  const page = await S.pdf.getPage(S.page);
+  // résolution interne haute pour une colorisation nette
+  const target = 1700;
+  const vp1 = page.getViewport({scale:1, rotation:S.rotation});
+  const scale = target / vp1.width;
+  const vp = page.getViewport({scale, rotation:S.rotation});
+  S.W = Math.round(vp.width); S.H = Math.round(vp.height);
+  [base,overlay].forEach(c=>{c.width=S.W;c.height=S.H;});
+  cwrap.style.width=S.W+"px"; cwrap.style.height=S.H+"px";
+  anno.style.width=S.W+"px"; anno.style.height=S.H+"px";
+  baseCtx.fillStyle="#fff"; baseCtx.fillRect(0,0,S.W,S.H);
+  await page.render({canvasContext:baseCtx,viewport:vp}).promise;
+}
+
+async function renderPage(){
+  S.rotation = 0;
+  S.ocrCache = null; S.anchorCache = null; setStatus("");
+  await renderBase();
+  oCtx.clearRect(0,0,S.W,S.H);
+  S.undoStack=[]; S.redoStack=[]; pushUndo();
+  document.getElementById("pagelbl").textContent = S.page+" / "+S.pageCount;
+  applyZoom();
+  rebuildLegend();
+}
+document.getElementById("prev").onclick=async()=>{if(S.page>1){S.page--;spin.classList.add("show");await renderPage();spin.classList.remove("show");}};
+document.getElementById("next").onclick=async()=>{if(S.page<S.pageCount){S.page++;spin.classList.add("show");await renderPage();spin.classList.remove("show");}};
+
+/* ---------- Zoom (CSS, sans re-rendu : préserve les couleurs) ---------- */
+function applyZoom(){
+  cwrap.style.transform="scale("+S.zoom+")";
+  document.getElementById("zoomlbl").textContent=Math.round(S.zoom*100)+"%";
+  layoutNotes();
+}
+document.getElementById("zoomin").onclick=()=>{S.zoom=Math.min(4,S.zoom+.2);applyZoom();};
+document.getElementById("zoomout").onclick=()=>{S.zoom=Math.max(.3,S.zoom-.2);applyZoom();};
+
+/* ---------- Ajustement automatique à la fenêtre (au chargement) ---------- */
+function fitToScreen(){
+  const pad=48;
+  const availW=stage.clientWidth-pad, availH=stage.clientHeight-pad;
+  if(availW<=0||availH<=0||!S.W||!S.H) return;
+  const z=Math.min(availW/S.W, availH/S.H, 1); // ajuste sans dépasser 100%
+  S.zoom=Math.max(.3, Math.min(4, z));
+  applyZoom();
+}
+
+/* ---------- Rotation 90° (conserve couleurs + annotations) ---------- */
+function rotateCanvas90(src,cw){
+  const w=src.width,h=src.height;
+  const t=document.createElement("canvas"); t.width=h; t.height=w;
+  const x=t.getContext("2d");
+  x.translate(h/2,w/2); x.rotate((cw?1:-1)*Math.PI/2); x.drawImage(src,-w/2,-h/2);
+  return t;
+}
+document.getElementById("rotate").onclick=async()=>{
+  if(!S.pdf) return;
+  spin.classList.add("show");
+  // copie de l'overlay courant
+  const old=document.createElement("canvas"); old.width=S.W; old.height=S.H;
+  old.getContext("2d").drawImage(overlay,0,0);
+  S.rotation=(S.rotation+90)%360;
+  S.ocrCache=null; S.anchorCache=null;
+  await renderBase();                 // refond pivoté (net), nouvelles dimensions
+  const rot=rotateCanvas90(old,true); // overlay pivoté 90° horaire
+  oCtx.clearRect(0,0,S.W,S.H);
+  oCtx.drawImage(rot,0,0,S.W,S.H);    // recalé sur les nouvelles dimensions
+  S.notes.forEach(n=>{const nx=1-n.y, ny=n.x; n.x=nx; n.y=ny;}); // repères pivotés
+  layoutNotes();
+  S.undoStack=[]; S.redoStack=[]; pushUndo();
+  applyZoom(); rebuildLegend();
+  spin.classList.remove("show");
+};
+
+/* ---------- Coordonnées souris -> pixels canvas ---------- */
+function evtToPx(e){
+  const r=overlay.getBoundingClientRect();
+  const x=(e.clientX-r.left)*(S.W/r.width);
+  const y=(e.clientY-r.top)*(S.H/r.height);
+  return {x:Math.round(x),y:Math.round(y)};
+}
+
+/* ---------- Undo / Redo ---------- */
+function pushUndo(){
+  S.undoStack.push(oCtx.getImageData(0,0,S.W,S.H));
+  if(S.undoStack.length>25) S.undoStack.shift();
+  S.redoStack=[];
+}
+document.getElementById("undo").onclick=()=>{
+  if(S.undoStack.length>1){ S.redoStack.push(S.undoStack.pop());
+    oCtx.putImageData(S.undoStack[S.undoStack.length-1],0,0); rebuildLegend(); }
+};
+document.getElementById("redo").onclick=()=>{
+  if(S.redoStack.length){ const img=S.redoStack.pop(); S.undoStack.push(img);
+    oCtx.putImageData(img,0,0); rebuildLegend(); }
+};
+document.getElementById("clear").onclick=()=>{
+  if(confirm("Effacer toutes les couleurs et annotations de cette page ?")){
+    oCtx.clearRect(0,0,S.W,S.H); pushUndo();
+    S.notes=[]; anno.innerHTML=""; S.selNote=null; rebuildLegend();
+  }
+};
+document.addEventListener("keydown",e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key==="z"){e.preventDefault();document.getElementById("undo").click();}
+  if((e.ctrlKey||e.metaKey)&&(e.key==="y"||(e.shiftKey&&e.key==="Z"))){e.preventDefault();document.getElementById("redo").click();}
+  if((e.key==="Delete"||e.key==="Backspace")&&S.selNote!=null){deleteNote(S.selNote);}
+});
+
+/* ---------- Interactions sur l'overlay ---------- */
+overlay.addEventListener("mousedown",e=>{
+  if(!S.pdf) return;
+  const p=evtToPx(e);
+  if(S.tool==="fill"){ floodFill(p.x,p.y); pushUndo(); rebuildLegend(); }
+  else if(S.tool==="brush"||S.tool==="erase"){ S.drawing=true; S.lastPt=p; paintAt(p,p); }
+  else if(S.tool==="text"){ addNote(p.x,p.y); }
+});
+overlay.addEventListener("mousemove",e=>{
+  if(S.drawing){ const p=evtToPx(e); paintAt(S.lastPt,p); S.lastPt=p; }
+  moveRing(e);
+});
+window.addEventListener("mouseup",()=>{ if(S.drawing){S.drawing=false; pushUndo(); rebuildLegend();} });
+
+/* ---------- Pinceau / gomme ---------- */
+function paintAt(a,b){
+  oCtx.lineCap="round"; oCtx.lineJoin="round"; oCtx.lineWidth=S.brush;
+  if(S.tool==="erase"){
+    oCtx.globalCompositeOperation="destination-out"; oCtx.strokeStyle="rgba(0,0,0,1)";
+  }else{
+    oCtx.globalCompositeOperation="source-over";
+    const [r,g,bl]=hexToRgb(S.color);
+    oCtx.strokeStyle=`rgba(${r},${g},${bl},${S.opacity})`;
+  }
+  oCtx.beginPath(); oCtx.moveTo(a.x,a.y); oCtx.lineTo(b.x,b.y); oCtx.stroke();
+  oCtx.globalCompositeOperation="source-over";
+}
+
+/* ---------- Remplissage par zone (scanline + remplissage des îlots) ---------- */
+function floodFill(sx,sy){
+  if(sx<0||sy<0||sx>=S.W||sy>=S.H) return;
+  const base = baseCtx.getImageData(0,0,S.W,S.H).data;
+  const W=S.W,H=S.H, thr=S.threshold, N=W*H;
+  const isWall = idx=>{
+    const p=idx*4;
+    return (0.299*base[p]+0.587*base[p+1]+0.114*base[p+2])<thr; // trait sombre = bordure
+  };
+  const start=sy*W+sx;
+  if(isWall(start)){ showHint("Vous avez cliqué sur un trait — cliquez à l'intérieur de la parcelle."); return; }
+
+  // Passe 1 — remplissage scanline de la parcelle (s'arrête aux traits)
+  const filled=new Uint8Array(N);
+  const stack=[[sx,sy]];
+  while(stack.length){
+    let [x,y]=stack.pop();
+    let xL=x;
+    while(xL>=0 && !filled[y*W+xL] && !isWall(y*W+xL)) xL--;
+    xL++;
+    let spanUp=false, spanDown=false, xi=xL;
+    while(xi<W && !filled[y*W+xi] && !isWall(y*W+xi)){
+      const idx=y*W+xi; filled[idx]=1;
+      if(y>0){ const u=idx-W; if(!filled[u]&&!isWall(u)){ if(!spanUp){stack.push([xi,y-1]);spanUp=true;} } else spanUp=false; }
+      if(y<H-1){ const dn=idx+W; if(!filled[dn]&&!isWall(dn)){ if(!spanDown){stack.push([xi,y+1]);spanDown=true;} } else spanDown=false; }
+      xi++;
+    }
+  }
+
+  // Passe 2 — depuis les bords du plan, marquer tout ce qui communique avec
+  // l'extérieur (traits + fond + parcelles voisines). La couleur fait barrage.
+  const outside=new Uint8Array(N);
+  const st=[];
+  const seed=i=>{ if(!filled[i]&&!outside[i]){outside[i]=1;st.push(i);} };
+  for(let x=0;x<W;x++){ seed(x); seed((H-1)*W+x); }
+  for(let y=0;y<H;y++){ seed(y*W); seed(y*W+W-1); }
+  while(st.length){
+    const i=st.pop(), x=i%W, y=(i-x)/W;
+    if(x>0)   seed(i-1);
+    if(x<W-1) seed(i+1);
+    if(y>0)   seed(i-W);
+    if(y<H-1) seed(i+W);
+  }
+
+  // Passe 3 — peindre la parcelle ET les îlots enfermés par la couleur
+  // (boucles des chiffres : 6, 0, 8, 9…). Tout sauf l'extérieur.
+  const img=oCtx.getImageData(0,0,W,H), od=img.data;
+  const [fr,fg,fb]=hexToRgb(S.color); const fa=Math.round(S.opacity*255);
+  for(let i=0;i<N;i++){
+    if(!outside[i]){ const p=i*4; od[p]=fr; od[p+1]=fg; od[p+2]=fb; od[p+3]=fa; }
+  }
+  oCtx.putImageData(img,0,0);
+}
+
+/* ---------- Annotations texte ---------- */
+function addNote(px,py){
+  const txt = prompt("Texte de l'annotation :","");
+  if(txt===null||txt.trim()==="") return;
+  const note={id:Date.now(),x:px/S.W,y:py/S.H,text:txt,color:S.color,size:S.fontSize};
+  S.notes.push(note); renderNote(note);
+}
+function renderNote(note){
+  const el=document.createElement("div");
+  el.className="note"; el.dataset.id=note.id; el.textContent=note.text;
+  el.style.color=note.color;
+  el.style.fontSize=note.size+"px";
+  el.style.textShadow="0 0 3px #fff,0 0 3px #fff,0 0 3px #fff";
+  anno.appendChild(el);
+  positionNote(el,note);
+  el.addEventListener("mousedown",ev=>{
+    ev.stopPropagation();
+    selectNote(note.id);
+    const r=overlay.getBoundingClientRect();
+    S.dragNote=note;
+    S.dragOff={dx:ev.clientX-(r.left+note.x*r.width), dy:ev.clientY-(r.top+note.y*r.height)};
+  });
+  el.addEventListener("dblclick",ev=>{
+    ev.stopPropagation();
+    const nt=prompt("Modifier l'annotation :",note.text);
+    if(nt!==null){ if(nt.trim()===""){deleteNote(note.id);} else {note.text=nt; el.textContent=nt;} }
+  });
+}
+window.addEventListener("mousemove",e=>{
+  if(S.dragNote){
+    const r=overlay.getBoundingClientRect();
+    S.dragNote.x=Math.min(1,Math.max(0,(e.clientX-r.left-S.dragOff.dx)/r.width));
+    S.dragNote.y=Math.min(1,Math.max(0,(e.clientY-r.top-S.dragOff.dy)/r.height));
+    const el=anno.querySelector(`[data-id="${S.dragNote.id}"]`); positionNote(el,S.dragNote);
+  }
+});
+window.addEventListener("mouseup",()=>{S.dragNote=null;});
+function positionNote(el,note){ el.style.left=(note.x*S.W)+"px"; el.style.top=(note.y*S.H)+"px"; }
+function layoutNotes(){ S.notes.forEach(n=>{const el=anno.querySelector(`[data-id="${n.id}"]`); if(el)positionNote(el,n);}); }
+function selectNote(id){
+  S.selNote=id;
+  anno.querySelectorAll(".note").forEach(e=>e.classList.toggle("sel",e.dataset.id==id));
+}
+function deleteNote(id){
+  S.notes=S.notes.filter(n=>n.id!=id);
+  const el=anno.querySelector(`[data-id="${id}"]`); if(el)el.remove(); S.selNote=null;
+}
+overlay.addEventListener("mousedown",()=>{ if(S.tool!=="text"){selectNote(null);} });
+
+/* ---------- Export ---------- */
+// Localise la mention « cadastre.gouv.fr » sur le plan (OCR plein texte) pour
+// y ancrer la légende. Repli silencieux si absente ou OCR indisponible.
+let anchorWorker=null;
+async function findCadastreAnchor(){
+  const key=S.page+"|"+S.rotation;
+  if(S.anchorCache && S.anchorCache.key===key) return S.anchorCache.box;
+  let box=null;
+  try{
+    if(typeof Tesseract==="undefined") throw new Error("ocr");
+    if(!anchorWorker){
+      anchorWorker=await Tesseract.createWorker("eng",1,{
+        logger:m=>{ if(m.status==="recognizing text") spinmsg.textContent="Localisation de la légende… "+Math.round(m.progress*100)+"%"; }
+      });
+    }
+    const {data}=await anchorWorker.recognize(base,{},{tsv:true});
+    (data.tsv||"").split("\n").forEach(l=>{
+      const c=l.split("\t");
+      if(c.length<12||c[0]!=="5") return;
+      if((c[11]||"").toLowerCase().includes("cadastre")){
+        const left=+c[6],top=+c[7],w=+c[8],h=+c[9];
+        box={x0:left,y0:top,x1:left+w,y1:top+h};
+      }
+    });
+  }catch(e){ box=null; }
+  S.anchorCache={key,box};
+  return box;
+}
+
+// Localise la LIGNE contenant un mot donné, et renvoie son étendue réelle.
+// Calqué sur findCadastreAnchor, dont il réutilise le worker : le mode TSV de
+// Tesseract fournit les VRAIES BOÎTES ENGLOBANTES des mots — left, top, width,
+// height — et le numéro de ligne de chacun. On peut donc reconstituer l'étendue
+// exacte d'une ligne entière, là où la liste de mots employée pour les
+// coordonnées ne donne que des centres.
+// Pourquoi c'est nécessaire : s'ancrer sur le centre du mot « CADASTRAL »
+// décalait les annotations d'un tiers de ligne vers la droite, puisque c'est le
+// dernier mot de « EXTRAIT DU PLAN CADASTRAL ». Et regrouper les mots par
+// hauteur ne suffisait pas : l'OCR ne lit pas toujours les trois autres, trop
+// petits, si bien qu'il ne restait qu'un mot et donc aucune correction.
+// Reconnaissance du bandeau supérieur, MISE EN CACHE UNE FOIS. Plusieurs
+// recherches — « CADASTRAL » pour l'axe, « Section » pour la hauteur — ne coûtent
+// ainsi qu'une seule passe.
+let tsvCache = null;
+async function lignesTSV(){
+  const key = S.page + "|" + S.rotation;
+  if(tsvCache && tsvCache.key === key) return tsvCache.lignes;
+  let lignes = [];
+  try{
+    if(typeof Tesseract === "undefined") throw new Error("ocr");
+    if(!anchorWorker){
+      anchorWorker = await Tesseract.createWorker("eng", 1, {
+        logger: m => { if(m.status === "recognizing text") spinmsg.textContent =
+          "Localisation du titre… " + Math.round(m.progress * 100) + "%"; }
+      });
+    }
+    // Seul le tiers haut : la page entière prend des dizaines de secondes, et le
+    // titre comme le cartouche « Section » s'y trouvent, en portrait comme en
+    // paysage. Découpe depuis l'origine, donc coordonnées identiques à la page.
+    const hBandeau = Math.round(S.H * 0.30);
+    const vignette = document.createElement("canvas");
+    vignette.width = S.W; vignette.height = hBandeau;
+    vignette.getContext("2d").drawImage(base, 0, 0, S.W, hBandeau, 0, 0, S.W, hBandeau);
+    const reco = anchorWorker.recognize(vignette, {}, { tsv: true });
+    const delai = new Promise((_, rej) => setTimeout(() => rej(new Error("délai dépassé")), 20000));
+    const { data } = await Promise.race([reco, delai]);
+    lignes = (data.tsv || "").split("\n").map(l => l.split("\t"))
+      .filter(c => c.length >= 12 && c[0] === "5");
+  }catch(e){ lignes = []; }
+  tsvCache = { key, lignes };
+  return lignes;
+}
+
+// Étendue réelle de la LIGNE contenant un motif. Le mode TSV fournit les vraies
+// boîtes englobantes — left, top, width, height — et le numéro de ligne de chaque
+// mot, ce qui permet de reconstituer une ligne entière. La liste de mots employée
+// pour les coordonnées, elle, ne donne que des centres.
+async function trouverLigneContenant(motif){
+  const lignes = await lignesTSV();
+  if(!lignes.length) return null;
+  const re = new RegExp(motif, "i");
+  const cible = lignes.find(c => re.test(c[11] || ""));
+  if(!cible) return null;
+  // Même bloc, paragraphe et ligne.
+  const memeLigne = lignes
+    .filter(c => c[2] === cible[2] && c[3] === cible[3] && c[4] === cible[4])
+    .sort((a, b) => (+a[6]) - (+b[6]));
+  // NE GARDER QUE LES MOTS CONTIGUS au mot trouvé.
+  // Tesseract regroupe dans une même « ligne » des mots séparés horizontalement
+  // dès qu'ils partagent la même base : sur un extrait cadastral, le titre et le
+  // texte du cartouche de DROITE sont à la même hauteur, et l'étendue calculée
+  // englobait les deux — 636 à 1324 px au lieu de 602 à 1051, soit un axe faux de
+  // 155 px, et un balayage des bords qui démarrait dans le cartouche voisin.
+  // On s'arrête donc dès qu'un écart franc apparaît : plus de trois fois la
+  // hauteur des caractères sépare deux colonnes, jamais deux mots d'une phrase.
+  const iCible = memeLigne.findIndex(c => c === cible);
+  const hMot = Math.max(6, +cible[9]);
+  const ecartMax = hMot * 3;
+  let iG = iCible, iD = iCible;
+  while(iG > 0){
+    const prec = memeLigne[iG - 1];
+    if((+memeLigne[iG][6]) - ((+prec[6]) + (+prec[8])) > ecartMax) break;
+    iG--;
+  }
+  while(iD < memeLigne.length - 1){
+    const suiv = memeLigne[iD + 1];
+    if((+suiv[6]) - ((+memeLigne[iD][6]) + (+memeLigne[iD][8])) > ecartMax) break;
+    iD++;
+  }
+  const groupe = memeLigne.slice(iG, iD + 1);
+  return {
+    x0: Math.min(...groupe.map(c => +c[6])),
+    x1: Math.max(...groupe.map(c => +c[6] + +c[8])),
+    y0: Math.min(...groupe.map(c => +c[7])),
+    y1: Math.max(...groupe.map(c => +c[7] + +c[9])),
+    mots: groupe.length,
+    ecartes: memeLigne.length - groupe.length,
+  };
+}
+
+// Remonte depuis une ligne de texte jusqu'au FILET qui la surmonte : une rangée
+// de pixels sombres traversant l'essentiel de la largeur indiquée. Un trait est un
+// repère au pixel, là où le haut d'un texte dépend de la police et du rendu.
+function filetAuDessus(x0, x1, yTexte, portee){
+  try{
+    const larg = Math.max(8, Math.round(x1 - x0));
+    const haut = Math.max(4, Math.round(portee));
+    const yHaut = Math.max(0, Math.round(yTexte) - haut);
+    const d = baseCtx.getImageData(Math.max(0, Math.round(x0)), yHaut, larg, haut).data;
+    const sombre = (i) => (0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]) < S.threshold;
+    for(let y = haut - 1; y >= 0; y--){        // du texte vers le haut
+      let n = 0;
+      for(let x = 0; x < larg; x++) if(sombre(y * larg + x)) n++;
+      if(n >= 0.6 * larg) return yHaut + y;
+    }
+  }catch(e){ /* hors canvas : on renonce silencieusement */ }
+  return null;
+}
+
+// Cherche un FILET VERTICAL en s'éloignant d'un point, dans un sens donné : une
+// colonne de pixels sombres continue sur l'essentiel de la hauteur balayée.
+// Sert à trouver les deux bords du cartouche du titre, entre lesquels le tableau
+// doit être centré. Un trait de cadre est continu sur toute la hauteur du
+// cartouche, alors qu'un jambage de lettre ne l'est pas : d'où l'exigence de
+// 80 %, qui écarte le texte sans écarter les traits.
+function filetVertical(xDepart, sens, yA, yB, portee){
+  try{
+    const y0 = Math.max(0, Math.round(yA));
+    const h = Math.max(8, Math.round(yB - yA));
+    if(y0 + h > S.H) return null;
+    for(let i = 1; i <= portee; i++){
+      const x = Math.round(xDepart) + sens * i;
+      if(x < 1 || x >= S.W - 1) return null;
+      const d = baseCtx.getImageData(x, y0, 1, h).data;
+      let n = 0;
+      for(let k = 0; k < h; k++){
+        if((0.299 * d[k * 4] + 0.587 * d[k * 4 + 1] + 0.114 * d[k * 4 + 2]) < S.threshold) n++;
+      }
+      if(n >= 0.8 * h) return x;
+    }
+  }catch(e){ /* hors canvas */ }
+  return null;
+}
+
+// Cherche le premier FILET HORIZONTAL sous une ordonnée : une rangée de pixels
+// sombres traversant l'essentiel de la largeur de page. C'est le trait qui ferme
+// l'en-tête, ou le bord supérieur du cadre de la carte — dans les deux cas la
+// limite sous laquelle le tableau d'annotation ne doit pas descendre.
+function filetHorizontalSous(yDepart, portee, xa, xb){
+  try{
+    // Bornes en abscisse : par défaut la largeur de page, mais on passe celles de
+    // la COLONNE quand on les connaît. En paysage, le trait qui ferme la zone du
+    // titre est celui du cartouche « Département », qui ne traverse que la colonne
+    // de gauche : exiger 60 % de la largeur de PAGE ne le trouvait pas, d'où une
+    // hauteur disponible sous-évaluée et un tableau réparti en trop de colonnes.
+    const bornes = (Number.isFinite(xa) && Number.isFinite(xb) && xb - xa > 40)
+      ? [Math.round(xa) + 2, Math.round(xb) - 2]
+      : [Math.round(S.W * 0.10), Math.round(S.W * 0.90)];
+    const x0 = bornes[0], larg = bornes[1] - bornes[0];
+    const y0 = Math.max(0, Math.round(yDepart));
+    const h = Math.min(Math.round(portee), S.H - y0);
+    if(h < 4) return null;
+    const d = baseCtx.getImageData(x0, y0, larg, h).data;
+    const sombre = (i) => (0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]) < S.threshold;
+    for(let y = 0; y < h; y++){
+      let n = 0;
+      for(let x = 0; x < larg; x++) if(sombre(y * larg + x)) n++;
+      if(n >= 0.6 * larg) return y0 + y;
+    }
+  }catch(e){ /* hors canvas */ }
+  return null;
+}
+
+function buildExportCanvas(anchor){
+  const c=document.createElement("canvas"); c.width=S.W; c.height=S.H;
+  const x=c.getContext("2d");
+  x.drawImage(base,0,0); x.drawImage(overlay,0,0);
+  // annotations
+  S.notes.forEach(n=>{
+    x.font=`600 ${n.size}px "Segoe UI",sans-serif`;
+    x.textAlign="center"; x.textBaseline="middle";
+    x.lineWidth=4; x.strokeStyle="#fff"; x.strokeText(n.text,n.x*S.W,n.y*S.H);
+    x.fillStyle=n.color; x.fillText(n.text,n.x*S.W,n.y*S.H);
+  });
+  // légende optionnelle
+  if(document.getElementById("inclegend").checked){
+    const items=usedColors().filter(h=>(S.legendLabels[h]||"").trim()!=="")
+                 .map(h=>({c:h,t:S.legendLabels[h]}));
+    if(items.length){
+      const pad=14, line=Math.max(22,S.fontSize+6), boxW=300, boxH=pad*2+line*(items.length+1);
+      const pos=document.getElementById("legendpos").value;
+      const M=22;
+      let bx, by;
+      if(pos==="auto" && anchor){              // centrée sous « cadastre.gouv.fr »
+        bx=Math.min(Math.max(8, (anchor.x0+anchor.x1)/2 - boxW/2), S.W-boxW-8);
+        by=Math.min(Math.max(8, anchor.y1+12), S.H-boxH-8);
+      }else{                                   // coin choisi (ou repli si ancre absente)
+        const p=(pos==="auto")?"tr":pos;
+        bx=(p==="tl"||p==="bl") ? M : S.W-boxW-M;
+        by=(p==="tl"||p==="tr") ? M : S.H-boxH-M;
+      }
+      x.fillStyle="rgba(255,255,255,.95)"; x.strokeStyle="#16314f"; x.lineWidth=2;
+      x.fillRect(bx,by,boxW,boxH); x.strokeRect(bx,by,boxW,boxH);
+      x.fillStyle="#0F2238"; x.textAlign="left"; x.textBaseline="middle";
+      x.font=`700 ${Math.max(15,S.fontSize-2)}px "Segoe UI",sans-serif`;
+      x.fillText("Légende",bx+pad,by+pad+line/2);
+      x.font=`500 ${Math.max(14,S.fontSize-3)}px "Segoe UI",sans-serif`;
+      items.forEach((it,i)=>{
+        const ly=by+pad+line*(i+1)+line/2;
+        x.fillStyle=it.c; x.fillRect(bx+pad,ly-9,18,18);
+        x.strokeStyle="#657D96"; x.lineWidth=1; x.strokeRect(bx+pad,ly-9,18,18);
+        x.fillStyle="#0F2238"; x.fillText(it.t,bx+pad+28,ly);
+      });
+    }
+  }
+  return c;
+}
+
+const PDF_MAX_BYTES=2.6e6;   // cible de taille pour le PDF exporté (~2,5-2,6 Mo)
+// Encode le canvas en JPEG en abaissant la qualité par paliers jusqu'à passer sous maxBytes (plancher 0,45).
+// Image compressée À LA CAPTURE : le canvas est aussitôt abandonné au ramasse-
+// miettes. Exigence « jusqu'à 3 000 parcelles » (JFD, 01/08) : garder les canvas
+// vivants jusqu'à l'assemblage coûtait ~20 Mo pièce — Watten 152 ≈ 3 Go de
+// mémoire, 3 000 était impensable. Avec ceci, la mémoire est PLATE en N.
+function imgCompressee(cv, maxBytes){
+  if(!cv) return null;
+  return { data: jpegUnderSize(cv, maxBytes).data, width: cv.width, height: cv.height };
+}
+function jpegUnderSize(canvas,maxBytes){
+  const bytes=d=>Math.ceil((d.length-(d.indexOf(",")+1))*3/4); // taille reelle depuis le dataURL base64
+  let q=0.92, data=canvas.toDataURL("image/jpeg",q);
+  while(bytes(data)>maxBytes && q>0.45){ q=Math.max(0.45,q-0.07); data=canvas.toDataURL("image/jpeg",q); }
+  return {data,quality:q};
+}
+
+async function doExport(kind){
+  let anchor=null;
+  if(document.getElementById("inclegend").checked && document.getElementById("legendpos").value==="auto"){
+    spin.classList.add("show"); spinmsg.textContent="Localisation de la légende…";
+    anchor=await findCadastreAnchor();
+    spin.classList.remove("show");
+  }
+  const c=buildExportCanvas(anchor);
+  if(kind==="png"){
+    const a=document.createElement("a");
+    a.download=`cadastre-colorise-p${S.page}.png`; a.href=c.toDataURL("image/png"); a.click();
+  }else{
+    const {jsPDF}=window.jspdf;
+    const land = S.W>=S.H;
+    const pdf=new jsPDF({orientation:land?"landscape":"portrait",unit:"pt",format:"a4",compress:true});
+    const pw=pdf.internal.pageSize.getWidth(), ph=pdf.internal.pageSize.getHeight();
+    const m=24, r=Math.min((pw-2*m)/c.width,(ph-2*m)/c.height);
+    const w=c.width*r, h=c.height*r;
+    // JPEG compressé sous une taille cible (~2,5 Mo) au lieu d'un PNG sans perte (~15 Mo).
+    const {data,quality}=jpegUnderSize(c, PDF_MAX_BYTES);
+    pdf.addImage(data,"JPEG",(pw-w)/2,(ph-h)/2,w,h);
+    const blob=pdf.output("blob");                 // téléchargement via blob + lecture de la taille réelle
+    const a=document.createElement("a");
+    a.download=`cadastre-colorise-p${S.page}.pdf`;
+    a.href=URL.createObjectURL(blob); a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+    showHint("PDF généré : "+(blob.size/1e6).toFixed(1)+" Mo (qualité "+Math.round(quality*100)+" %).");
+  }
+}
+/* ==================================================================
+   DOCUMENT À DEUX PAGES — plan cadastral colorié, puis vue aérienne
+   ------------------------------------------------------------------
+   Demandé par JFD le 31/07/2026 : un seul fichier au lieu de deux.
+
+   ⚠ POURQUOI L'EXPORT N'EST PAS DÉCLENCHÉ PAR LE LIEN DE REDPAR, mais par un
+   bouton que l'on presse APRÈS avoir vu la page 1. Les deux pages n'ont pas la
+   même fiabilité, et c'est structurant :
+     — la vue aérienne est DÉTERMINISTE (emprise commandée, aucun OCR) ;
+     — la colorisation cadastrale est SEMI-AUTOMATIQUE PAR CONCEPTION : lecture
+       des numéros au Tesseract, filtre de vraisemblance, sept approches
+       écartées, repli manuel documenté quand les numéros sont trop inclinés.
+   Un bouton « génère le document » parti sans regard produirait donc, de temps
+   en temps, un document dont la PREMIÈRE PAGE est mal coloriée — et cette page
+   part au dossier. Le contrôle humain est ici une pièce du dispositif, pas une
+   précaution facultative.
+
+   ⚠ L'AFFICHAGE EST REMPLACÉ, ET NON RESTAURÉ. Fabriquer la page 2 hors écran
+   aurait demandé de refondre le repère, le tableau et le compositage autour
+   d'un contexte paramétrable, au lieu des variables globales oCtx / S.W / S.H.
+   Arbitrage assumé le 31/07 : moins de code réécrit, donc moins de risque
+   d'erreur, contre la perte de l'état modifiable après export. Elle est
+   tolérable parce que la page 1 est DÉJÀ définitive au moment du clic — et elle
+   est ANNONCÉE au statut. Recharger le lien la reprend depuis le début.
+
+   ⚠ AUCUNE ANCRE OCR SUR LA PAGE 2 : buildExportCanvas est appelé avec un
+   anchor nul, findCadastreAnchor n'ayant rien à trouver sur une photographie.
+   Sans cela on rappellerait Tesseract dans la seule chaîne qui s'en est libérée.
+
+   Budget de taille INCHANGÉ PAR PAGE : chaque page garde la qualité de l'export
+   simple d'aujourd'hui, plutôt que d'être dégradée pour tenir un total. Le
+   document pèse donc environ le double — la taille réelle est annoncée.
+   ================================================================== */
+/* ==================================================================
+   CARTE DE SITUATION DANS LA COMMUNE            (31/07/2026)
+   ------------------------------------------------------------------
+   Demandé par JFD : à côté de la vue aérienne, une carte de la commune avec un
+   repère rouge à l'endroit des parcelles. Même service, même mécanique : un
+   GetMap en conique conforme sur data.geopf.fr, couche Plan IGN v2, donc
+   géoréférencement analytique et marqueur posé au pixel exact. Aucun OCR.
+
+   ⚠ AUCUN PARAMÈTRE D'URL AJOUTÉ. PAINT reçoit déjà le code INSEE ; il appelle
+   geo.api.gouv.fr lui-même — qu'il interroge déjà pour l'autocomplétion — et
+   déduit la zone de l'ordonnée. Un seul fichier à déployer, REDPAR intact.
+
+   ⚠ PROJECTION CONIQUE CONFORME PORTÉE DANS PAINT, qui ne l'avait jamais eue :
+   jusqu'ici REDPAR projetait et PAINT peignait. Elle est nécessaire ici parce
+   que geo.api.gouv.fr rend le contour en degrés alors que tout le reste de la
+   chaîne travaille en mètres projetés. Elle a été VÉRIFIÉE NUMÉRIQUEMENT contre
+   pyproj sur 135 points répartis dans les neuf zones : écart maximal INFÉRIEUR
+   AU MICROMÈTRE. Ne pas la « corriger » sans refaire cette vérification.
+   ================================================================== */
+const CC = { a: 6378137.0, e: Math.sqrt(2 / 298.257222101 - Math.pow(1 / 298.257222101, 2)),
+             lon0: 3.0 * Math.PI / 180 };
+
+function ccParams(zz){
+  const e = CC.e, e2 = e * e, rad = (d) => d * Math.PI / 180;
+  const lat0 = rad(zz), lat1 = rad(zz - 0.75), lat2 = rad(zz + 0.75);
+  const m = (p) => Math.cos(p) / Math.sqrt(1 - e2 * Math.pow(Math.sin(p), 2));
+  const t = (p) => Math.tan(Math.PI / 4 - p / 2)
+    / Math.pow((1 - e * Math.sin(p)) / (1 + e * Math.sin(p)), e / 2);
+  const n = Math.log(m(lat1) / m(lat2)) / Math.log(t(lat1) / t(lat2));
+  const F = m(lat1) / (n * Math.pow(t(lat1), n));
+  return { n, F, r0: CC.a * F * Math.pow(t(lat0), n),
+           x0: 1700000, y0: (zz - 41) * 1e6 + 200000 };
+}
+
+function projeterCC(lon, lat, zz){
+  const P = ccParams(zz), e = CC.e, p = lat * Math.PI / 180;
+  const t = Math.tan(Math.PI / 4 - p / 2)
+    / Math.pow((1 - e * Math.sin(p)) / (1 + e * Math.sin(p)), e / 2);
+  const r = CC.a * P.F * Math.pow(t, P.n);
+  const th = P.n * (lon * Math.PI / 180 - CC.lon0);
+  return [P.x0 + r * Math.sin(th), P.y0 + P.r0 - r * Math.cos(th)];
+}
+
+/* Anneaux d'un contour GeoJSON, Polygon comme MultiPolygon. */
+function anneauxGeo(g){
+  if(!g || !g.coordinates) return [];
+  if(g.type === "Polygon") return g.coordinates;
+  if(g.type === "MultiPolygon") return g.coordinates.reduce((a, b) => a.concat(b), []);
+  return [];
+}
+
+/* UN SEUL APPEL pour la commune, partagé par la carte et par la désignation :
+   le contour cadre la carte, le département et le code postal nourrissent
+   l'attaque. Deux appels pour la même commune seraient un gaspillage, et
+   surtout un risque de divergence entre les deux blocs.
+   ⚠ CETTE FONCTION A ÉTÉ SUPPRIMÉE PAR ACCIDENT le 31/07, emportée par un
+   remplacement de bloc trop large lors du passage aux vues par parcelle. Comme
+   doExportDocument n'avait pas de « catch », la ReferenceError était AVALÉE EN
+   SILENCE : le bouton se réactivait et rien ne se passait. Deux défauts qui se
+   composaient — une découpe trop large et une erreur muette. */
+async function infoCommune(codeInsee){
+  try{
+    const rep = await fetch("https://geo.api.gouv.fr/communes/"
+      + encodeURIComponent(codeInsee)
+      + "?fields=nom,centre,contour,surface,codesPostaux,departement");
+    return rep.ok ? await rep.json() : null;
+  }catch(e){ return null; }
+}
+
+/* FOND DE CARTE COMMUNAL, SANS REPÈRE. Rend un objet ou null ; ne jette jamais,
+   la carte étant un agrément dont l'absence ne doit pas empêcher le document.
+
+   ⚠ UN SEUL APPEL AU SERVICE POUR TOUTE LA COMMUNE. L'emprise ne change pas
+   d'une parcelle à l'autre — seule la croix se déplace. Six parcelles coûtent
+   donc UNE image de fond et six copies, non six requêtes. */
+async function fondCommune(c, zz, aspectCible){
+  try{
+    if(!c) return null;
+    const anneaux = anneauxGeo(c.contour).map((r) => r.map(([lo, la]) => projeterCC(lo, la, zz)));
+    let x0, y0, x1, y1, voie;
+    if(anneaux.length){
+      const pts = anneaux.reduce((a, b) => a.concat(b), []);
+      x0 = Math.min(...pts.map((q) => q[0])); x1 = Math.max(...pts.map((q) => q[0]));
+      y0 = Math.min(...pts.map((q) => q[1])); y1 = Math.max(...pts.map((q) => q[1]));
+      voie = "contour de la commune";
+    }else if(c.centre && c.centre.coordinates){
+      const [cx, cy] = projeterCC(c.centre.coordinates[0], c.centre.coordinates[1], zz);
+      const cote = Math.sqrt(Math.max(Number(c.surface) || 0, 1e6) * 10000) * 0.7;
+      x0 = cx - cote; x1 = cx + cote; y0 = cy - cote; y1 = cy + cote;
+      voie = "carré déduit de la superficie, contour indisponible";
+    }else return null;
+    const mx = (x1 - x0) * 0.05 + 50, my = (y1 - y0) * 0.05 + 50;
+    x0 -= mx; x1 += mx; y0 -= my; y1 += my;
+    if(aspectCible > 0){
+      const larg = x1 - x0, haut = y1 - y0, a = larg / haut;
+      if(a < aspectCible){ const d = (haut * aspectCible - larg) / 2; x0 -= d; x1 += d; }
+      else if(a > aspectCible){ const d = (larg / aspectCible - haut) / 2; y0 -= d; y1 += d; }
+    }
+    const W = 1200, H = Math.max(200, Math.round(W * (y1 - y0) / (x1 - x0)));
+    const url = "https://data.geopf.fr/wms-r/wms?" + new URLSearchParams({
+      SERVICE: "WMS", VERSION: "1.3.0", REQUEST: "GetMap",
+      LAYERS: "GEOGRAPHICALGRIDSYSTEMS.PLANIGNV2", STYLES: "", FORMAT: "image/png",
+      CRS: "EPSG:" + (3900 + zz),
+      BBOX: [x0.toFixed(2), y0.toFixed(2), x1.toFixed(2), y1.toFixed(2)].join(","),
+      WIDTH: String(W), HEIGHT: String(H)
+    }).toString();
+    const img = await new Promise((ok, ko) => {
+      const i = new Image(); i.crossOrigin = "anonymous";
+      i.onload = () => ok(i); i.onerror = () => ko(new Error("plan IGN indisponible"));
+      i.src = url;
+    });
+    const cv = document.createElement("canvas");
+    cv.width = img.naturalWidth || W; cv.height = img.naturalHeight || H;
+    const g = cv.getContext("2d");
+    g.drawImage(img, 0, 0, cv.width, cv.height);
+    const px = (X) => (X - x0) / ((x1 - x0) / cv.width);
+    const py = (Y) => (Y - y1) / (-(y1 - y0) / cv.height);
+    if(anneaux.length){
+      // ORANGE VIF #FF982D de la charte. ⚠ La convention cadastrale du mémo exclut
+      // l'orange, mais elle vaut pour un PLAN CADASTRAL où l'orange signifie le
+      // bâti : le fond est ici un Plan IGN. Et l'orange est franchement DISTINCT du
+      // carmin du repère. Tracé deux fois, liseré blanc dessous — sans lui un
+      // trait de couleur se perd sur les aplats clairs du Plan IGN.
+      const tr = (couleur, ep) => {
+        g.strokeStyle = couleur; g.lineWidth = ep;
+        anneaux.forEach((r) => {
+          g.beginPath();
+          r.forEach(([X, Y], i) => i ? g.lineTo(px(X), py(Y)) : g.moveTo(px(X), py(Y)));
+          g.closePath(); g.stroke();
+        });
+      };
+      const ep = mmPxDe(cv.width, 0.9);
+      g.save(); g.lineJoin = "round";
+      tr("rgba(255,255,255,0.9)", ep * 2.1);
+      tr("#FF982D", ep);
+      g.restore();
+    }
+    // attribution GRAVÉE : elle doit suivre l'image partout où elle va
+    const t = mmPxDe(cv.width, 1.9);
+    g.font = t + "px Georgia, 'Times New Roman', serif"; g.textBaseline = "bottom";
+    const src = "Plan IGN — Géoplateforme";
+    const w = g.measureText(src).width;
+    g.fillStyle = "rgba(255,255,255,0.85)";
+    g.fillRect(4, cv.height - t * 1.5 - 4, w + 10, t * 1.5);
+    g.fillStyle = "#0F2238"; g.fillText(src, 9, cv.height - 7);
+    return { canvas: cv, px, py, voie, nom: c.nom };
+  }catch(e){ return null; }
+}
+
+/* COPIE DU FOND, AVEC SES REPÈRES. Une copie par parcelle, ou une seule portant
+   tous les repères fusionnés — voir § du mémo sur la fusion par distance. */
+function carteAvecRepere(fond, centresCC){
+  const cv = document.createElement("canvas");
+  cv.width = fond.canvas.width; cv.height = fond.canvas.height;
+  const g = cv.getContext("2d");
+  g.drawImage(fond.canvas, 0, 0);
+  // ⚠ LA CROIX NE DOIT PAS TOUCHER L'ANNEAU, et le calcul se fait sur les BORDS
+  // des traits, non sur leurs axes : branches 1,9 mm, anneau 3,4 mm, liseré
+  // 1,4 mm → bord intérieur à 2,7 mm, soit 0,8 mm de jeu. À REFAIRE si une
+  // épaisseur change.
+  const bras = mmPxDe(cv.width, 1.9);
+  const rayon = mmPxDe(cv.width, 3.4);
+  // FUSION DES REPÈRES TROP PROCHES : une croix par parcelle donnait un pâté sur
+  // une unité contiguë. Mais on ne se rabat pas sur un repère unique — des
+  // parcelles dispersées dans deux hameaux méritent deux croix, une croix unique
+  // tombant alors entre les deux, sur du terrain d'autrui.
+  const seuil = rayon * 2.2;
+  const groupes = [];
+  (centresCC || []).forEach(([X, Y]) => {
+    const a = fond.px(X), b = fond.py(Y);
+    const g0 = groupes.find((q) => Math.hypot(q.x - a, q.y - b) < seuil);
+    if(g0){ g0.sx += a; g0.sy += b; g0.n += 1; g0.x = g0.sx / g0.n; g0.y = g0.sy / g0.n; }
+    else groupes.push({ x: a, y: b, sx: a, sy: b, n: 1 });
+  });
+  const anneau = (couleur, ep) => {
+    g.strokeStyle = couleur; g.lineWidth = ep;
+    groupes.forEach((q) => { g.beginPath(); g.arc(q.x, q.y, rayon, 0, 2 * Math.PI); g.stroke(); });
+  };
+  const croix = (couleur, ep) => {
+    g.strokeStyle = couleur; g.lineWidth = ep; g.lineCap = "butt";
+    groupes.forEach((q) => {
+      g.beginPath();
+      g.moveTo(q.x - bras, q.y); g.lineTo(q.x + bras, q.y);
+      g.moveTo(q.x, q.y - bras); g.lineTo(q.x, q.y + bras);
+      g.stroke();
+    });
+  };
+  g.save();
+  anneau("rgba(255,255,255,0.9)", mmPxDe(cv.width, 1.4));
+  anneau("rgba(160,16,64,0.35)", mmPxDe(cv.width, 0.9));
+  croix("rgba(255,255,255,0.9)", mmPxDe(cv.width, 1.5));
+  croix("#A01040", mmPxDe(cv.width, 0.7));
+  g.restore();
+  return cv;
+}
+
+/* EXTRAIT CADASTRAL BRUT D'UNE PARCELLE, sans colorisation.
+   ------------------------------------------------------------------
+   ⚠ C'EST L'ABSENCE DE COLORISATION QUI REND CETTE PAGE POSSIBLE. Colorier
+   exigerait le géoréférencement par OCR des étiquettes de coordonnées — une
+   fermeture de six cents lignes enfermée dans le bloc de chargement, qu'il
+   faudrait hisser au niveau du module. Et surtout, un plan mal géoréférencé ne
+   plante pas : il rend une page PLAUSIBLE ET FAUSSE, la couleur à côté de la
+   parcelle, dans la seule pièce qui délimite. Un extrait brut, lui, ne peut pas
+   être colorié de travers. La page 1 du document porte déjà le plan colorié de
+   l'ensemble ; ces extraits viennent en complément, pour montrer le voisinage
+   immédiat et les numéros mitoyens de chaque parcelle.
+   ⚠ NE PAS « AMÉLIORER » EN AJOUTANT LA COLORISATION sans avoir d'abord sorti
+   georeferencer du bloc de chargement, ET conservé son contrôle des 5 %.
+
+   On pilote les champs de la méthode ② puis on appelle generateExtrait, qui
+   charge le PDF dans le canvas de base. On copie ce canvas SEUL — pas
+   buildExportCanvas, qui y composerait le calque, la légende et les notes du
+   plan colorié. */
+// SIGNATURE : 64 pixels répartis, sommés. Sert à détecter DEUX EXTRAITS
+// IDENTIQUES — la panne du 01/08, que seul l'œil de JFD avait vue. Un
+// programme qui rend trois fois la même image doit le dire lui-même.
+// Factorisée le 01/08 au soir : la voie IFRAME (extraits coloriés) doit signer
+// avec le MÊME algorithme, sinon le détecteur compare des choses différentes.
+function signatureCanvas(cv){
+  let sig = 0;
+  const g = cv.getContext("2d");
+  for(let k = 0; k < 64; k++){
+    const x = Math.floor((k % 8 + 0.5) * cv.width / 8);
+    const y = Math.floor((Math.floor(k / 8) + 0.5) * cv.height / 8);
+    const d = g.getImageData(x, y, 1, 1).data;
+    sig = (sig * 31 + d[0] * 65536 + d[1] * 256 + d[2]) % 2147483647;
+  }
+  return String(sig);
+}
+async function extraitBrutDe(pp){
+  try{
+    const mets = (id, val) => {
+      const e = document.getElementById(id);
+      if(e && val !== undefined && val !== "") e.value = val;
+    };
+    mets("g_prefixe", pp.prefixe);
+    mets("g_section", pp.section);
+    mets("g_parcelle", pp.parcelle);
+    mets("g_echelle", pp.echelle);
+    mets("g_format", pp.format);
+    // ⚠⚠ NEUTRALISER S.recentrage LE TEMPS DE CET APPEL.
+    // generateExtrait SUBSTITUE S.recentrage au centre de la parcelle demandée
+    // (voir le commentaire de sa construction de requête) : mécanisme ajouté
+    // exprès pour les UNITÉS FONCIÈRES, le service centrant sinon sur une
+    // parcelle de bord et laissant le groupe colorié en marge du plan.
+    // Or S.recentrage est renseigné UNE FOIS pour toutes par le préremplissage,
+    // à partir du pt de l'ENSEMBLE. Il écrasait donc la référence à chaque
+    // parcelle : quatre demandes différentes, un seul centre, et donc UNE SEULE
+    // IMAGE ne variant qu'avec l'échelle. C'était le défaut du 01/08.
+    // Ici on veut précisément l'inverse : que le service centre sur LA parcelle.
+    // Le recentrage ne vaut que pour le plan d'ensemble de la page 1.
+    const recentrageSauve = S.recentrage;
+    S.recentrage = null;
+    try{
+      // ⚠ REPRISE SUR ERREUR — 01/08. Le SCPC limite le débit : sur une série,
+      // qu'une parcelle échoue devient probable, et elle sortait SANS extrait,
+      // en silence. Trois tentatives, pauses croissantes (2,5 s puis 5 s) ; le
+      // témoin d'échec est S.extraitEchec, jamais S.pdf (voir generateExtrait).
+      for(let essai = 1; essai <= 3; essai++){
+        await generateExtrait("ref");
+        if(!S.extraitEchec) break;
+        if(essai < 3){
+          spin.classList.add("show");
+          spinmsg.textContent = "Service du cadastre en échec — nouvelle tentative ("
+            + (essai + 1) + "/3) dans " + (essai * 2.5) + " s…";
+          await new Promise((r) => setTimeout(r, essai * 2500));
+        }
+      }
+    }finally{
+      S.recentrage = recentrageSauve;
+    }
+    // ⚠ CE QUE LE PROGRAMME A RÉELLEMENT DEMANDÉ, relu DANS les champs et non
+    // dans mes variables : c'est la seule façon de savoir si l'écriture a pris.
+    const lu = (id) => { const e = document.getElementById(id); return e ? e.value : "∅"; };
+    const demande = lu("g_prefixe") + "/" + lu("g_section") + "/" + lu("g_parcelle")
+      + " au 1/" + lu("g_echelle") + " " + lu("g_format");
+    if(S.extraitEchec)
+      return { canvas: null, demande, sig: "échec du service après 3 tentatives : " + S.extraitEchec };
+    if(!S.pdf) return { canvas: null, demande, sig: "aucun document" };
+    const cv = document.createElement("canvas");
+    cv.width = S.W; cv.height = S.H;
+    cv.getContext("2d").drawImage(base, 0, 0);
+    return { canvas: cv, demande, sig: signatureCanvas(cv) };
+  }catch(e){ return { canvas: null, demande: "erreur", sig: "exception : " + (e && e.message) }; }
+}
+
+/* ==================================================================
+   BAS DES PAGES — DÉSIGNATION, BLOCS PAR PARCELLE, LOCAUX
+   ------------------------------------------------------------------
+   Écrit SUR LA PAGE du PDF et non gravé dans l'image, contrairement au
+   cartouche : ce sont des énonciations, pas des propriétés de la
+   photographie, et une désignation détachée de son acte n'a rien à
+   circuler seule.
+
+   ⚠ POLICE : jsPDF n'a que ses fontes intégrées. Ni Georgia ni Segoe UI de
+   la charte. On emploie « times », seul serif disponible, qui est aussi le
+   registre d'un acte. Écart contraint, non choisi.
+   ================================================================== */
+
+/* Une rangée de grille. Partagée par les deux tableaux pour qu'ils s'alignent
+   à l'œil : mêmes largeurs, même graisse, même retrait. */
+function grille(pdf, x, y, cols, cells, gras, hauteur, lignes, iMulti){
+  const gx = (i) => x + cols.slice(0, i).reduce((a, b) => a + b, 0);
+  pdf.setFont(S.fonteDoc || "helvetica", gras ? "bold" : "normal");
+  cells.forEach((txt, i) => {
+    pdf.rect(gx(i), y, cols[i], hauteur);
+    if(!(lignes && i === iMulti)) pdf.text(String(txt || ""), gx(i) + 4, y + 10);
+  });
+  if(lignes) lignes.forEach((L2, k) => pdf.text(L2, gx(iMulti) + 4, y + 10 + k * 12));
+  return y + hauteur;
+}
+
+/* Colonnes communes aux deux tableaux. Largeurs FIXES en points, non en
+   fractions de page : une colonne « Section » n'a pas à s'étirer parce que la
+   page est large, et le tableau doit garder la même allure d'un dossier à
+   l'autre. Seul le lieudit absorbe le reste, lui seul étant imprévisible. */
+function colonnesCadastre(L, aLieudit){
+  const wSec = 58, wNum = 46, wSurf = 112;
+  return aLieudit
+    ? [wSec, wNum, Math.max(130, L * 0.80 - wSec - wNum - wSurf), wSurf]
+    : [wSec, wNum, wSurf];
+}
+
+function composerDesignation(pdf, y, p, infoCom, rangs, total, M, L, entrees){
+  if(!rangs.length) return y;
+  // ---- EN-TÊTE DE LA PAGE 1, arrêté par JFD le 01/08 (variante B) ----------
+  // Surtitre discret + date, filet canard pleine largeur ; puis le NOM DE LA
+  // COMMUNE en gros serif bleu nuit, département en canard et CODE POSTAL
+  // ACCOLÉS au nom (décision JFD), filet canard pleine largeur dessous.
+  // ⚠ AUCUN BANDEAU PLEIN : la charte les interdit — des filets, jamais des
+  // rectangles de couleur. ⚠ CP omis si la commune en a plusieurs (règle TRENTE).
+  const NUIT = "#0F2238", CANARD = "#33838B", GRISDOC = "#657D96";
+  const nomVille = (p.get("nomCommune") || "").trim().toUpperCase();
+  const deptNom = (infoCom && infoCom.departement && infoCom.departement.nom)
+    ? infoCom.departement.nom.toUpperCase() : "";
+  const cpsT = (infoCom && Array.isArray(infoCom.codesPostaux)) ? infoCom.codesPostaux : [];
+  const cpT = (cpsT.length === 1) ? cpsT[0] : "";
+  pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(8); pdf.setTextColor(GRISDOC);
+  pdf.text("PLAN CADASTRAL & VUES AÉRIENNES", M, y + 10, { charSpace: 1.6 });
+  pdf.text("Édité le " + new Date().toLocaleDateString("fr-FR",
+    { day: "numeric", month: "long", year: "numeric" }), M + L, y + 10, { align: "right" });
+  pdf.setDrawColor(CANARD); pdf.setLineWidth(0.9); pdf.line(M, y + 18, M + L, y + 18);
+  y += 62;
+  pdf.setFont(S.fonteDoc || "helvetica", "bold"); pdf.setFontSize(26); pdf.setTextColor(NUIT);
+  pdf.text(nomVille, M, y);
+  let xT = M + pdf.getTextWidth(nomVille) + 14;
+  pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(13); pdf.setTextColor(CANARD);
+  if(deptNom){ pdf.text(deptNom, xT, y); xT += pdf.getTextWidth(deptNom) + 8; }
+  if(cpT){ pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(10.5);
+    pdf.setTextColor(GRISDOC); pdf.text("· " + cpT, xT, y); }
+  pdf.setDrawColor(CANARD); pdf.setLineWidth(1.2); pdf.line(M, y + 10, M + L, y + 10);
+  y += 36;
+  pdf.setTextColor(0, 0, 0);
+
+  pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(10.5);
+  // ATTAQUE, forme arrêtée par JFD sur pièce :
+  //   « Un actif immobilier situé à COMMUNE (DÉPARTEMENT) (CODE POSTAL) ADRESSE. »
+  // au singulier, « Un ensemble de biens immobiliers situés à … » au pluriel.
+  // ⚠ CODE POSTAL OMIS SI LA COMMUNE EN A PLUSIEURS (règle reprise de TRENTE) :
+  // en imprimer un seul désignerait un quartier plutôt que la commune, ce qui
+  // serait FAUX et non seulement imprécis.
+  // ⚠ ADRESSE DANS L'ATTAQUE UNIQUEMENT POUR UNE PARCELLE : à plusieurs elles
+  // diffèrent et figurent au tableau ; en hisser une donnerait à l'ensemble
+  // l'adresse de l'une d'elles.
+  const dept = (infoCom && infoCom.departement && infoCom.departement.nom)
+    ? infoCom.departement.nom.toUpperCase() : "";
+  const cps = (infoCom && Array.isArray(infoCom.codesPostaux)) ? infoCom.codesPostaux : [];
+  const cp = (cps.length === 1) ? cps[0] : "";
+  const adr = (rangs.length === 1) ? (rangs[0][3] || "").trim() : "";
+  // Formules arrêtées par JFD : « Un actif immobilier situé à … » pour une
+  // parcelle, « Un ensemble de biens immobiliers situés à … » dès qu'il y en a
+  // plusieurs. ⚠ Noter l'accord au PLURIEL de « situés », qui se rapporte aux
+  // biens et non à l'ensemble : c'est voulu, ne pas le « corriger ».
+  const attaque = ((rangs.length > 1)
+      ? "Un ensemble de biens immobiliers situés à " : "Un actif immobilier situé à ")
+    + (p.get("nomCommune") || "").trim()
+    + (dept ? ` (${dept})` : "") + (cp ? ` (${cp})` : "")
+    + (adr ? ` ${adr}` : "") + ".";
+  pdf.splitTextToSize(attaque, L).forEach((ligne) => { pdf.text(ligne, M, y); y += 13; });
+  y += 4;
+  pdf.text("Figurant ainsi au cadastre :", M, y); y += 16;
+
+  // ⚠ UNE COLONNE SANS DONNÉE DISPARAÎT : « Lieudit » vide au milieu de la page,
+  // avec « Surface » rejetée à l'autre bout, se lit comme une donnée manquante
+  // alors que c'est une colonne inutile.
+  const aLieudit = rangs.some((r) => (r[3] || "").trim() !== "");
+  const cols = colonnesCadastre(L, aLieudit);
+  pdf.setLineWidth(0.5); pdf.setFontSize(9.5);
+  // ⚠ PAGINATION DU TABLEAU — constaté le 01/08 sur Watten (150 parcelles et
+  // plus) : les rangs débordaient du feuillet, le pied de page les barrait.
+  // Saut de page avant tout rang qui ne tient pas, EN-TÊTE REPRIS en haut de
+  // chaque page, et le compte des pages (pagesLocales) ALIMENTE LA NUMÉROTATION
+  // DU SOMMAIRE : l'oublier décalerait tous les numéros d'autant.
+  const basTableau = pdf.internal.pageSize.getHeight() - 56;
+  let pagesLocales = 1;
+  const sautTableau = (h) => {
+    if(y + h > basTableau){
+      pdf.addPage("a4", "portrait"); pagesLocales += 1; y = M;
+      pdf.setLineWidth(0.5); pdf.setFontSize(9.5);
+      y = grille(pdf, M, y, cols,
+        aLieudit ? ["Section", "N°", "Lieudit", "Surface"] : ["Section", "N°", "Surface"],
+        true, 14, null, 2);
+    }
+  };
+  y = grille(pdf, M, y, cols,
+    aLieudit ? ["Section", "N°", "Lieudit", "Surface"] : ["Section", "N°", "Surface"],
+    true, 14, null, 2);
+  rangs.forEach((r) => {
+    let h = 14, lignes = null;
+    if(aLieudit){
+      lignes = pdf.splitTextToSize((r[3] || "").trim(), cols[2] - 8);
+      h = Math.max(14, lignes.length * 12 + 4);
+    }
+    sautTableau(h);
+    y = grille(pdf, M, y, cols,
+      aLieudit ? [r[0], r[1], "", r[2]] : [r[0], r[1], r[2]], false, h, lignes, 2);
+  });
+  // Total UNIQUEMENT à partir de deux parcelles, et pris du paramètre « total »
+  // plutôt que recalculé : c'est REDPAR qui somme, en mètres carrés, pas PAINT
+  // à partir de chaînes déjà mises en forme.
+  if(rangs.length > 1 && total){
+    sautTableau(14);
+    y = grille(pdf, M, y, cols,
+      aLieudit ? ["", "", "Total", total] : ["", "Total", total], true, 14, null, -1);
+  }
+  // ---- SOMMAIRE — remplace « Composition du document » (décision JFD 01/08) :
+  // une ligne par PARCELLE avec le NUMÉRO DE PAGE de sa fiche, précédée du plan
+  // d'ensemble. Points durs, à ne pas défaire :
+  // ⚠ Il se bâtit sur VUES et non sur rangs : une parcelle dont la vue a échoué
+  //   n'a PAS de page — un sommaire bâti sur rangs pointerait alors faux.
+  // ⚠ Les numéros se CALCULENT AVANT d'exister : fiche i = pagesDes + 2 + i, où
+  //   pagesDes = pages de la présente désignation, sommaire compris. D'où la
+  //   SIMULATION de pagination ci-dessous, à l'identique du tracé réel — toute
+  //   retouche du tracé (interligne, seuils) doit être répercutée dans les deux.
+  const phD = pdf.internal.pageSize.getHeight();
+  const basUtile = phD - 56;   // au-dessus de la zone du pied de page
+  // Les entrées arrivent DÉJÀ INTERCALÉES (plans de section et fiches, dans
+  // l'ordre exact des pages) : une entrée = une page, la numérotation est
+  // séquentielle — pagesDes + 1 + rang de l'entrée.
+  const items = entrees || [];
+  // Le titre SOMMAIRE ne s'orpheline pas en bas de page : s'il ne tient pas
+  // avec au moins une ligne, il passe à la page suivante — et pagesLocales
+  // suit, la simulation partant du même état que le tracé.
+  if(y + 26 + 15 > basUtile){ pdf.addPage("a4", "portrait"); pagesLocales += 1; y = M; }
+  y += 26;
+  let ySim = y + 15, pagesDes = pagesLocales;
+  for(let n = 0; n < items.length; n++){
+    if(ySim + 13 > basUtile){ pagesDes += 1; ySim = M + 15; }
+    ySim += 13;
+  }
+  pdf.setFont(S.fonteDoc || "helvetica", "bold"); pdf.setFontSize(9); pdf.setTextColor("#33838B");
+  pdf.text("SOMMAIRE", M, y, { charSpace: 1.2 });
+  y += 15;
+  pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(9.5);
+  const ligneSommaire = (label, page) => {
+    if(y + 13 > basUtile){ pdf.addPage("a4", "portrait"); y = M + 15; }
+    pdf.setTextColor("#0F2238");
+    pdf.text(label, M, y);
+    const num = "p. " + page;
+    pdf.setTextColor("#657D96");
+    pdf.text(num, M + L, y, { align: "right" });
+    // Conduite pointillée entre le libellé et le numéro, à la manière d'une
+    // table des matières — un filet discret, pas un aplat.
+    const x1 = M + pdf.getTextWidth(label) + 6;
+    const x2 = M + L - pdf.getTextWidth(num) - 6;
+    if(x2 > x1){
+      pdf.setDrawColor("#d8dee6"); pdf.setLineWidth(0.5);
+      pdf.setLineDashPattern([1, 2], 0);
+      pdf.line(x1, y - 2.5, x2, y - 2.5);
+      pdf.setLineDashPattern([], 0);
+    }
+    // Lien interne : un clic sur la ligne ouvre la page visée. API vérifiée au
+    // banc sur jsPDF 2.5.1 (pdf.link + pageNumber) avant intégration.
+    pdf.link(M, y - 9, L, 12, { pageNumber: page });
+    y += 13;
+  };
+  items.forEach((it, i) => ligneSommaire(it.label, pagesDes + 1 + i));
+  pdf.setTextColor(0, 0, 0);
+  return y + 12;
+}
+
+/* BLOC PAR PARCELLE — forme arrêtée par JFD le 31/07 : sous-titre souligné,
+   tableau réduit à la parcelle concernée, les deux vues côte à côte, puis un
+   trait de séparation.
+
+   ⚠ LE SOUS-TITRE N'EST PAS DÉCORATIF. Plusieurs photographies aériennes sans
+   légende sont PIRES qu'une seule : le lecteur ne sait plus laquelle va avec
+   quelle parcelle, et peut rapporter au bien une vue qui n'est pas la sienne.
+   ⚠ LES DEUX VUES SONT CARRÉES (carre=1 côté ortho, aspect 1 côté carte), sans
+   quoi les hauteurs ne s'aligneraient pas d'une ligne à l'autre. */
+function composerBlocParcelle(pdf, y, vue, M, L, budget, aLieudit){
+  const ph = pdf.internal.pageSize.getHeight();
+  const ecart = 16, w = (L - ecart) / 2;
+  // UNE PARCELLE PAR PAGE, forme arrêtée par JFD : référence, les deux plans au
+  // format constant, puis l'extrait cadastral sur tout le reste de la page. Le
+  // trait de séparation a donc disparu — la page fait la séparation.
+  pdf.addPage("a4", "portrait"); y = M;
+
+  pdf.setFont(S.fonteDoc || "helvetica", "bold"); pdf.setFontSize(11);
+  pdf.text(vue.ref, M, y);
+  const lw = pdf.getTextWidth(vue.ref);
+  pdf.setLineWidth(0.7); pdf.line(M, y + 2.5, M + lw, y + 2.5);
+  y += 18;
+
+  if(vue.rang){
+    const cols = colonnesCadastre(L, aLieudit);
+    const r = vue.rang;
+    pdf.setLineWidth(0.5); pdf.setFontSize(9.5);
+    y = grille(pdf, M, y, cols,
+      aLieudit ? ["Section", "N°", "Lieudit", "Surface"] : ["Section", "N°", "Surface"],
+      true, 14, null, 2);
+    let h = 14, lignes = null;
+    if(aLieudit){
+      lignes = pdf.splitTextToSize((r[3] || "").trim(), cols[2] - 8);
+      h = Math.max(14, lignes.length * 12 + 4);
+    }
+    y = grille(pdf, M, y, cols,
+      aLieudit ? [r[0], r[1], "", r[2]] : [r[0], r[1], r[2]], false, h, lignes, 2);
+    y += 6;
+  }
+
+  if(vue.ortho){
+    pdf.addImage(vue.ortho.data, "JPEG", M, y, w, w);
+  }else{
+    // Cadre gris et mention : la parcelle reste au document, l'absence est DITE.
+    pdf.setDrawColor("#d8dee6"); pdf.setLineWidth(0.7); pdf.rect(M, y, w, w);
+    pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(9);
+    pdf.setTextColor("#657D96");
+    pdf.text("Vue aérienne indisponible", M + w / 2, y + w / 2, { align: "center" });
+    pdf.setTextColor(0, 0, 0);
+  }
+  if(vue.carte)
+    pdf.addImage(vue.carte.data, "JPEG", M + w + ecart, y, w, w);
+  y += w + 12;
+
+  // ---- EXTRAIT CADASTRAL BRUT, sur tout le reste de la page ------------
+  // Ajusté en conservant son rapport et centré : un extrait est en A4 portrait ou
+  // paysage selon la parcelle, on ne l'étire jamais.
+  if(vue.extrait){
+    const reste = ph - 48 - y;
+    const r = Math.min(L / vue.extrait.width, reste / vue.extrait.height);
+    const iw = vue.extrait.width * r, ih = vue.extrait.height * r;
+    pdf.addImage(vue.extrait.data, "JPEG", M + (L - iw) / 2, y, iw, ih);
+    y += ih;
+  }else{
+    // On le DIT plutôt que de laisser un blanc : un vide se lit comme un oubli.
+    // ⚠ Selawik n'a PAS d'italique (la famille n'en comporte pas) : mention en
+    // normal GRIS — la couleur distingue, sans risquer un style absent.
+    pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(9);
+    pdf.setTextColor("#657D96");
+    pdf.text("Extrait du plan cadastral non disponible pour cette parcelle.", M, y + 12);
+    pdf.setTextColor(0, 0, 0);
+    y += 20;
+  }
+  return y;
+}
+
+function composerLocaux(pdf, y, p, M, L){
+  const ph = pdf.internal.pageSize.getHeight();
+  const mB = (p.get("bati") || "").match(/^(\d+),(\d+)$/);
+  if(!mB) return y;
+  const nbBat = parseInt(mB[1], 10), nbLots = parseInt(mB[2], 10);
+  if(y + 60 > ph - 48){ pdf.addPage("a4", "portrait"); y = M; }
+  pdf.setFont(S.fonteDoc || "helvetica", "bold"); pdf.setFontSize(11);
+  pdf.text("LOCAUX BÂTIS", M, y); y += 6;
+  pdf.setLineWidth(0.6); pdf.line(M, y, M + L, y); y += 16;
+
+  pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(10.5);
+  const pl = (n, mot) => n + " " + mot + (n > 1 ? "s" : "");
+  // ⚠ AUCUNE SUPERFICIE : le volet bâti IDENTIFIE les locaux (bâtiment, entrée,
+  // niveau, porte), il ne les MESURE pas. Cette donnée n'existe pas dans la
+  // source, ne pas la chercher.
+  pdf.text(pl(nbBat, "bâtiment") + ", " + pl(nbLots, "lot")
+    + " recensés au fichier des locaux.", M, y);
+  y += 18;
+
+  // ⚠ DEUX FORMATS ACCEPTÉS, et ce n'est pas de la complaisance : PAINT se déploie
+  // AVANT REDPAR, donc il reçoit forcément un moment l'ancien format à quatre
+  // champs. Six champs = section, numéro, bâtiment, entrée, niveau, porte ;
+  // quatre = l'ancien, sans parcelle, complété par deux champs vides.
+  const lots = (p.get("lots") || "").split(";")
+    .map((r) => r.split(",").map((c) => c.trim()))
+    .filter((r) => r.length >= 1 && r.some((c) => c !== ""))
+    .map((r) => (r.length >= 6) ? r.slice(0, 6)
+      : ["", "", r[0] || "", r[1] || "", r[2] || "", r[3] || ""]);
+  if(!lots.length) return y;
+
+  // ⚠⚠ CE QUE CES COLONNES SONT ET NE SONT PAS. Bâtiment, entrée, niveau, porte
+  // sont des REPÈRES DE POSITION CADASTRALE du fichier des locaux. Ce ne sont PAS
+  // des numéros de lot d'état descriptif de division : MAJIC n'en porte aucun, et
+  // les colonnes « PDL » et « N° du lot » d'un M1 restent vides. Le mot « lots »
+  // est conservé pour l'intitulé à la demande de JFD, la confusion possible avec
+  // un EDD ayant été signalée et assumée. NE PAS rapprocher ces valeurs d'un EDD.
+  // ⚠ LES COLONNES CONSTANTES DISPARAISSENT, même principe que « Lieudit » vide
+  // dans la désignation : si tous les lots relèvent de la MÊME parcelle — cas d'un
+  // document à parcelle unique —, section et numéro répéteraient la même valeur à
+  // chaque ligne, ce que la désignation dit déjà une fois pour toutes.
+  // Les largeurs de Section et N° sont celles de colonnesCadastre, pour que les
+  // trois tableaux du document s'alignent verticalement.
+  const memeParcelle = lots.every((r) => r[0] === lots[0][0] && r[1] === lots[0][1]);
+  const cw = memeParcelle ? [110, 90, 90, 90] : [58, 46, 100, 75, 75, 75];
+  const hL2 = 14;
+  const entetes = memeParcelle
+    ? ["Bâtiment", "Entrée", "Niveau", "Porte"]
+    : ["Section", "N°", "Bâtiment", "Entrée", "Niveau", "Porte"];
+  const cellules = (r) => memeParcelle ? [r[2], r[3], r[4], r[5]] : r;
+  const enTete = () => { y = grille(pdf, M, y, cw, entetes, true, hL2, null, -1); };
+  pdf.setLineWidth(0.5); pdf.setFontSize(9.5);
+  enTete();
+  lots.forEach((r) => {
+    if(y + hL2 > ph - 48){
+      pdf.addPage("a4", "portrait"); y = M;
+      pdf.setFont(S.fonteDoc || "helvetica", "bold"); pdf.setFontSize(11);
+      pdf.text("LOCAUX BÂTIS (suite)", M, y); y += 6;
+      pdf.setLineWidth(0.6); pdf.line(M, y, M + L, y); y += 16;
+      pdf.setLineWidth(0.5); pdf.setFontSize(9.5);
+      enTete();   // en-tête REPRIS : une grille sans intitulé, en page 4, ne se lit pas
+    }
+    y = grille(pdf, M, y, cw,
+      cellules(r).map((c) => c || "—"), false, hL2, null, -1);
+  });
+  return y;
+}
+
+// ---- VOILE DE PRODUCTION (docauto) — JFD, 01/08 au soir --------------------
+// L'onglet du Dossier complet manipulait ses champs sous les yeux de
+// l'utilisateur : on croyait devoir interagir. Le voile couvre tout, SUIT LE
+// SABLIER (il relit spinmsg toutes les 400 ms et en extrait « i sur N » pour la
+// barre — zéro instrumentation des boucles, elles parlent déjà), et tourne une
+// pointe d'humour toutes les 7 s. Il s'efface si des RÉSERVES doivent se lire.
+const QUIPS_VOILE = [
+  "Le carmin, jamais le jaune : convention du plan cadastral oblige.",
+  "Chaque parcelle se fait tirer le portrait — trois poses par parcelle.",
+  "Tesseract relit les coordonnées en marge, à la loupe.",
+  "Un conservateur des hypothèques aurait demandé trois semaines et deux timbres.",
+  "Le service du cadastre a son rythme ; nous avons la patience.",
+  "Bornage au pixel près, sans convoquer le géomètre-expert.",
+  "Les contours sont projetés en conique conforme — la Terre est têtue, on s'adapte.",
+  "Pendant ce temps, votre café reste chaud. C'est le moment.",
+  "Chaque plan sort nu, pleine page : c'est la pièce qui fait foi.",
+  "Le sommaire se calcule avant d'exister — les pages tiennent parole.",
+];
+// ---- MUSIQUE GÉNÉRÉE (Web Audio) — aucune œuvre protégée, tout est
+// synthétisé : nappe grave + arpèges pentatoniques doux, volume de
+// bibliothèque. ⚠ L'autoplay sans geste est interdit par Chrome dans un onglet
+// ouvert par script : d'où le bouton ♪ ; la préférence est retenue
+// (localStorage) et RETENTÉE au volume suivant — si le navigateur refuse
+// encore, le bouton reste éteint, un clic suffit.
+// ⚠⚠ BONUS DE PERFORMANCE, mesurable : Chrome ÉTRANGLE les minuteries des
+// onglets en arrière-plan (jusqu'à 1/minute après 5 min) — ce qui ralentirait
+// le sondage des iframes et les pauses de reprise SCPC. Un onglet QUI JOUE DE
+// L'AUDIO EN EST EXEMPTÉ : la musique protège la cadence du traitement en
+// arrière-plan. Les animations, elles, vivent sur le compositeur (transform/
+// opacity) et se mettent seules en pause hors écran : coût nul sur les plans.
+// ---- RADIO CLASSIQUE D'ABORD, MUSIQUE MAISON EN REPLI (JFD, 01/08 soir) ----
+// Le flux est celui que la station diffuse publiquement (Infomaniak). ⚠ Adresse
+// NON CONTRACTUELLE : elle peut changer ou tomber sans préavis — d'où le REPLI
+// AUTOMATIQUE sur la musique générée, et l'état DIT sur le bouton. L'usage est
+// celui d'un poste de radio au bureau : écoute personnelle dans l'outil
+// interne. Un flux audible exempte l'onglet de l'étranglement d'arrière-plan
+// exactement comme la synthèse (voir la note de performance ci-dessous).
+const FLUX_RADIO_CLASSIQUE = "https://radioclassique.ice.infomaniak.ch/radioclassique-high.mp3";
+let vRadio = null;
+function radioDemarrer(){
+  return new Promise((res) => {
+    try{
+      if(!vRadio){
+        vRadio = new Audio(FLUX_RADIO_CLASSIQUE);
+        vRadio.volume = 0.35;
+      }
+      let tranche = false;
+      const echec = () => { if(!tranche){ tranche = true; res(false); } };
+      vRadio.addEventListener("error", echec, { once: true });
+      // Un flux en direct peut mettre 2-3 s à démarrer : on tranche sur play().
+      vRadio.play().then(() => { if(!tranche){ tranche = true; res(true); } }).catch(echec);
+      setTimeout(echec, 6000);   // flux muet au-delà de 6 s = échec, repli
+    }catch(e){ res(false); }
+  });
+}
+function radioArreter(){
+  if(vRadio){ try{ vRadio.pause(); vRadio.src = ""; }catch(e){} vRadio = null; }
+}
+let vAudio = null;
+function musiqueDemarrer(){
+  try{
+    if(!vAudio){
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const maitre = ctx.createGain(); maitre.gain.value = 0.055; maitre.connect(ctx.destination);
+      const nappe = ctx.createOscillator(); nappe.type = "sine"; nappe.frequency.value = 110;
+      const gNappe = ctx.createGain(); gNappe.gain.value = 0.22;
+      nappe.connect(gNappe); gNappe.connect(maitre); nappe.start();
+      vAudio = { ctx, maitre, prochaine: 0, minuterie: null };
+      // Planification avec AVANCE (30 s de notes posées d'avance, resservies
+      // toutes les 10 s) : même si la minuterie est étranglée en arrière-plan,
+      // l'horloge AUDIO, elle, ne s'arrête jamais — la musique reste fluide.
+      const GAMME = [220, 261.6, 293.7, 329.6, 392, 440, 523.3];
+      const poserNotes = () => {
+        const t0 = Math.max(vAudio.prochaine, vAudio.ctx.currentTime + 0.1);
+        let t = t0;
+        while(t < vAudio.ctx.currentTime + 30){
+          const f = GAMME[Math.floor(Math.random() * GAMME.length)];
+          const o = vAudio.ctx.createOscillator(); o.type = "triangle"; o.frequency.value = f;
+          const g = vAudio.ctx.createGain();
+          g.gain.setValueAtTime(0, t);
+          g.gain.linearRampToValueAtTime(0.5, t + 0.06);
+          g.gain.exponentialRampToValueAtTime(0.001, t + 1.9);
+          o.connect(g); g.connect(vAudio.maitre);
+          o.start(t); o.stop(t + 2);
+          t += 1.4 + Math.random() * 1.2;
+        }
+        vAudio.prochaine = t;
+      };
+      poserNotes();
+      vAudio.minuterie = setInterval(poserNotes, 10000);
+    }
+    return vAudio.ctx.resume().then(() => vAudio.ctx.state === "running");
+  }catch(e){ console.warn("musique :", e); return Promise.resolve(false); }
+}
+function musiqueArreter(){
+  if(!vAudio) return;
+  clearInterval(vAudio.minuterie);
+  try{ vAudio.ctx.close(); }catch(e){}
+  vAudio = null;
+}
+function musiqueBrancher(){
+  const b = document.getElementById("vmusique");
+  if(!b || b.dataset.pret) return;
+  b.dataset.pret = "1";
+  const maj = (etat) => {   // etat : "radio" | "maison" | false
+    b.classList.toggle("on", !!etat);
+    b.textContent = etat === "radio" ? "♪ Radio Classique — en direct"
+      : etat === "maison" ? "♪ musique maison (flux radio indisponible)"
+      : "♪ Radio Classique";
+  };
+  const demarrerTout = () => radioDemarrer().then((ok) => {
+    if(ok) return "radio";
+    return musiqueDemarrer().then((ok2) => (ok2 ? "maison" : false));
+  });
+  const arreterTout = () => { radioArreter(); musiqueArreter(); };
+  b.addEventListener("click", () => {
+    const enCours = (vRadio && !vRadio.paused) || (vAudio && vAudio.ctx.state === "running");
+    if(enCours){
+      arreterTout(); maj(false); localStorage.setItem("paint_voile_musique", "0");
+    }else{
+      demarrerTout().then((etat) => { maj(etat); if(etat) localStorage.setItem("paint_voile_musique", "1"); });
+    }
+  });
+  if(localStorage.getItem("paint_voile_musique") === "1")
+    demarrerTout().then(maj);   // retenté sans geste : accepté ou refusé, l'état du bouton le dit
+  else
+    maj(false);
+}
+// Pluie de documents : 14 feuilles semées sur toute la largeur, paramètres
+// tirés au sort. Délai NÉGATIF = la feuille est déjà en l'air à l'ouverture.
+// Le VENT de la session : un sens tiré au sort à l'ouverture, commun à toutes
+// les feuilles (un vent souffle d'un côté) ; la force varie par feuille.
+let vVent = 0;
+function semerFeuille(c, enChute){
+  if(!vVent) vVent = Math.random() < 0.5 ? -1 : 1;
+  const d = document.createElement("div"); d.className = "vchute";
+  const g = document.createElement("div"); g.className = "vtangue";
+  const f = document.createElement("div"); f.className = "vfeuillet";
+  d.style.left = (2 + Math.random() * 96).toFixed(1) + "vw";
+  d.style.setProperty("--dur", (10 + Math.random() * 9).toFixed(1) + "s");
+  // enChute : délai NÉGATIF, la feuille est déjà en l'air (ciel plein à
+  // l'ouverture). Sinon (réapparition après un tir) : elle repart du haut.
+  d.style.setProperty("--del", enChute ? (-Math.random() * 18).toFixed(1) + "s" : "0s");
+  d.style.setProperty("--vent", Math.round(vVent * (40 + Math.random() * 170)) + "px");
+  g.style.setProperty("--bal2", (0.8 + Math.random() * 0.9).toFixed(2) + "s");
+  g.style.setProperty("--amp2", Math.round(6 + Math.random() * 14) + "px");
+  f.style.setProperty("--tail", Math.round(30 + Math.random() * 30) + "px");
+  f.style.setProperty("--amp", Math.round(18 + Math.random() * 46) + "px");
+  f.style.setProperty("--bal", (1.8 + Math.random() * 1.8).toFixed(2) + "s");
+  f.style.setProperty("--gite", Math.round(vVent * (3 + Math.random() * 6)) + "deg");
+  f.style.setProperty("--tourn", Math.round(22 + Math.random() * 34) + "deg");
+  // CINQ ESPÈCES (choix JFD sur planches) : acte scellé, mini-plan, chemise
+  // kraft, vue aérienne, carte de situation. Tirage au sort à la naissance,
+  // contenu composé au hasard — aucune feuille n'est la copie d'une autre.
+  const el = (cls, css) => {
+    const e = document.createElement("div");
+    e.className = cls;
+    if(css) for(const k in css) e.style[k] = css[k];
+    f.appendChild(e); return e;
+  };
+  const pc = (a, b) => Math.round(a + Math.random() * (b - a)) + "%";
+  const espece = ["acte", "plan", "kraft", "aerien", "carte"][Math.floor(Math.random() * 5)];
+  f.classList.add("esp-" + espece);
+  if(espece === "acte"){
+    el("vlgn t", { width: pc(45, 75) });
+    const nl = 3 + Math.floor(Math.random() * 3);
+    for(let j = 0; j < nl; j++)
+      el("vlgn", { width: (j === nl - 1) ? pc(35, 65) : pc(62, 96) });
+    el("vsceau"); el("vsign");
+  }else if(espece === "plan"){
+    el("vpar j", { left: pc(8, 14), top: pc(10, 16), width: pc(26, 36), height: pc(16, 24), transform: "rotate(-8deg)" });
+    el("vpar b", { right: pc(8, 14), top: pc(12, 20), width: pc(24, 34), height: pc(18, 24), transform: "rotate(5deg)" });
+    el("vpar j", { left: pc(10, 18), top: pc(44, 52), width: pc(22, 30), height: pc(16, 22), transform: "rotate(4deg)" });
+    el("vpar c", { right: pc(12, 22), top: pc(42, 50), width: pc(26, 34), height: pc(20, 26), transform: "rotate(-5deg)" });
+    el("vcanal", { top: pc(76, 84) });
+    el("vamorce", { left: pc(40, 52), top: pc(28, 36) });
+  }else if(espece === "kraft"){
+    el("vonglet"); el("vetiq");
+  }else if(espece === "aerien"){
+    const verts = ["#587448", "#3c5434", "#687c54", "#7a8060"];
+    for(let j = 0; j < 9; j++)
+      el("vtuile", { left: pc(2, 78), top: pc(2, 80), width: pc(10, 24), height: pc(7, 16),
+        background: verts[Math.floor(Math.random() * verts.length)] });
+    el("vroute", { top: pc(58, 70) });
+    el("vtoit", { left: pc(12, 30), top: pc(20, 34) });
+    el("vtoit", { left: pc(46, 62), top: pc(14, 28) });
+    el("vanneau", { left: pc(30, 48), top: pc(34, 48) });
+    el("vechel");
+  }else{ // carte de situation
+    el("vriviere", { top: pc(66, 78) });
+    el("vcontour");
+    el("vcible", { left: pc(32, 44), top: pc(34, 46) });
+  }
+  g.appendChild(f); d.appendChild(g); c.appendChild(d);
+}
+function chutesLancer(){
+  if(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const c = document.getElementById("vchutes");
+  if(!c || c.childElementCount) return;
+  for(let i = 0; i < 14; i++) semerFeuille(c, true);
+}
+function chutesArreter(){
+  const c = document.getElementById("vchutes");
+  if(c) c.innerHTML = "";
+}
+// Un canard traverse — vite. Sens, altitude, vitesse tirés au sort ; il se
+// retire tout seul au bout de sa course. Ne vole pas si le mouvement réduit
+// est demandé, ni si le voile est déjà tombé.
+function semerCanard(){
+  if(window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const v = document.getElementById("voile"), c = document.getElementById("vchutes");
+  if(!v || !v.classList.contains("on") || !c) return;
+  const d = document.createElement("div");
+  d.className = "vcanard" + (Math.random() < 0.5 ? " rg" : "");
+  d.style.setProperty("--alt", Math.round(10 + Math.random() * 55) + "%");
+  const vit = 3 + Math.random() * 2.5;
+  d.style.setProperty("--vit", vit.toFixed(2) + "s");
+  const b = document.createElement("div"); b.className = "vbob";
+  const o = document.createElement("div"); o.className = "voiseau";
+  ["vqueue", "vcorps", "vtete", "voeil", "vbec", "vaile"].forEach((cl) => {
+    const e = document.createElement("div"); e.className = cl; o.appendChild(e);
+  });
+  b.appendChild(o); d.appendChild(b); c.appendChild(d);
+  setTimeout(() => d.remove(), vit * 1000 + 300);   // bout de course, sans trophée
+}
+// ---- STAND DE TIR (JFD, 01/08 soir) : la croix suit le pointeur, clic gauche
+// = tir. Test d'impact MANUEL (getBoundingClientRect sur ~14 feuilles — les
+// feuilles restent pointer-events:none, donc elementsFromPoint ne les voit
+// pas ; le calcul direct est trivial et sûr). Une feuille touchée explose en
+// éclats de papier, une nouvelle repart du haut 1,5 à 3 s plus tard : la
+// densité du ciel est constante. Le bouton ♪ reste cliquable : un pointerdown
+// dont la cible est le bouton n'est PAS un tir. #voile étant fixed inset:0,
+// clientX/Y sont directement les coordonnées dans le voile.
+let vTirs = { score: 0, arme: false };
+function viseurArmer(){
+  const v = document.getElementById("voile"), s = document.getElementById("viseur");
+  if(!v || !s || vTirs.arme) return;
+  vTirs.arme = true;
+  v.addEventListener("pointermove", (e) => {
+    s.style.transform = "translate(" + (e.clientX - 32) + "px," + (e.clientY - 32) + "px)";
+  });
+  v.addEventListener("pointerdown", (e) => {
+    if(e.target && e.target.closest && e.target.closest("#vmusique")) return;   // le bouton se clique, ne se tire pas
+    if(e.button !== undefined && e.button !== 0) return;                        // clic gauche seulement
+    s.style.transform = "translate(" + (e.clientX - 32) + "px," + (e.clientY - 32) + "px)";
+    s.classList.add("recul");
+    setTimeout(() => s.classList.remove("recul"), 130);
+    tirer(e.clientX, e.clientY);
+  });
+}
+function tirer(x, y){
+  const c = document.getElementById("vchutes");
+  if(!c) return;
+  // Les CANARDS d'abord : cible prioritaire (et plus dure). Un canard touché
+  // fige sa position en px, bascule, chute — et vaut TROIS impressions.
+  for(const d of c.querySelectorAll(".vcanard:not(.touche)")){
+    const o = d.querySelector(".voiseau");
+    const r = o.getBoundingClientRect();
+    if(x >= r.left - 6 && x <= r.right + 6 && y >= r.top - 6 && y <= r.bottom + 6){
+      abattreCanard(c, d, r, x, y);
+      return;
+    }
+  }
+  const feuilles = c.querySelectorAll(".vchute");
+  for(const d of feuilles){
+    const f = d.querySelector(".vfeuillet");   // la feuille est sous le tangage
+    if(!f) continue;
+    const r = f.getBoundingClientRect();
+    if(x >= r.left - 6 && x <= r.right + 6 && y >= r.top - 6 && y <= r.bottom + 6){
+      exploserFeuille(c, d, x, y);
+      return;   // un tir, un dossier — pas de carton double
+    }
+  }
+}
+function abattreCanard(c, d, r, x, y){
+  // Figer la position (la traversée s'arrête), puis laisser tomber.
+  d.style.left = r.left + "px";
+  d.style.top = r.top + "px";
+  d.style.setProperty("--alt", "0");
+  d.classList.add("touche");
+  setTimeout(() => d.remove(), 1100);
+  const flash = document.createElement("div");
+  flash.className = "vflash";
+  flash.style.left = (x - 5) + "px"; flash.style.top = (y - 5) + "px";
+  c.appendChild(flash);
+  setTimeout(() => flash.remove(), 350);
+  const plumes = ["#33838B", "#2a6d74", "#ffffff", "#ffffff", "#FF982D"];
+  for(let k = 0; k < 12; k++){
+    const fr = document.createElement("div");
+    fr.className = "vfrag";
+    const a = Math.random() * 2 * Math.PI, dist = 35 + Math.random() * 70;
+    fr.style.left = x + "px"; fr.style.top = y + "px";
+    fr.style.width = (3 + Math.random() * 6) + "px";
+    fr.style.height = (6 + Math.random() * 9) + "px";
+    fr.style.borderRadius = "50% 50% 50% 0";
+    fr.style.background = plumes[Math.floor(Math.random() * plumes.length)];
+    fr.style.setProperty("--dx", Math.round(Math.cos(a) * dist) + "px");
+    fr.style.setProperty("--dy", Math.round(Math.sin(a) * dist + 24) + "px");
+    fr.style.setProperty("--rot", Math.round((Math.random() - 0.5) * 540) + "deg");
+    c.appendChild(fr);
+    setTimeout(() => fr.remove(), 750);
+  }
+  vTirs.score += 3;
+  const sc = document.querySelector("#vscore b");
+  if(sc) sc.textContent = String(vTirs.score);
+}
+function exploserFeuille(c, d, x, y){
+  d.remove();
+  const flash = document.createElement("div");
+  flash.className = "vflash";
+  flash.style.left = (x - 5) + "px"; flash.style.top = (y - 5) + "px";
+  c.appendChild(flash);
+  setTimeout(() => flash.remove(), 350);
+  const teintes = ["#ffffff", "#ffffff", "#c7d2de", "#FFE764", "#A01040"];
+  for(let k = 0; k < 10; k++){
+    const fr = document.createElement("div");
+    fr.className = "vfrag";
+    const a = Math.random() * 2 * Math.PI, dist = 45 + Math.random() * 85;
+    fr.style.left = x + "px"; fr.style.top = y + "px";
+    fr.style.width = (4 + Math.random() * 8) + "px";
+    fr.style.height = (5 + Math.random() * 10) + "px";
+    fr.style.background = teintes[Math.floor(Math.random() * teintes.length)];
+    fr.style.setProperty("--dx", Math.round(Math.cos(a) * dist) + "px");
+    fr.style.setProperty("--dy", Math.round(Math.sin(a) * dist + 30) + "px");
+    fr.style.setProperty("--rot", Math.round((Math.random() - 0.5) * 720) + "deg");
+    c.appendChild(fr);
+    setTimeout(() => fr.remove(), 750);
+  }
+  vTirs.score += 1;
+  const sc = document.querySelector("#vscore b");
+  if(sc) sc.textContent = String(vTirs.score);
+  setTimeout(() => { const cc = document.getElementById("vchutes"); if(cc && cc.childElementCount) semerFeuille(cc, false); },
+    1500 + Math.random() * 1500);
+}
+let voileTimers = null;
+function montrerVoile(titre, sousTitre){
+  const v = document.getElementById("voile");
+  if(!v || voileTimers) return;
+  document.getElementById("vtitre").textContent = titre || "Production en cours";
+  document.getElementById("vvol").textContent = sousTitre || "";
+  v.classList.add("on");
+  const quip = document.getElementById("vquip");
+  let qi = Math.floor(Math.random() * QUIPS_VOILE.length);
+  const tourneQuip = () => {
+    quip.style.opacity = "0";
+    setTimeout(() => { quip.textContent = QUIPS_VOILE[qi++ % QUIPS_VOILE.length]; quip.style.opacity = "1"; }, 500);
+  };
+  tourneQuip();
+  const suit = () => {
+    const t = (spinmsg && spinmsg.textContent) || "";
+    if(t) document.getElementById("vphase").textContent = t;
+    const m = t.match(/(\d+)\s*(?:sur|\/)\s*(\d+)/);
+    if(m){
+      const frac = Math.min(1, parseInt(m[1], 10) / Math.max(1, parseInt(m[2], 10)));
+      document.getElementById("vbarrefill").style.width = Math.round(frac * 100) + "%";
+    }
+  };
+  voileTimers = { quip: setInterval(tourneQuip, 7000), suit: setInterval(suit, 400),
+    canard: setInterval(() => { if(Math.random() < 0.6) semerCanard(); }, 7000) };
+  setTimeout(semerCanard, 3500);   // le premier ne se fait pas attendre
+  musiqueBrancher();
+  chutesLancer();
+  viseurArmer();
+}
+function voileFinal(message){
+  const v = document.getElementById("voile");
+  if(!v || !v.classList.contains("on")) return;
+  v.classList.add("fin");
+  document.getElementById("vbarrefill").style.width = "100%";
+  document.getElementById("vphase").textContent = message || "Terminé.";
+  document.getElementById("vquip").textContent = "";
+}
+function masquerVoile(){
+  const v = document.getElementById("voile");
+  if(v) v.classList.remove("on", "fin");
+  if(voileTimers){ clearInterval(voileTimers.quip); clearInterval(voileTimers.suit);
+    clearInterval(voileTimers.canard); voileTimers = null; }
+  radioArreter(); musiqueArreter();   // le voile parti, le silence revient
+  chutesArreter();
+}
+// ---- POLICE DU DOCUMENT : SELAWIK, LE SEGOE UI LIBRE (JFD, 01/08) ----------
+// Segoe UI est propriétaire : l'embarquer violerait sa licence. Selawik est le
+// substitut PUBLIÉ PAR MICROSOFT sous licence SIL OFL, métriques compatibles.
+// Éprouvé au banc sur jsPDF 2.5.1 : embarqué en CID TrueType Identity-H, les
+// accents français passent en pleine fidélité. ~115 ko chargés du CDN UNE FOIS
+// par session (cache S.selawikB64) ; en échec, REPLI HELVETICA, dit à l'écran,
+// jamais silencieux. Les TITRES restent en Times — le tenant-lieu de Georgia.
+S.fonteDoc = "helvetica";
+async function chargerPolicesDoc(pdf){
+  try{
+    if(!S.selawikB64){
+      const b64 = async (url) => {
+        const r = await fetch(url);
+        if(!r.ok) throw new Error("HTTP " + r.status);
+        const buf = new Uint8Array(await r.arrayBuffer());
+        let s = "";
+        for(let i = 0; i < buf.length; i += 8192)
+          s += String.fromCharCode.apply(null, buf.subarray(i, i + 8192));
+        return btoa(s);
+      };
+      const [reg, gras] = await Promise.all([
+        b64("https://cdn.jsdelivr.net/gh/fontfen/selawik/Selawik-Regular.ttf"),
+        b64("https://cdn.jsdelivr.net/gh/fontfen/selawik/Selawik-Bold.ttf"),
+      ]);
+      S.selawikB64 = { reg, gras };
+    }
+    pdf.addFileToVFS("Selawik-Regular.ttf", S.selawikB64.reg);
+    pdf.addFont("Selawik-Regular.ttf", "Selawik", "normal");
+    pdf.addFileToVFS("Selawik-Bold.ttf", S.selawikB64.gras);
+    pdf.addFont("Selawik-Bold.ttf", "Selawik", "bold");
+    S.fonteDoc = "Selawik";
+  }catch(e){
+    S.fonteDoc = "helvetica";
+    console.warn("Selawik indisponible :", e);
+    showHint("Police Selawik indisponible (CDN) — le document sort en Helvetica.");
+  }
+}
+// ---- PLANS PAR SECTION — outillage (mode B, décision JFD du 01/08) ---------
+// Emprises terrain des formats au 1/1000, en mètres — mêmes valeurs que
+// MAP_SIZES d'api/extrait.js (qui les tient en centièmes de mm). Sert à choisir
+// échelle et format d'un plan de SECTION depuis sa boîte englobante, comme
+// REDPAR le fait par parcelle : le lien du document étant déjà émis, PAINT ne
+// peut plus le lui demander.
+const EMPRISES_1000 = { "A4|portrait": [195.5, 211.0], "A4|paysage": [210.7, 197.0],
+                        "A3|portrait": [281.5, 301.0], "A3|paysage": [316.0, 283.0] };
+const ECHELLES_DOC = [200, 500, 650, 1000, 1250, 1500, 2000, 2500, 4000, 5000];
+function choisirEchelleDoc(w, h){
+  const marge = 1.10;
+  for(const e of ECHELLES_DOC)
+    for(const f of ["A4|portrait", "A4|paysage", "A3|portrait", "A3|paysage"]){
+      const [ew, eh] = EMPRISES_1000[f];
+      if(w * marge <= ew * e / 1000 && h * marge <= eh * e / 1000)
+        return { echelle: String(e), format: f };
+    }
+  return { echelle: "5000", format: "A3|paysage" };   // déborde : au plus large
+}
+// Produit le plan COLORIÉ d'une section par une IFRAME PAINT de même origine :
+// la page se recharge avec les seuls paramètres du groupe et déroule le
+// pipeline NORMAL — extrait SCPC (avec ses trois tentatives), géoréférencement,
+// peinture du polygone, tableau. ⚠ C'est la réponse au verrou du v6 § 6 : le
+// géoréférenceur est une fermeture insoudable du bloc de chargement — or une
+// iframe EST un chargement. On ne déplace pas les six cents lignes fragiles,
+// on les exécute là où elles vivent. Le parent attend window.capturePret (posé au
+// finally de la chaîne automatique), capture base + overlay, détruit l'iframe.
+// Rend null au bout de 120 s : la réserve est portée au statut, jamais tue.
+// ----------------------------------------------------------------------
+// ZONE CONIQUE CONFORME LUE DANS UN Y — 27/08/2026
+// ----------------------------------------------------------------------
+// Les neuf zones CC42 à CC50 ont leur constante en Y espacée d'un MILLION de
+// mètres, pour une étendue de ±111 km chacune. Un Y projeté désigne donc sa
+// zone SANS AMBIGUÏTÉ — là où la LATITUDE, elle, est ambiguë dans la bande de
+// recouvrement d'un degré. Marge la plus faible mesurée sur les 96
+// départements de métropole et Corse : 0,085, très loin du 0,5 qui signalerait
+// un doute.
+// C'est ce qui permet de COMPARER la zone du contour reçu à celle du plan
+// servi, et donc de NOMMER le défaut au lieu d'afficher « le point projeté
+// tombe hors du rendu », qui n'apprend rien à personne.
+const zoneDeY = (y) => Math.round((y - 200000) / 1e6) + 41;
+
+// ⚠⚠ SUR WINDOW, PAS SUR S — même leçon que window.chargesIframe du 01/08 au
+// soir : « const S » ne crée AUCUNE propriété window, donc le parent ne peut
+// pas lire S dans le contentWindow de son iframe. La réserve de colorisation
+// doit traverser la frontière des cadres : elle se pose donc EXPLICITEMENT sur
+// window. Sans elle, un renoncement pourtant motivé mourait avec l'iframe,
+// détruite juste après la capture — c'est ce qui a rendu le défaut de zone de
+// Toulouse INVISIBLE le 27/08/2026, alors que le code disait précisément
+// pourquoi il renonçait.
+window.captureReserve = null;
+
+async function capturerPlanSection(p, g, blocs, rangs, pps){
+  const sommets = [];
+  g.idx.forEach((i) => (blocs[i] || "").split(";").forEach((c) => {
+    const [a, b] = c.split(",").map(parseFloat);
+    if(Number.isFinite(a) && Number.isFinite(b)) sommets.push([a, b]);
+  }));
+  if(!sommets.length) return null;
+  const xs = sommets.map((s) => s[0]), ys = sommets.map((s) => s[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const wM = Math.round((maxX - minX) * 10) / 10, hM = Math.round((maxY - minY) * 10) / 10;
+  const cx = ((minX + maxX) / 2).toFixed(1), cy = ((minY + maxY) / 2).toFixed(1);
+  const ef = choisirEchelleDoc(wM, hM);
+  const q = new URLSearchParams(location.search);
+  ["doc", "docauto", "dossier", "pp", "bati", "lots", "total", "fond", "cadre",
+   "trace", "carre", "axe", "diaggeo"].forEach((k) => q.delete(k));
+  const i0 = g.idx[0];
+  if(pps[i0]){
+    q.set("prefixe", pps[i0].prefixe);
+    q.set("section", pps[i0].section);
+    q.set("parcelle", pps[i0].parcelle);
+  }
+  q.set("echelle", ef.echelle); q.set("format", ef.format);
+  q.set("x", cx); q.set("y", cy); q.set("pt", cx + "," + cy);
+  q.set("dim", wM + "x" + hM);
+  q.set("poly", g.idx.map((i) => blocs[i]).join("|"));
+  q.set("tab", g.idx.map((i) => (rangs[i] ? rangs[i].join(",") : "")).filter(Boolean).join(";"));
+  q.set("auto", "1"); q.set("capture", "1");
+  // ⚠ La src de l'iframe est une REQUÊTE SERVEUR : sur une grosse section,
+  // elle heurterait le même URI_TOO_LONG que le lien principal. Les paramètres
+  // passent donc par le registre du parent (charge=iframe), et l'URL reste
+  // courte quel que soit le nombre de parcelles.
+  // ⚠⚠ SUR WINDOW, PAS SUR S — leçon du 01/08 au soir : « const S » ne crée
+  // PAS de propriété window, donc window.parent.S était undefined dans
+  // l'iframe, ET contentWindow.S l'était pour le parent : le registre était
+  // invisible d'un côté, le drapeau de fin de l'autre. Chaque section mangeait
+  // ses 120 s de plafond puis sortait « plan non produit ». Tout ce qui
+  // traverse la frontière des cadres se pose EXPLICITEMENT sur window.
+  window.chargesIframe = window.chargesIframe || {};
+  const cle = "s" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
+  window.chargesIframe[cle] = q.toString();
+  const ifr = document.createElement("iframe");
+  ifr.style.cssText = "position:fixed;left:-12000px;top:0;width:1400px;height:1000px;border:0;";
+  ifr.src = location.pathname + "?charge=iframe&cle=" + cle;
+  document.body.appendChild(ifr);
+  try{
+    const debut = Date.now();
+    while(Date.now() - debut < 120000){
+      await new Promise((r) => setTimeout(r, 400));
+      let pret = false;
+      try{ pret = !!(ifr.contentWindow && ifr.contentWindow.capturePret); }
+      catch(e){ /* document de l'iframe pas encore prêt */ }
+      if(pret){
+        const d = ifr.contentWindow.document;
+        const b = d.getElementById("base"), o = d.getElementById("overlay");
+        if(!b || !b.width) return null;
+        const cv = document.createElement("canvas");
+        cv.width = b.width; cv.height = b.height;
+        const ctx = cv.getContext("2d");
+        ctx.drawImage(b, 0, 0);
+        if(o && o.width) ctx.drawImage(o, 0, 0);
+        // Le plan est capturé ; reste à savoir s'il a été COLORIÉ. La réserve
+        // éventuelle est posée sur le window de l'iframe par aLaMain.
+        try{ g.reserve = ifr.contentWindow.captureReserve || null; }
+        catch(e){ g.reserve = null; }
+        return cv;
+      }
+    }
+    return null;
+  }finally{ ifr.remove(); if(window.chargesIframe) delete window.chargesIframe[cle]; }
+}
+async function doExportDocument(){
+  const btn = document.getElementById("docbtn");
+  if(btn.disabled) return;                       // garde contre le double clic
+  // En mode « plans par section » (poly présent), le plan de l'écran ne sert
+  // plus au document : les plans viennent des iframes. Le document peut donc
+  // partir MÊME si l'écran n'a rien chargé — cas des communes dont l'ensemble
+  // déborde du cadre, où REDPAR retire auto.
+  const aPoly = !!((new URLSearchParams(location.search)).get("poly") || "").trim();
+  if(!S.pdf && !aPoly){
+    setStatus("Document impossible : aucun plan cadastral chargé. Ce bouton "
+      + "assemble le plan colorié ET la vue aérienne ; il lui faut le premier.", "err");
+    return;
+  }
+  btn.disabled = true;
+  let alerteCarte = "";
+  try{
+    const p = new URLSearchParams(location.search);
+    // ---- plan de l'écran : REPLI SEULEMENT, quand aucun poly n'est transmis.
+    // En mode sections, ni ancre de légende (un passage d'OCR économisé), ni
+    // capture de l'écran : les plans viennent des iframes.
+    let anchor = null, c1 = null;
+    if(!aPoly && S.pdf){
+      if(document.getElementById("inclegend").checked
+         && document.getElementById("legendpos").value === "auto"){
+        spin.classList.add("show"); spinmsg.textContent = "Localisation de la légende…";
+        anchor = await findCadastreAnchor();
+        spin.classList.remove("show");
+      }
+      c1 = buildExportCanvas(anchor);
+    }
+    const rangs = (p.get("tab") || "").split(";")
+      .map((r) => r.split(",").map((c) => c.trim()))
+      .filter((r) => r.length >= 2 && (r[0] || r[1]));
+    const total = (p.get("total") || "").trim();
+    // ---- pages 2 et suivantes : UNE LIGNE DE VUES PAR PARCELLE ---------
+    // Forme arrêtée par JFD le 31/07 : la désignation en haut, puis pour chaque
+    // parcelle son sous-titre souligné, son tableau réduit à elle seule, ses deux
+    // vues côte à côte, et un trait de séparation.
+    //
+    // ⚠ LES VUES SONT FABRIQUÉES EN BOUCLE PAR LA MACHINERIE EXISTANTE, et non
+    // par un dessin hors écran paramétré. Pour chaque parcelle on charge l'ortho
+    // dans le canvas global, on laisse le code DÉJÀ ÉPROUVÉ y peindre repère,
+    // tableau et cartouche, puis on capture. L'écran défile et finit sur la
+    // dernière parcelle — ce qu'on avait déjà accepté au premier jet. Le gain est
+    // de NE PAS retoucher quatre fonctions validées : c'était le seul endroit où
+    // une refonte pouvait introduire des erreurs invisibles.
+    const blocs = (p.get("poly") || "").split("|").map((b) => b.trim()).filter(Boolean);
+    const aLieudit = rangs.some((r) => (r[3] || "").trim() !== "");
+
+    // Zone déduite du premier sommet : il faut la connaître AVANT toute vue, pour
+    // ne demander le fond communal qu'UNE SEULE FOIS. L'emprise de la commune ne
+    // change pas d'une parcelle à l'autre, seule la croix se déplace.
+    const som0 = sommetsProjetes(blocs[0] || "");
+    const zz0 = som0.length ? (zoneCC(som0[0][1]) || {}).zz : null;
+    let fond = null, infoCom = null;
+    if(zz0){
+      spin.classList.add("show"); spinmsg.textContent = "Carte de situation…";
+      infoCom = await infoCommune(p.get("commune") || "");
+      fond = await fondCommune(infoCom, zz0, 1);   // aspect 1 : carré, pour la grille
+      spin.classList.remove("show");
+      if(fond && fond.voie.indexOf("carré") === 0) alerteCarte = fond.voie;
+    }
+
+    // Paramètres par parcelle émis par REDPAR : prefixe, section, parcelle,
+    // échelle, format. Sans eux, pas d'extrait — et surtout pas d'extrait à la
+    // mauvaise échelle, ce qui serait pire.
+    const pps = (p.get("pp") || "").split(";")
+      .map((r) => r.split(",").map((c) => c.trim()))
+      .filter((r) => r.length >= 3 && r[1] && r[2])
+      .map((r) => ({ prefixe: r[0], section: r[1], parcelle: r[2],
+                     echelle: r[3] || "", format: r[4] || "" }));
+
+    const journal = [];   // ce qui a été demandé pour chaque extrait, et sa signature
+    // Budget PAR IMAGE, arrêté d'avance : cible 20 Mo répartis sur les trois
+    // images de chaque parcelle, PLANCHER 120 ko de lisibilité. Aux grands N le
+    // plancher l'emporte et le PDF grossit linéairement (~0,4 Mo par parcelle) —
+    // assumé : à 3 000 parcelles, comptez ~7 h de service et un PDF de plusieurs
+    // centaines de Mo. La taille réelle est annoncée au statut.
+    const budgetImg = Math.max(1.2e5, Math.min(PDF_MAX_BYTES, 2.0e7 / Math.max(1, blocs.length * 3)));
+    const vues = [];
+    for(let i = 0; i < blocs.length; i++){
+      const q = new URLSearchParams(p.toString());
+      q.set("poly", blocs[i]);
+      q.set("cadre", "contexte"); q.delete("emp");
+      q.set("trace", "rond"); q.set("carre", "1");
+      const r = rangs[i] || null;
+      // Le tableau GRAVÉ dans la vue ne porte que cette parcelle, et pas de total :
+      // le total appartient à la désignation d'ensemble, pas à une vue isolée.
+      q.set("tab", r ? [r[0], r[1]].join(",") : "");
+      q.delete("total");
+      spin.classList.add("show");
+      // ---- EXTRAIT COLORIÉ PAR IFRAME — demandé par JFD le 01/08 au soir. ----
+      // Le verrou v6 « extraits bruts, le géoréférenceur est insoudable de
+      // l'écran » tombe par la même clé que les plans de section : l'iframe EST
+      // un écran, le pipeline complet s'y exécute — extrait recentré sur LA
+      // parcelle, calage, polygone peint, tableau. Coût dit : le calage OCR
+      // s'ajoute à chaque parcelle (~15-20 s au lieu de ~8). La signature du
+      // détecteur d'identiques se calcule sur le canvas capturé, MÊME
+      // algorithme que la voie brute (signatureCanvas). Repli : si l'iframe
+      // rend null (échec du service ou du calage), on retente EN BRUT — un
+      // extrait sans couleur vaut mieux qu'une page sans extrait, et le
+      // journal dit lequel des deux est parti.
+      spinmsg.textContent = "Extrait colorié " + (i + 1) + " sur " + blocs.length + "…";
+      let extrait = null, exDemande = "pas de pp", exSig = "—";
+      if(pps[i]){
+        const gP = { label: "", sec: pps[i].section, idx: [i] };
+        const cap = await capturerPlanSection(p, gP, blocs, rangs, pps);
+        if(cap){
+          extrait = cap;
+          exDemande = pps[i].prefixe + "/" + pps[i].section + "/" + pps[i].parcelle + " (colorié, iframe)";
+          exSig = signatureCanvas(cap);
+        }else{
+          const ex = await extraitBrutDe(pps[i]);
+          extrait = ex ? ex.canvas : null;
+          exDemande = (ex ? ex.demande : "?") + " (repli BRUT, iframe en échec)";
+          exSig = ex ? ex.sig : "—";
+        }
+      }
+      journal.push((r ? r[0] + " " + r[1] : "?") + " → demandé " + exDemande + " → " + exSig);
+      spin.classList.add("show");
+      spinmsg.textContent = "Vue " + (i + 1) + " sur " + blocs.length + "…";
+      // ⚠ UNE VUE EN ÉCHEC NE DISPARAÎT PLUS : elle produit une PAGE MARQUÉE
+      // (« vue aérienne indisponible »). Avant, la parcelle sortait du document
+      // en silence ET décalait toutes les pages du sommaire — deux torts.
+      let orthoImg = null;
+      if(await chargerOrtho(q)){
+        await contourOrtho(q, r ? [[r[0], r[1]]] : [], "");
+        orthoImg = imgCompressee(buildExportCanvas(null), budgetImg);
+      }
+      vues.push({
+        idx: i,
+        ortho: orthoImg,
+        carte: fond ? imgCompressee(carteAvecRepere(fond,
+                 ellipsesDe(blocs[i], "rond").map((e) => [e.cx, e.cy])), budgetImg) : null,
+        ref: r ? (r[0] + " " + r[1]) : ("Parcelle " + (i + 1)),
+        rang: r,
+        extrait: imgCompressee(extrait, budgetImg)
+      });
+      spin.classList.remove("show");
+    }
+    if(!vues.length){
+      setStatus("Document interrompu : aucune vue aérienne n'a pu être produite. "
+        + "Le motif est affiché au-dessus.", "err");
+      return;
+    }
+
+    // ---- GROUPES PAR SECTION et capture de leurs plans --------------------
+    // Ordre d'arrivée conservé : REDPAR trie déjà préfixe-section puis numéro,
+    // les sections sont donc consécutives et le document les intercale — plan
+    // de la section, puis ses fiches. Repli sans poly : un seul groupe, le plan
+    // de l'écran (c1), comportement d'avant.
+    const groupes = [];
+    if(aPoly){
+      const parCle = new Map();
+      blocs.forEach((b, i) => {
+        const cle = pps[i] ? (pps[i].prefixe + "/" + pps[i].section)
+                           : (rangs[i] ? "?/" + rangs[i][0] : "?/?");
+        if(!parCle.has(cle)){
+          const sec = pps[i] ? pps[i].section : (rangs[i] ? rangs[i][0] : "?");
+          const pfx = pps[i] ? pps[i].prefixe : "";
+          const g = { label: "Plan de la section " + sec
+              + (pfx && pfx !== "000" ? " (préfixe " + pfx + ")" : ""), sec, idx: [] };
+          parCle.set(cle, g); groupes.push(g);
+        }
+        parCle.get(cle).idx.push(i);
+      });
+      let fait = 0;
+      for(const g of groupes){
+        fait += 1;
+        spin.classList.add("show");
+        spinmsg.textContent = "Plan de la section " + g.sec + " (" + fait + " sur "
+          + groupes.length + ") — extrait, calage et colorisation…";
+        g.plan = imgCompressee(await capturerPlanSection(p, g, blocs, rangs, pps), PDF_MAX_BYTES);
+        spin.classList.remove("show");
+      }
+    }else{
+      groupes.push({ label: "Plan cadastral d'ensemble", idx: vues.map((v) => v.idx),
+        plan: imgCompressee(c1, PDF_MAX_BYTES) });
+    }
+    const sectionsSansPlan = groupes.filter((g) => !g.plan).map((g) => g.label);
+    // PLAN PRODUIT MAIS NON COLORIÉ — distinction nouvelle du 27/08/2026, et
+    // c'est tout l'objet du correctif : jusqu'ici une capture réussie mais non
+    // coloriée était comptée comme une réussite. Le motif vient de l'iframe.
+    const sectionsAvecReserve = groupes.filter((g) => g.plan && g.reserve)
+      .map((g) => g.label + " — " + g.reserve);
+
+    // ---- SOMMAIRE INTERCALÉ : plan de section puis ses fiches, dans l'ordre
+    // exact des pages. Un plan non produit N'A PAS d'entrée (pas de page) : la
+    // réserve le dit au statut, le sommaire ne pointe jamais dans le vide.
+    const entrees = [];
+    groupes.forEach((g) => {
+      if(g.plan) entrees.push({ label: g.label });
+      vues.filter((v) => g.idx.includes(v.idx)).forEach((v) => entrees.push({
+        label: v.rang
+          ? (v.rang[0] + " " + v.rang[1] + ((v.rang[3] || "").trim() ? " — " + v.rang[3].trim() : ""))
+          : v.ref }));
+    });
+
+    // ---- assemblage -----------------------------------------------------
+    const { jsPDF } = window.jspdf;
+    const numDossier = (p.get("dossier") || "").trim();
+    // ⚠ ORDRE DES PAGES, décision JFD du 01/08 : LA DÉSIGNATION OUVRE LE
+    // DOCUMENT, le plan cadastral d'ensemble le FERME, pleine page. C'est la
+    // convention de l'acte — on désigne avant d'illustrer — et celle de la
+    // fiche TRENTE, où les plans sont la dernière section. Le document commence
+    // donc en PORTRAIT ; le plan, seul à pouvoir être en paysage, porte sa
+    // propre orientation sur SA page (jsPDF le permet page par page).
+    const pdf = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
+    await chargerPolicesDoc(pdf);
+    // La compression se fait désormais À LA CAPTURE (budgetImg, plus haut) :
+    // l'assemblage ne compresse plus rien, il pose des JPEG déjà taillés.
+    const budget = 0;
+
+    // Les pages de contenu sont TOUJOURS EN PORTRAIT : les vues n'occupant plus le
+    // feuillet, leur orientation propre n'a plus à commander celle de la page.
+    const M = 42;
+    // La désignation occupe la PAGE 1, celle du constructeur — pas d'addPage ici.
+    const L = pdf.internal.pageSize.getWidth() - 2 * M;
+    let y = composerDesignation(pdf, M, p, infoCom, rangs, total, M, L, entrees);
+    // ---- PLANS DE SECTION INTERCALÉS (troisième décision d'ordre, JFD 01/08,
+    // remplace la page 2 unique) : pour chaque groupe, le PLAN DE LA SECTION
+    // pleine page puis SES fiches, dans l'ordre section/numéro. Ce sont les
+    // pièces qui délimitent : budget de compression PLEIN pour chacune, et
+    // l'orientation de chaque plan suit sa forme (jsPDF le permet page par
+    // page). Un plan non produit (capture en échec) est simplement absent :
+    // ses fiches suivent la section précédente, la réserve le dit au statut.
+    const pagesPlans = new Set();
+    groupes.forEach((g) => {
+      if(g.plan){
+        pdf.addPage("a4", (g.plan.width >= g.plan.height) ? "landscape" : "portrait");
+        pagesPlans.add(pdf.internal.getNumberOfPages());
+        const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight();
+        const m = 24, r = Math.min((pw - 2 * m) / g.plan.width, (ph - 2 * m) / g.plan.height);
+        const w = g.plan.width * r, h = g.plan.height * r;
+        pdf.addImage(g.plan.data, "JPEG", (pw - w) / 2, (ph - h) / 2, w, h);
+      }
+      vues.filter((v) => g.idx.includes(v.idx))
+        .forEach((v) => { y = composerBlocParcelle(pdf, y, v, M, L, budget, aLieudit); });
+    });
+    composerLocaux(pdf, y, p, M, L);
+    // ---- PIED DE PAGE : filet fin, « FIDAL Notaires · Dossier n° … » puis les
+    // sources (l'obligation de paternité DGFiP/IGN qui fonde la pièce) à gauche,
+    // pagination à droite. Le numéro de dossier vient du paramètre d'URL
+    // « dossier », saisi dans le panneau Dossier complet de REDPAR ; absent, la
+    // mention se réduit à « FIDAL Notaires ». ⚠ PAS de pied de page sur la PAGE
+    // DU PLAN : il y est pleine page, la pièce reste nue — délibéré.
+    {
+      const nb = pdf.internal.getNumberOfPages();
+      const gauche = "FIDAL Notaires" + (numDossier ? " · Dossier " + numDossier : "")
+        + " · Sources : DGFiP — cadastre.gouv.fr · IGN — Géoplateforme";
+      for(let i = 1; i <= nb; i++){
+        if(pagesPlans.has(i)) continue;   // les plans restent nus, tous
+        pdf.setPage(i);
+        const pw2 = pdf.internal.pageSize.getWidth(), ph2 = pdf.internal.pageSize.getHeight();
+        pdf.setDrawColor("#d8dee6"); pdf.setLineWidth(0.5);
+        pdf.line(M, ph2 - 40, pw2 - M, ph2 - 40);
+        pdf.setFont(S.fonteDoc || "helvetica", "normal"); pdf.setFontSize(7.5); pdf.setTextColor("#657D96");
+        pdf.text(gauche, M, ph2 - 29);
+        pdf.text(i + " / " + nb, pw2 - M, ph2 - 29, { align: "right" });
+      }
+      pdf.setPage(nb); pdf.setTextColor(0, 0, 0);
+    }
+    const blob = pdf.output("blob");
+    const a = document.createElement("a");
+    // Plan de nommage FIDAL « AAAAMMJJ Désignation » (doctrine de la charte,
+    // déjà appliqué à COUNTDOWN) : en série sur dix communes, l'ancien
+    // plan-et-vue-aerienne-… rendait le dossier illisible.
+    const jour = new Date();
+    const aaaammjj = jour.getFullYear() * 10000 + (jour.getMonth() + 1) * 100 + jour.getDate();
+    const vol = (p.get("vol") || "").trim();   // « 2/4 » émis par le Dossier complet
+    a.download = (aaaammjj + " " + (numDossier ? "Dossier " + numDossier + " — " : "")
+      + ((p.get("nomCommune") || "").trim().toUpperCase() || (p.get("commune") || ""))
+      + " (" + (p.get("commune") || "") + ")"
+      + (vol ? " — volume " + vol.replace("/", " de ") : "")
+      + ".pdf").replace(/[\\/:*?"<>|]/g, "-");
+    a.href = URL.createObjectURL(blob); a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    showHint("Document 2 pages : " + (blob.size / 1e6).toFixed(1) + " Mo.");
+    // Réserves calculées AVANT le statut : elles servent aussi à décider de la
+    // fermeture automatique de l'onglet (§ docauto ci-dessous).
+    const sigs = journal.map((l) => l.split(" → ").pop());
+    const doubles = sigs.filter((v, i) => sigs.indexOf(v) !== i && v !== "—");
+    const sansExtrait = vues.filter((v) => !v.extrait).map((v) => v.ref);
+    setStatus("DOCUMENT généré (" + (blob.size / 1e6).toFixed(1) + " Mo, "
+      + pdf.internal.getNumberOfPages() + " pages) — la désignation, "
+      + groupes.filter((g) => g.plan).length + " plan(s) pleine page intercalé(s) "
+      + "et " + vues.length + " page(s) de parcelle. "
+      + "⚠ L'écran affiche "
+      + "désormais la vue aérienne : la colorisation du plan N'EST PLUS MODIFIABLE, "
+      + "elle n'existe que dans le PDF que vous venez d'enregistrer. Rechargez le "
+      + "lien pour la reprendre depuis le début."
+      + (doubles.length
+          ? " ⚠⚠ EXTRAITS CADASTRAUX IDENTIQUES entre plusieurs parcelles : "
+            + "les pages ne montrent PAS chacune leur parcelle, NE PAS verser ce "
+            + "document au dossier. "
+          : "")
+      + (sansExtrait.length
+          ? " ⚠ " + sansExtrait.length + " parcelle(s) SANS EXTRAIT cadastral malgré "
+            + "trois tentatives (" + sansExtrait.join(", ") + ") : pages incomplètes."
+          : "")
+      + (sectionsSansPlan.length
+          ? " ⚠ Plan(s) de section NON PRODUIT(S) : " + sectionsSansPlan.join(" ; ")
+            + " — capture en échec, le document ne les contient pas."
+          : "")
+      + (sectionsAvecReserve.length
+          ? " ⚠⚠ Plan(s) de section PRÉSENT(S) MAIS NON COLORIÉ(S) : "
+            + sectionsAvecReserve.join(" ; ") + "."
+          : "")
+      + " — Journal des extraits : " + journal.join(" | ")
+      + (alerteCarte ? " ⚠ Carte de situation cadrée par " + alerteCarte
+          + " : le cadrage peut être approximatif sur une commune allongée." : ""), "warn");
+    // ---- FERMETURE AUTOMATIQUE DE L'ONGLET (docauto, Dossier complet) -----
+    // L'onglet a été ouvert par script : window.close() est permis. On ne ferme
+    // QUE si aucune réserve — doublons, extraits manquants, carte approximative.
+    // La moindre réserve laisse l'onglet ouvert, statut visible : l'exception du
+    // Dossier complet livre le document, elle ne cache pas les alertes.
+    if(S.docAutoLance){
+      S.docAutoLance = false;
+      if(doubles.length || sansExtrait.length || sectionsSansPlan.length
+         || sectionsAvecReserve.length || alerteCarte){
+        // Les réserves DOIVENT se lire : le voile s'efface, le statut apparaît.
+        masquerVoile();
+        showHint("Réserves au statut — onglet laissé ouvert pour contrôle.");
+      }else{
+        voileFinal("Document téléchargé ✓ — l'onglet se referme dans 8 secondes.");
+        showHint("Document téléchargé — l'onglet se referme dans 8 secondes.");
+        setTimeout(() => window.close(), 8000);
+      }
+    }
+  }catch(err){
+    // ⚠ SANS CE CATCH, TOUTE ERREUR ÉTAIT MUETTE : le finally réactivait le
+    // bouton, masquait le sablier, et l'utilisateur voyait « rien ne se passe ».
+    // C'est exactement ce qui est arrivé le 31/07 avec infoCommune supprimée par
+    // accident. Sur une fonction de cette taille, une erreur silencieuse coûte
+    // plus cher que l'erreur elle-même — elle empêche de la trouver.
+    // NE JAMAIS RETIRER CE BLOC.
+    masquerVoile();   // l'erreur doit se lire, le voile ne cache jamais un échec
+    console.error("doExportDocument", err);
+    setStatus("Document — ÉCHEC : " + (err && err.message ? err.message : err)
+      + ". Le détail complet est dans la console du navigateur (F12, onglet "
+      + "Console). Si le message cite un nom de fonction, c'est une erreur de "
+      + "programme et non de données : signalez-le tel quel.", "err");
+  }finally{
+    btn.disabled = false;
+    spin.classList.remove("show");
+  }
+}
+document.getElementById("docbtn").onclick = doExportDocument;
+document.getElementById("pngbtn").onclick=()=>doExport("png");
+document.getElementById("pdfbtn").onclick=()=>doExport("pdf");
+// ---- DIAGNOSTIC « PDF reçu » : la pièce du rendu fautif, à l'écran ----
+// Leçon du mémo (§ 8 b) : le diagnostic S'AFFICHE, il ne se logge pas.
+// L'empreinte (8 premiers hexas du SHA-256) est écrite SUR le bouton : deux
+// générations qui montrent la même empreinte ont reçu les mêmes octets, et une
+// empreinte différente du fichier téléchargé à part prouve une copie différente.
+async function montrerBoutonBrut(){
+  const b = document.getElementById("brutbtn");
+  if(!b || !S.brutRecu) return;
+  b.style.display = "inline-flex";
+  b.textContent = "💾 PDF reçu · " + Math.round(S.brutRecu.byteLength/1024) + " Ko";
+  try{
+    const h = await crypto.subtle.digest("SHA-256", S.brutRecu);
+    const hex = [...new Uint8Array(h)].slice(0,4).map(x=>x.toString(16).padStart(2,"0")).join("");
+    b.textContent = "💾 PDF reçu · " + hex + " · " + Math.round(S.brutRecu.byteLength/1024) + " Ko";
+  }catch(e){} // crypto.subtle absent hors https : le bouton reste utile sans empreinte
+}
+document.getElementById("brutbtn").onclick = () => {
+  if(!S.brutRecu) return;
+  const blob = new Blob([S.brutRecu], {type:"application/pdf"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  const quand = (S.brutInfo && S.brutInfo.quand ? S.brutInfo.quand : new Date().toISOString()).replace(/[:.]/g,"-");
+  a.download = "recu-par-paint_" + quand + ".pdf";
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+};
+
+/* ---------- Recherche de parcelles par numéro (OCR multi-angles) ---------- */
+let ocrWorker=null;
+const spinmsg=document.getElementById("spinmsg");
+const statusEl=document.getElementById("status");
+function setStatus(msg,cls){
+  if(!msg){statusEl.className="status";statusEl.textContent="";return;}
+  statusEl.className="status show "+(cls||"ok");
+  statusEl.textContent=msg;
+  // LE STATUT SE REND VISIBLE DE LUI-MÊME. Il siège dans le panneau de gauche,
+  // sous le bouton « Trouver et coloriser », donc SOUS LA LIGNE DE FLOTTAISON
+  // sur un écran d'ordinateur portable : quatre essais de la vue aérienne ont
+  // été jugés sur la seule apparence de l'image, faute d'avoir vu le message.
+  // C'est le défaut du § 9 (« quatre mises au point perdues faute de pouvoir
+  // lire les messages ») reparu à un autre endroit. Il pèse plus lourd sur le
+  // chemin ortho que sur le plan cadastral : le géoréférencement analytique
+  // n'ayant AUCUN auto-contrôle, ces messages sont son unique garde-fou.
+  try{ statusEl.scrollIntoView({ block:"nearest", behavior:"smooth" }); }catch(e){}
+}
+
+const OCR_TARGET=2800;                  // largeur de rendu pour l'OCR (chiffres nets)
+const OCR_ANGLES=[0,30,-30,60,-60,90];  // 0 d'abord, puis passes inclinees seulement si des numeros manquent
+
+async function getWorker(){
+  if(ocrWorker) return ocrWorker;
+  if(typeof Tesseract==="undefined")
+    throw new Error("moteur OCR non chargé (vérifiez la connexion ou déployez l'application).");
+  ocrWorker = await Tesseract.createWorker("eng",1,{
+    logger:m=>{ if(m.status==="recognizing text") spinmsg.textContent="Lecture des numéros… "+Math.round(m.progress*100)+"%"; }
+  });
+  await ocrWorker.setParameters({
+    tessedit_char_whitelist:"0123456789",
+    tessedit_pageseg_mode:(Tesseract.PSM && Tesseract.PSM.SPARSE_TEXT) || "11"
+  });
+  return ocrWorker;
+}
+
+// Rendu haute resolution de la page courante (repere = rotation d'affichage)
+async function renderOcrBase(){
+  const page=await S.pdf.getPage(S.page);
+  const vp1=page.getViewport({scale:1,rotation:S.rotation});
+  const sc=OCR_TARGET/vp1.width;
+  const vp=page.getViewport({scale:sc,rotation:S.rotation});
+  const oc=document.createElement("canvas"); oc.width=Math.round(vp.width); oc.height=Math.round(vp.height);
+  const ox=oc.getContext("2d"); ox.fillStyle="#fff"; ox.fillRect(0,0,oc.width,oc.height);
+  await page.render({canvasContext:ox,viewport:vp}).promise;
+  return oc;
+}
+
+// Mots-chiffres bruts (coordonnees px du canvas analyse)
+function extractWords(data){
+  let raw=tsvWords(data.tsv);
+  if(!raw.length) raw=blockWords(data.blocks); // repli si TSV vide (Tesseract v5+)
+  return raw;
+}
+function tsvWords(tsv){
+  const out=[];
+  (tsv||"").split("\n").forEach(line=>{
+    const c=line.split("\t");
+    if(c.length<12||c[0]!=="5")return;        // niveau 5 = mot
+    const t=(c[11]||"").replace(/[^0-9]/g,""); if(!t)return;
+    const left=+c[6],top=+c[7],w=+c[8],h=+c[9];
+    out.push({text:t,x:left+w/2,y:top+h/2});
+  });
+  return out;
+}
+function blockWords(blocks){
+  const out=[];
+  (blocks||[]).forEach(b=>(b.paragraphs||[]).forEach(p=>(p.lines||[]).forEach(l=>(l.words||[]).forEach(w=>{
+    const t=(w.text||"").replace(/[^0-9]/g,""); if(!t)return;
+    const bb=w.bbox||{}; out.push({text:t,x:(bb.x0+bb.x1)/2,y:(bb.y0+bb.y1)/2});
+  }))));
+  return out;
+}
+
+// OCR sur la base tournee de `deg` degres. Renvoie les centres en coordonnees du plan affiche.
+async function ocrAngle(baseCanvas,deg){
+  const worker=await getWorker();
+  const factor=S.W/baseCanvas.width;
+  const w0=baseCanvas.width, h0=baseCanvas.height;
+  let target=baseCanvas, rw=w0, rh=h0, rad=0;
+  if(deg!==0){
+    rad=deg*Math.PI/180;
+    const diag=Math.ceil(Math.hypot(w0,h0));           // carre assez grand pour contenir la base tournee
+    const rc=document.createElement("canvas"); rc.width=diag; rc.height=diag;
+    const rx=rc.getContext("2d"); rx.fillStyle="#fff"; rx.fillRect(0,0,diag,diag);
+    rx.translate(diag/2,diag/2); rx.rotate(rad); rx.drawImage(baseCanvas,-w0/2,-h0/2);
+    target=rc; rw=diag; rh=diag;
+  }
+  const {data}=await worker.recognize(target,{},{blocks:true,tsv:true});
+  const cos=Math.cos(rad), sin=Math.sin(rad);
+  return extractWords(data).map(wd=>{
+    const dx=wd.x-rw/2, dy=wd.y-rh/2;                   // re-projection vers la base (rotation inverse -deg)
+    const xB=w0/2 + cos*dx + sin*dy;
+    const yB=h0/2 - sin*dx + cos*dy;
+    return {text:wd.text, cx:Math.round(xB*factor), cy:Math.round(yB*factor)};
+  }).filter(wd=>wd.cx>=0 && wd.cy>=0 && wd.cx<S.W && wd.cy<S.H);
+}
+
+// cherche un point de depart DANS la parcelle (et non dans la boucle d'un chiffre).
+// On sonde des anneaux autour du numero et on retient la plus GRANDE zone claire :
+// une boucle de chiffre fait quelques centaines de pixels, une parcelle des milliers.
+function findSeed(cx,cy){
+  const W=S.W,H=S.H, thr=S.threshold;
+  const data=baseCtx.getImageData(0,0,W,H).data;
+  const light=i=>{const p=i*4; return (0.299*data[p]+0.587*data[p+1]+0.114*data[p+2])>=thr;};
+
+  const CAP=5000;        // surface au-dela de laquelle on est certainement dans la parcelle
+  function regionSize(sx,sy){
+    if(sx<0||sy<0||sx>=W||sy>=H) return 0;
+    const s0=sy*W+sx; if(!light(s0)) return 0;
+    const seen=new Set([s0]); const st=[s0]; let n=0;
+    while(st.length && n<CAP){
+      const idx=st.pop(); n++; const x=idx%W;
+      if(x>0){const k=idx-1; if(!seen.has(k)&&light(k)){seen.add(k);st.push(k);}}
+      if(x<W-1){const k=idx+1; if(!seen.has(k)&&light(k)){seen.add(k);st.push(k);}}
+      if(idx>=W){const k=idx-W; if(!seen.has(k)&&light(k)){seen.add(k);st.push(k);}}
+      if(idx<W*(H-1)){const k=idx+W; if(!seen.has(k)&&light(k)){seen.add(k);st.push(k);}}
+    }
+    return n;
+  }
+
+  let best=null, bestArea=0;
+  const rings=[0,16,30,46,64,84,108,136];   // du centre vers l'exterieur du numero
+  for(const r of rings){
+    let pts;
+    if(r===0){ pts=[[cx,cy]]; }
+    else{
+      pts=[]; const steps=Math.max(8,Math.round(r/5));
+      for(let a=0;a<steps;a++){ const t=2*Math.PI*a/steps;
+        pts.push([Math.round(cx+r*Math.cos(t)), Math.round(cy+r*Math.sin(t))]); }
+    }
+    for(const [x,y] of pts){
+      if(x<0||y<0||x>=W||y>=H) continue;
+      if(!light(y*W+x)) continue;                 // sur un trait : on ignore
+      const area=regionSize(x,y);
+      if(area>bestArea){ bestArea=area; best={x,y}; if(area>=CAP) return best; } // zone large = la parcelle
+    }
+  }
+  return best;   // meilleur candidat (null seulement si aucun pixel clair autour du numero)
+}
+
+async function searchAndFill(){
+  if(!S.pdf){ setStatus("Ouvrez d'abord un plan cadastral.","warn"); return; }
+  const raw=document.getElementById("numinput").value;
+  const nums=[...new Set(raw.split(/[^0-9]+/).filter(Boolean))];
+  if(nums.length===0){ setStatus("Saisissez au moins un numéro de parcelle.","warn"); return; }
+  setStatus("");
+  spin.classList.add("show"); spinmsg.textContent="Initialisation de l'OCR…";
+
+  // Cache par page+rotation : base haute resolution, mots accumules, angles deja traites
+  const key=S.page+"|"+S.rotation;
+  if(!S.ocrCache || S.ocrCache.key!==key) S.ocrCache={key, base:null, words:[], done:new Set()};
+
+  try{
+    if(!S.ocrCache.base) S.ocrCache.base=await renderOcrBase();
+  }catch(err){
+    spin.classList.remove("show");
+    setStatus("OCR indisponible ici : "+((err&&err.message)||err)+" Astuce : l'aperçu intégré bloque parfois l'OCR — il fonctionne une fois l'application déployée (Vercel) ou ouverte en local.","err");
+    return;
+  }
+
+  const tryPlace=(targets)=>{
+    const ok=[], ko=[];
+    targets.forEach(n=>{
+      let placed=false;
+      S.ocrCache.words.filter(wd=>wd.text===n).forEach(m=>{
+        const seed=findSeed(m.cx,m.cy);
+        if(seed){ floodFill(seed.x,seed.y); placed=true; }
+      });
+      (placed?ok:ko).push(n);
+    });
+    return {ok,ko};
+  };
+
+  const found=[]; let missing=[...nums];
+  try{
+    for(const deg of OCR_ANGLES){
+      if(!missing.length) break;                       // tout trouve : on s'arrete (cas horizontal = 1 seule passe)
+      if(!S.ocrCache.done.has(deg)){
+        spinmsg.textContent = deg===0 ? "Lecture des numéros…"
+                                      : "Recherche approfondie (numéros inclinés à "+deg+"°)…";
+        const w=await ocrAngle(S.ocrCache.base,deg);
+        S.ocrCache.words.push(...w);
+        S.ocrCache.done.add(deg);
+      }
+      const {ok,ko}=tryPlace(missing);
+      found.push(...ok); missing=ko;
+    }
+  }catch(err){
+    spin.classList.remove("show");
+    setStatus("Erreur OCR : "+((err&&err.message)||err),"err");
+    return;
+  }
+  spin.classList.remove("show");
+
+  if(found.length){ pushUndo(); rebuildLegend(); }
+
+  if(!found.length && !S.ocrCache.words.length){
+    setStatus("Aucun chiffre n'a pu être lu sur ce plan (numéros peut-être manuscrits ou trop fins pour l'OCR). Colorisez ces parcelles à la main avec l'outil « Remplir ».","warn");
+    return;
+  }
+
+  let msg="", cls="ok";
+  if(found.length) msg+=found.length+" parcelle"+(found.length>1?"s":"")+" colorisée"+(found.length>1?"s":"")+" : "+found.join(", ")+". ";
+  if(missing.length){ msg+="Introuvable"+(missing.length>1?"s":"")+" : "+missing.join(", ")+" — vérifiez le numéro ou colorisez à la main."; cls=found.length?"warn":"err"; }
+  setStatus(msg,cls);
+  if(missing.length) showHint("Numéro(s) introuvable(s) : "+missing.join(", "));
+}
+document.getElementById("findbtn").onclick=searchAndFill;
+document.getElementById("numinput").addEventListener("keydown",e=>{ if(e.key==="Enter") searchAndFill(); });
+
+/* ---------- Utilitaires ---------- */
+function hexToRgb(h){h=h.replace("#","");if(h.length===3)h=h.split("").map(c=>c+c).join("");
+  return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+function rgbToHex(r,g,b){return "#"+[r,g,b].map(v=>v.toString(16).padStart(2,"0")).join("");}
+let hintTimer;
+function showHint(t){hintbar.textContent=t;hintbar.classList.add("show");clearTimeout(hintTimer);hintTimer=setTimeout(()=>hintbar.classList.remove("show"),2600);}
+/* ---------- Préremplissage par URL — chaînage REDPAR → PAINT (et MARTEAU) ----------
+   PAINT reste AUTONOME : aucune dépendance à un autre outil, seulement un contrat
+   d'URL générique, que REDPAR utilise aujourd'hui et MARTEAU demain.
+
+     ?commune=59009&nomCommune=VILLENEUVE+D+ASCQ&prefixe=000&section=LE
+     &parcelle=0030&echelle=1000&format=A4|portrait&auto=1
+
+   Sans auto=1 : les champs de la méthode ② sont préremplis, l'utilisateur garde la
+   main. Avec auto=1 : l'extrait est généré, puis on TENTE la colorisation.
+
+   ÉTAT DE LA COLORISATION AUTOMATIQUE — à lire avant de la « corriger »
+   Elle délègue à « Rechercher par numéro » (OCR multi-angle, amorce sur un pixel
+   clair voisin du chiffre), donc elle cible le bon numéro. Sa limite est dans
+   findSeed, qui retient la PLUS GRANDE région claire autour du chiffre et s'arrête
+   à 5 000 pixels : il ne peut donc pas distinguer une parcelle d'une voirie, et en
+   tissu urbain dense la première sonde qui atteint la rue gagne. Le remplissage
+   fuit alors dans tout le réseau viaire.
+   Deux fausses pistes déjà écartées, ne pas les reprendre :
+     — amorcer au centre de l'IMAGE : la page porte un en-tête et un cartouche, le
+       milieu tombe à côté de la parcelle, voire sur un trait ;
+     — repérer le cadre de la carte par projection des pixels sombres : mis en échec
+       dès qu'une longue ligne droite traverse le plan (voirie rectiligne, voie
+       ferrée, limite de section), avec le risque de colorier la parcelle VOISINE.
+   La voie fiable est la projection du CONTOUR de la parcelle, que REDPAR sait
+   fournir (/api/geo?...&contours=1), sur les coordonnées portées en marge de
+   l'extrait. C'est le chantier « contours » commun à PAINT et MARTEAU.
+   D'ici là : on tente, et l'on REFUSE plutôt que de se tromper.
+*/
+/* ==================================================================
+   VUE AÉRIENNE — ORTHOPHOTOGRAPHIE IGN                (30/07/2026)
+   ------------------------------------------------------------------
+   Chemin ENTIÈREMENT DISTINCT de celui du plan cadastral, et beaucoup
+   plus court, pour une raison de fond : ici PAINT ne REÇOIT pas la page
+   d'un tiers, il COMMANDE l'image. Il fixe lui-même la bbox, donc la
+   correspondance pixels ↔ mètres projetés est EXACTE PAR CONSTRUCTION.
+   Tombent en conséquence : Tesseract, la lecture des étiquettes de
+   coordonnées, le filtre de vraisemblance, le contrôle des 5 % contre la
+   substitution silencieuse d'échelle. Rien de tout cela n'a de sens quand
+   c'est nous qui écrivons l'emprise dans la requête.
+
+   Le § 7 b) de l'addendum v2 avait écarté le géoréférencement analytique
+   pour le plan cadastral, faute de connaître la POSITION EN PIXELS du
+   cadre sur une page qui porte en-tête et cartouches. Le WMS, lui, rend
+   une image NUE : le cadre EST l'image. L'objection ne porte pas ici.
+
+   Service : data.geopf.fr/wms-r/wms, WMS 1.3.0, public et sans clé.
+   Mesuré le 30/07/2026 sur La Madeleine : EPSG:3950 accepté, 5000×5000
+   px servis, en-têtes CORS présents — donc appel direct depuis le
+   navigateur, aucun endpoint proxy, vercel.json inchangé.
+
+   ⚠ CONTREPARTIE ASSUMÉE : ce chemin n'a AUCUN AUTO-CONTRÔLE. Le plan
+   cadastral recoupe l'échelle mesurée contre l'échelle théorique à 5 % ;
+   ici il n'y a rien à recouper. Si la bbox part fausse, l'image est
+   fausse EN SILENCE. Seuls garde-fous disponibles, tous deux appliqués :
+   les sommets doivent tomber DANS le rendu, et l'emprise du contour doit
+   occuper une fraction plausible de l'image.
+
+   ⚠ MILLÉSIMES POSSIBLEMENT DISTINCTS : le plan cadastral et l'ortho ne
+   datent pas du même jour. Une parcelle divisée récemment se colorie
+   juste sur le cadastre et de travers sur une photo antérieure. Le
+   millésime servi est porté à l'écran quand le service le déclare.
+   ================================================================== */
+const FACTEUR_CONTEXTE = 3;   // voir le raisonnement chiffré dans chargerOrtho
+// ⚠ LIÉ À FACTEUR_CONTEXTE, sans être une constante : la largeur de placement des
+// vues se déduit de la page — deux par ligne, marges de 42 pt, soit environ
+// 87 mm chacune. C'est l'hypothèse sur laquelle le facteur ci-dessus a été
+// calibré : 179 dpi à cette largeur, contre 84 dpi en pleine largeur A4, sur une
+// parcelle urbaine de 30 m. CHANGER LA MISE EN PAGE OBLIGE À REVOIR LE FACTEUR.
+// (L'ancienne constante DOC_LARGEUR_VUE_MM a été retirée le 31/07 en passant aux
+// deux vues de front : elle n'était plus lue, et du code mort ment.)
+
+/* ==================================================================
+   ⚠ RÈGLE DE DIMENSIONNEMENT DE TOUT CE QUI EST GRAVÉ DANS L'IMAGE
+   ------------------------------------------------------------------
+   ON DIMENSIONNE EN MILLIMÈTRES DE PAPIER, JAMAIS EN PIXELS DE CANVAS.
+
+   Le défaut corrigé le 31/07 : les tailles étaient exprimées en fractions de
+   S.W (« S.W / 95 »), or l'image est PLACÉE à environ 85 mm dans le document,
+   soit 14 px par millimètre. Un texte de 13 px sortait donc à 0,89 mm sur le
+   papier — ILLISIBLE. Et c'était le plus grave pour la mention de source : une
+   attribution qu'on ne peut pas lire ne remplit pas l'obligation de la licence
+   ouverte, qui est précisément le fondement autorisant la pièce.
+
+   ⚠ ON DIMENSIONNE POUR LE PLACEMENT LE PLUS ÉTROIT, non pour le plus large :
+   ce qui est lisible à 85 mm l'est encore à pleine page — l'inverse est faux.
+   Un texte un peu grand sur un export pleine page est une gêne ; un texte
+   illisible dans le document est une faute. Le pire cas commande.
+
+   La règle vaut quelle que soit la taille du canvas : 2 mm donnent 28 px sur un
+   canvas de 1 200 px, et 66 px sur les 2 813 px d'une grande parcelle rurale.
+   ================================================================== */
+const PLACEMENT_MIN_MM = 85;
+const mmPxDe = (largeurCanvas, mm) =>
+  Math.max(1, Math.round(largeurCanvas * mm / PLACEMENT_MIN_MM));
+const mmPx = (mm) => mmPxDe(S.W, mm);
+const ORTHO = {
+  service: "https://data.geopf.fr/wms-r/wms",
+  couche:  "ORTHOIMAGERY.ORTHOPHOTOS",
+  natifM:  0.20,     // finesse native de l'ortho, en mètres au sol par pixel
+  // PLANCHER À 1 200 px, abaissé de 1 700 le 30/07/2026 après mesure.
+  // Raison : TRENTE réduit DE TOUTE FAÇON chaque image à 1 100 px avant
+  // insertion dans la fiche, donc les pixels au-delà sont jetés. À emprise
+  // égale la netteté est identique — l'information n'est pas dans l'ortho et
+  // aucun réglage ne l'y mettra —, seuls le poids du JPEG et le temps de
+  // réponse changent. Gain sans contrepartie.
+  // ⚠ NE PAS CROIRE qu'un « plafond de suréchantillonnage » ferait mieux :
+  // plancher de pixels et plafond de suréchantillonnage sont LE MÊME BOUTON
+  // tourné en sens inverse, le plancher gagnant toujours. Le choix est binaire —
+  // ou des petites parcelles molles mais imprimables, ou 200 px inexploitables.
+  pxMin:   1200,
+  pxMax:   4000      // 5000 passe, mesuré — on garde de la marge
+};
+
+/* Zone Lambert conique conforme DÉDUITE DE L'ORDONNÉE ELLE-MÊME.
+   Y0 de la zone zz vaut (zz − 41) × 10⁶ + 200 000, et l'ordonnée d'une
+   zone ne s'écarte de son million que de 89 000 à 311 000 m, quand la
+   bascule d'arrondi est à 700 000. Vérifié sur les NEUF zones : la
+   déduction est sans ambiguïté, avec 389 km de marge. C'est pourquoi le
+   contrat d'URL n'a PAS besoin d'un paramètre de zone — REDPAR n'a rien
+   à apprendre, ses coordonnées portent déjà l'information. */
+function zoneCC(Y){
+  const zz = Math.round((Y - 200000) / 1e6) + 41;
+  return (zz >= 42 && zz <= 50) ? { zz, epsg: 3900 + zz } : null;
+}
+
+/* Sommets projetés transmis par REDPAR, tous polygones confondus. */
+function sommetsProjetes(brut){
+  return (brut || "").trim().split("|")
+    .flatMap(b => b.split(";").map(c => c.split(",").map(parseFloat)))
+    .filter(q => q.length === 2 && Number.isFinite(q[0]) && Number.isFinite(q[1]));
+}
+
+/* REPÈRES D'ILLUSTRATION. Décision JFD du 30/07/2026 : sur une vue aérienne
+   le contour exact de la parcelle n'est PAS souhaitable. Deux motifs, et le
+   second est le plus fort :
+     — avec plusieurs parcelles, une dentelle de contours exacts égare
+       l'interlocuteur au lieu de le renseigner ;
+     — la pièce est ILLUSTRATIVE. Un contour au cordeau sur une photographie
+       invite à mesurer ce qui n'est pas mesurable à cette échelle, et donne à
+       une illustration l'autorité d'un plan. Le repère doit DÉSIGNER, pas
+       DÉLIMITER — c'est le plan cadastral qui délimite.
+
+   ELLIPSE CIRCONSCRITE À LA BOÎTE ENGLOBANTE, et non cercle : sur une parcelle
+   compacte l'ellipse EST un rond, mais sur une lanière un cercle circonscrit
+   aurait un rayon égal à la moitié de la longueur et engloberait tout le
+   voisinage. Une lanière de 200 × 10 m donnerait un cercle de 100 m de rayon.
+   Une seule règle couvre les deux formes, sans cas particulier à maintenir.
+
+   Demi-axes en w/√2 et h/√2 : c'est l'ellipse qui passe par les quatre coins
+   de la boîte. Plancher de 6 m pour qu'une parcelle de 10 ca reste visible. */
+function ellipsesDe(brut, mode){
+  const blocs = (brut || "").trim().split("|")
+    .map(b => b.split(";").map(c => c.split(",").map(parseFloat))
+                .filter(q => q.length === 2 && Number.isFinite(q[0]) && Number.isFinite(q[1])))
+    .filter(a => a.length >= 3);
+  if(!blocs.length) return [];
+  const boite = pts => {
+    const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs);
+    const y0 = Math.min(...ys), y1 = Math.max(...ys);
+    return { cx: (x0 + x1) / 2, cy: (y0 + y1) / 2,
+             a: Math.max((x1 - x0) / Math.SQRT2, 6),
+             b: Math.max((y1 - y0) / Math.SQRT2, 6),
+             aireBoite: (x1 - x0) * (y1 - y0) };
+  };
+  // « ronds » : un repère par parcelle. « rond » : un seul, sur l'ensemble —
+  // c'est une propriété, pas une collection.
+  return mode === "ronds" ? blocs.map(boite) : [boite(blocs.flat())];
+}
+
+/* DISPERSION : part de la boîte d'ensemble réellement occupée par les
+   parcelles. Un repère unique sur des parcelles éparpillées cerne surtout du
+   terrain d'autrui — on le dit, et l'on suggère un repère par parcelle. */
+function dispersion(brut){
+  const es = ellipsesDe(brut, "ronds");
+  if(es.length < 2) return 1;
+  const un = ellipsesDe(brut, "rond")[0];
+  const somme = es.reduce((t, e) => t + e.aireBoite, 0);
+  const ens = un.aireBoite;
+  return ens > 0 ? somme / ens : 1;
+}
+
+async function chargerOrtho(p){
+  const brut = (p.get("poly") || "").trim();
+  const mPt  = (p.get("pt") || "").match(/^(-?[0-9.]+),(-?[0-9.]+)$/);
+  const som  = sommetsProjetes(brut);
+  if(!som.length && !mPt){
+    setGenStatus("Vue aérienne impossible : ni contour (poly) ni point projeté (pt) "
+      + "dans le lien. Réexportez depuis REDPAR après le chargement des contours.", "err");
+    return false;
+  }
+
+  // ---- emprise au sol demandée -----------------------------------------
+  // DÉFAUT = « contexte », décision JFD du 31/07/2026 après comparaison à l'écran
+  // de trois cadrages. Voir FACTEUR_CONTEXTE ci-dessous pour le raisonnement.
+  const cadre = (p.get("cadre") || "contexte").toLowerCase();
+  const mEmp  = (p.get("emp") || "").trim().match(/^([0-9.]+)x([0-9.]+)$/);
+  let cx, cy, largeur, hauteur, cadreRetenu = cadre, motifRepli = "";
+
+  const trace = (p.get("trace") || "rond").toLowerCase();
+  if(som.length){
+    // ⚠ LE CADRE SE CALCULE SUR LE REPÈRE, NON SUR LA PARCELLE. Une ellipse
+    // circonscrite dépasse la boîte englobante d'un facteur √2 : cadrer sur la
+    // parcelle rognerait le rond sur les grandes emprises — un rond tronqué
+    // ne désigne plus rien.
+    const reperes = (trace === "contour") ? [] : ellipsesDe(brut, trace);
+    let x0, x1, y0, y1;
+    if(reperes.length){
+      x0 = Math.min(...reperes.map(e => e.cx - e.a));
+      x1 = Math.max(...reperes.map(e => e.cx + e.a));
+      y0 = Math.min(...reperes.map(e => e.cy - e.b));
+      y1 = Math.max(...reperes.map(e => e.cy + e.b));
+    }else{
+      const xs = som.map(q => q[0]), ys = som.map(q => q[1]);
+      x0 = Math.min(...xs); x1 = Math.max(...xs);
+      y0 = Math.min(...ys); y1 = Math.max(...ys);
+    }
+    cx = (x0 + x1) / 2; cy = (y0 + y1) / 2;
+    // CADRAGE « CONTEXTE » : le cadre vaut FACTEUR_CONTEXTE fois le repère, soit
+    // une marge égale à la moitié de cet écart appliquée à la plus grande
+    // dimension. Le facteur de 3 n'est pas un goût, il résulte d'un arbitrage
+    // CHIFFRÉ entre deux exigences qui tirent en sens OPPOSÉ, et qu'aucun
+    // réglage ne réconcilie :
+    //   — plus le cadre est large, plus le repère est petit dans l'image ;
+    //   — plus le cadre est serré, moins l'ortho a d'information à donner, donc
+    //     plus l'impression est molle.
+    // Mesuré sur une parcelle de 30 m, en pixels RÉELLEMENT porteurs
+    // (emprise ÷ 0,20) rapportés à la largeur d'insertion :
+    //   ×2 → repère à 50 % de la largeur, mais 120 dpi en demi-page
+    //   ×3 → repère à 33 %,                   180 dpi en demi-page
+    //   cadre cadastral → repère à 22 %,      276 dpi
+    // JFD insère en DEMI-PAGE et a retenu ×3 : le repère reste franc et
+    // l'impression confortable. À PLEINE LARGEUR A4 ce choix tomberait à 83 dpi
+    // et il faudrait revenir au cadrage cadastral — la largeur d'insertion
+    // commande donc le facteur, ne pas la perdre de vue en le modifiant.
+    const facteur = (cadre === "contexte") ? FACTEUR_CONTEXTE : 1.20;
+    const marge = Math.max((x1 - x0), (y1 - y0)) * (facteur - 1) / 2;
+    largeur = (x1 - x0) + 2 * Math.max(marge, 10);
+    hauteur = (y1 - y0) + 2 * Math.max(marge, 10);
+  }else{
+    cx = parseFloat(mPt[1]); cy = parseFloat(mPt[2]);
+    largeur = hauteur = 200;
+    cadreRetenu = "serre";
+    motifRepli = "aucun contour transmis, cadrage de 200 m autour du point projeté";
+  }
+
+  if(cadre === "plan"){
+    if(mEmp){
+      // Emprise au sol du CADRE du plan cadastral, calculée par REDPAR qui a
+      // choisi l'échelle et le format. C'est elle qui rend les deux pièces
+      // SUPERPOSABLES — même centre, même emprise, donc même échelle.
+      largeur = parseFloat(mEmp[1]); hauteur = parseFloat(mEmp[2]);
+      if(mPt){ cx = parseFloat(mPt[1]); cy = parseFloat(mPt[2]); }
+    }else{
+      // ON AVERTIT, ON NE SORT PAS FAUX. Sans emp, l'emprise du cadre
+      // cadastral est inconnue de PAINT : la deviner produirait une pièce
+      // qui a l'air superposable sans l'être, ce qui est pire que le repli.
+      cadreRetenu = "serre";
+      motifRepli = "paramètre « emp » absent du lien : l'emprise du cadre "
+        + "cadastral est inconnue, cadrage serré sur le contour — les deux "
+        + "plans NE SONT PAS superposables";
+    }
+  }
+
+  // ⚠ CADRAGE CARRÉ OPTIONNEL (carre=1), pour que N vues s'alignent en grille :
+  // placées à la même largeur, deux images n'ont la même hauteur que si elles ont
+  // le même rapport. PAR ÉLARGISSEMENT SEULEMENT, jamais par recadrage — comme
+  // pour la carte de commune : élargir n'ajoute que du voisinage, rogner
+  // amputerait le repère.
+  if((p.get("carre") || "") === "1"){
+    const cote = Math.max(largeur, hauteur);
+    largeur = cote; hauteur = cote;
+  }
+
+  // ---- zone de projection ----------------------------------------------
+  const z = zoneCC(cy);
+  if(!z){
+    setGenStatus("Vue aérienne impossible : l'ordonnée " + Math.round(cy) + " ne "
+      + "correspond à aucune zone conique conforme métropolitaine (CC42 à CC50). "
+      + "L'outre-mer n'est pas couvert par ce chemin.", "err");
+    return false;
+  }
+
+  // ---- résolution ------------------------------------------------------
+  // ARBITRAGE ASSUMÉ, et il n'est pas neutre. Deux exigences s'opposent :
+  //   — ne pas demander plus fin que le natif, le suréchantillonnage créant
+  //     l'apparence du détail et non le détail ;
+  //   — ne pas descendre sous la résolution interne de renderBase, faute de
+  //     quoi le tracé du contour et l'impression se dégradent.
+  // Sur une petite parcelle les deux sont INCONCILIABLES : 80 m au natif ne
+  // font que 400 px, inexploitables. Le plancher gagne donc, et l'on
+  // SURÉCHANTILLONNE — mais on le DIT, à l'écran, avec le facteur. Taire un
+  // suréchantillonnage sur une pièce annexée à un acte serait laisser croire
+  // à une finesse qui n'existe pas ; l'annoncer laisse le rédacteur juger,
+  // comme pour les parcelles sous 2 mm du plan cadastral.
+  let W = Math.round(largeur / ORTHO.natifM);
+  W = Math.max(ORTHO.pxMin, Math.min(ORTHO.pxMax, W));
+  let H = Math.round(W * hauteur / largeur);
+  if(H > ORTHO.pxMax){ W = Math.round(W * ORTHO.pxMax / H); H = ORTHO.pxMax; }
+  if(H < 1) H = 1;
+  // Facteur de suréchantillonnage : > 1 signifie qu'on demande plus fin que
+  // ce que l'ortho contient réellement.
+  const surech = ORTHO.natifM / (largeur / W);
+
+  const x0 = cx - largeur / 2, x1 = cx + largeur / 2;
+  const y0 = cy - hauteur / 2, y1 = cy + hauteur / 2;
+  // EPSG:39xx : l'ordre d'axes du registre est (E, N), donc minx,miny,maxx,maxy.
+  // C'est EPSG:4326 qui inverse — d'où l'usage de CRS:84 partout ailleurs.
+  // Ici la question ne se pose pas : on reste dans le système de REDPAR.
+  const url = ORTHO.service + "?" + new URLSearchParams({
+    SERVICE: "WMS", VERSION: "1.3.0", REQUEST: "GetMap",
+    LAYERS: ORTHO.couche, STYLES: "", FORMAT: "image/jpeg",
+    CRS: "EPSG:" + z.epsg,
+    BBOX: [x0.toFixed(2), y0.toFixed(2), x1.toFixed(2), y1.toFixed(2)].join(","),
+    WIDTH: String(W), HEIGHT: String(H)
+  }).toString();
+
+  spin.classList.add("show");
+  spinmsg.textContent = "Vue aérienne IGN — " + W + "×" + H + " px…";
+  try{
+    const img = await new Promise((ok, ko) => {
+      const i = new Image();
+      i.crossOrigin = "anonymous";   // CORS mesuré présent : canvas exportable
+      i.onload  = () => ok(i);
+      i.onerror = () => ko(new Error("le service n'a pas rendu d'image"));
+      i.src = url;
+    });
+    // Le service peut servir une taille différente de celle demandée : c'est
+    // la taille RENDUE qui fait foi pour le géoréférencement, jamais celle
+    // qu'on a demandée.
+    S.W = img.naturalWidth || W;
+    S.H = img.naturalHeight || H;
+    [base, overlay].forEach(c => { c.width = S.W; c.height = S.H; });
+    cwrap.style.width = S.W + "px"; cwrap.style.height = S.H + "px";
+    anno.style.width  = S.W + "px"; anno.style.height  = S.H + "px";
+    baseCtx.fillStyle = "#fff"; baseCtx.fillRect(0, 0, S.W, S.H);
+    baseCtx.drawImage(img, 0, 0, S.W, S.H);
+
+    S.pdf = null; S.pageCount = 1; S.page = 1; S.rotation = 0;
+    S.ocrCache = null; S.anchorCache = null;
+    S.notes = []; anno.innerHTML = ""; S.legendLabels = {}; S.couleursAnnot = null;
+    S.ortho = { epsg: z.epsg, zz: z.zz, bbox: [x0, y0, x1, y1], trace,
+                cadre: cadreRetenu, motifRepli, url,
+                mParPx: largeur / S.W,
+                surech: ORTHO.natifM / (largeur / S.W) };
+    oCtx.clearRect(0, 0, S.W, S.H);
+    S.undoStack = []; S.redoStack = []; pushUndo();
+    applyZoom(); fitToScreen(); rebuildLegend();
+    drop.classList.add("hide");
+    document.getElementById("pagenav").style.display = "none";
+    ["genbtn", "rotate", "zoomout", "zoomlbl", "zoomin"]
+      .forEach(id => document.getElementById(id).style.display = "inline-flex");
+    document.getElementById("pngbtn").disabled = false;
+    document.getElementById("pdfbtn").disabled = false;
+    setGenStatus("", "");
+    return true;
+  }catch(err){
+    setGenStatus("Vue aérienne — échec : " + err.message + ".", "err");
+    return false;
+  }finally{ spin.classList.remove("show"); }
+}
+
+/* Géoréférencement ANALYTIQUE, de même forme que celui rendu par
+   georeferencer() afin que la conversion des sommets soit identique :
+   pixel = (coordonnée − b) / a. L'ordonnée décroît vers le bas de
+   l'image, d'où le pas négatif en Y. Corrélations à ±1 non par mesure
+   mais par construction — ce ne sont pas des mesures. */
+function geoOrtho(){
+  const [x0, y0, x1, y1] = S.ortho.bbox;
+  return { fx: { a: (x1 - x0) / S.W, b: x0, r: 1 },
+           fy: { a: -(y1 - y0) / S.H, b: y1, r: -1 } };
+}
+
+/* CONTOUR SEUL, NON REMPLI — décision JFD du 30/07/2026. Sur une
+   photographie, un aplat masque précisément ce qu'on est venu voir : le
+   bâti, la végétation, les accès. Le trait délimite sans cacher. */
+/* TABLEAU D'ANNOTATION SUR PHOTOGRAPHIE. Aucun OCR : il n'y a ni titre ni
+   cartouche à repérer, donc rien à mesurer sur l'image. Le tableau se pose
+   en bas à gauche, sur un fond blanc translucide — sans fond, un texte est
+   illisible sur une vue aérienne, quelle que soit sa couleur. Le contour
+   étant centré, ce coin ne le masque pas. */
+function tableauOrtho(rangs, total){
+  if(!rangs.length) return 0;
+  // ⚠ SECTION ET NUMÉRO SEULEMENT, PAS DE CONTENANCE. Décision JFD du 31/07/2026.
+  // La pièce désigne sans délimiter : afficher une contenance au centiare dans le
+  // coin rétablirait, sous forme de chiffre, la précision qu'on a délibérément
+  // retirée au milieu en remplaçant le contour par un repère. Un tiers recevant
+  // la photo seule pourrait y lire une autorité qu'elle n'a pas.
+  // L'objection contraire — la contenance vient de la MATRICE, pas de la photo,
+  // donc ne promet rien de faux — a été pesée et écartée : sur une pièce
+  // illustrative, mieux vaut identifier le bien que le quantifier.
+  // Le paramètre « total » est donc REÇU MAIS IGNORÉ, et « tab » n'est lu que
+  // sur ses deux premières colonnes. REDPAR continue de les émettre : rien à
+  // redéployer de son côté, et le retour en arrière ne coûte qu'une ligne ici.
+  const lignes = [["Section", "N°"]].concat(rangs.map(r => r.slice(0, 2)));
+  const t = mmPx(2.1);                    // 2,1 mm de papier
+  oCtx.save();
+  oCtx.font = t + "px Georgia, 'Times New Roman', serif";
+  oCtx.textBaseline = "top";
+  const nbCol = Math.max(...lignes.map(l => l.length));
+  const larg = [];
+  for(let c = 0; c < nbCol; c++)
+    larg[c] = Math.max(...lignes.map(l => oCtx.measureText(String(l[c] || "")).width));
+  const espace = t * 0.9, padd = t * 0.7, hLigne = t * 1.45;
+  const W = larg.reduce((a, b) => a + b, 0) + espace * (nbCol - 1) + padd * 2;
+  const H = hLigne * lignes.length + padd * 2;
+  const x = padd, y = S.H - H - padd;
+  oCtx.fillStyle = "rgba(255,255,255,0.88)";
+  oCtx.fillRect(x, y, W, H);
+  oCtx.strokeStyle = "#0F2238"; oCtx.lineWidth = mmPx(0.2);
+  oCtx.strokeRect(x, y, W, H);
+  lignes.forEach((l, i) => {
+    const yy = y + padd + i * hLigne;
+    const gras = (i === 0);
+    oCtx.font = (gras ? "bold " : "") + t + "px Georgia, 'Times New Roman', serif";
+    oCtx.fillStyle = "#0F2238";
+    let xx = x + padd;
+    for(let c = 0; c < nbCol; c++){
+      oCtx.fillText(String(l[c] || ""), xx, yy);
+      xx += larg[c] + espace;
+    }
+    if(i === 0){
+      oCtx.beginPath();
+      oCtx.moveTo(x + padd * 0.5, yy + hLigne - t * 0.22);
+      oCtx.lineTo(x + W - padd * 0.5, yy + hLigne - t * 0.22);
+      oCtx.stroke();
+    }
+  });
+  oCtx.restore();
+  if(S.ortho) S.ortho.tabW = W;    // le cartouche doit pouvoir l'éviter
+  return lignes.length;
+}
+
+/* Palier lisible immédiatement inférieur : une barre d'échelle qui annonce
+   « 87 m » ne se lit pas, « 50 m » se lit. */
+function palierLisible(v){
+  const p = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000];
+  let r = p[0];
+  p.forEach((q) => { if(q <= v) r = q; });
+  return r;
+}
+
+/* ==================================================================
+   CARTOUCHE : ÉCHELLE GRAPHIQUE, NORD, ET MENTION DE SOURCE
+   ------------------------------------------------------------------
+   ⚠ LA MENTION DE SOURCE N'EST PAS DÉCORATIVE. C'est la licence ouverte de
+   l'IGN qui rend cette photographie reproductible dans un acte — et c'est
+   précisément l'argument qui a fait préférer l'IGN à Google Maps, dont
+   l'imagerie ne l'est pas. Or cette licence impose en retour l'attribution de
+   la source. Une page qui sortirait sans mention se priverait donc du fondement
+   même qui l'autorise. Elle est GRAVÉE DANS L'IMAGE et non écrite sur la page
+   du PDF, afin de suivre l'image partout : export PNG, vue aérienne isolée,
+   réemploi dans une fiche.
+
+   ⚠ LE NOM DE LA LICENCE A ÉTÉ RETIRÉ le 31/07/2026 sur instruction de JFD, et
+   cela NE FRAGILISE PAS l'obligation : la licence ouverte impose la MENTION DE
+   LA PATERNITÉ — nommer la source et sa date de mise à jour —, non de citer la
+   licence elle-même. « Source : IGN — Géoplateforme » y suffit.
+   ⚠ EN REVANCHE, NE PAS RETIRER LA SOURCE. C'est elle, et elle seule, qui
+   distingue cette pièce d'une capture d'écran non reproductible.
+
+   ÉCHELLE GRAPHIQUE PLUTÔT QUE NUMÉRIQUE : une échelle graphique reste juste
+   après agrandissement ou réduction de la page, un « 1/1000 » écrit devient faux
+   dès la première photocopie. Et elle est ici EXACTE, non estimée : le
+   géoréférencement étant analytique, on connaît la résolution au millième de
+   mètre par pixel — au plan cadastral il fallait la déduire par régression.
+
+   NORD TOUJOURS EN HAUT, donc la flèche dit vrai PAR CONSTRUCTION : la rotation
+   n'est jamais propagée aux liens de vue aérienne (§ 5 de l'addendum REDPAR v4).
+   ⚠ SI LA ROTATION VENAIT UN JOUR À L'ÊTRE, CETTE FLÈCHE DEVIENDRAIT MENSONGÈRE.
+   ================================================================== */
+function cartoucheOrtho(){
+  if(!S.ortho) return;
+  const m = S.ortho.mParPx;
+  const t = mmPx(1.9);                    // 1,9 mm ≈ 5,4 pt, taille d'un crédit photo
+  oCtx.save();
+  oCtx.font = t + "px Georgia, 'Times New Roman', serif";
+  oCtx.textBaseline = "top";
+  oCtx.textAlign = "left";
+
+  const metres = palierLisible(0.22 * S.W * m);
+  const barre = metres / m;
+  const source = "Source : IGN — Géoplateforme";
+  const wSrc = oCtx.measureText(source).width;
+  const lblG = "0", lblD = metres + " m";
+  const padd = t * 0.7, hB = t * 0.5;
+  const W = Math.max(barre, wSrc, oCtx.measureText(lblD).width * 2) + padd * 2;
+  const H = padd * 2 + hB + t * 1.35 + t * 1.25;
+
+  // Bas à droite, le tableau occupant le bas à gauche. Si les deux ne tiennent
+  // pas sur la même ligne — image étroite, cas d'une lanière en portrait — le
+  // cartouche monte en haut à gauche, le nord occupant le haut à droite.
+  const enBas = (S.ortho.tabW || 0) + W + padd * 3 <= S.W;
+  const x = enBas ? S.W - W - padd : padd;
+  const y = enBas ? S.H - H - padd : padd;
+
+  oCtx.fillStyle = "rgba(255,255,255,0.88)";
+  oCtx.fillRect(x, y, W, H);
+  oCtx.strokeStyle = "#0F2238";
+  oCtx.lineWidth = mmPx(0.2);
+  oCtx.strokeRect(x, y, W, H);
+
+  // barre en deux segments alternés, convention cartographique
+  const bx = x + (W - barre) / 2, by = y + padd;
+  oCtx.fillStyle = "#0F2238";
+  oCtx.fillRect(bx, by, barre / 2, hB);
+  oCtx.strokeRect(bx, by, barre, hB);
+  oCtx.beginPath();
+  oCtx.moveTo(bx + barre / 2, by); oCtx.lineTo(bx + barre / 2, by + hB);
+  oCtx.stroke();
+
+  oCtx.fillStyle = "#0F2238";
+  oCtx.fillText(lblG, bx - oCtx.measureText(lblG).width / 2, by + hB + t * 0.25);
+  oCtx.fillText(lblD, bx + barre - oCtx.measureText(lblD).width / 2, by + hB + t * 0.25);
+  oCtx.fillText(source, x + (W - wSrc) / 2, by + hB + t * 1.5);
+
+  // ---- flèche du nord, en haut à droite -------------------------------
+  // ALLÉGÉE le 31/07 : la version précédente remplissait son cadre et se lisait
+  // comme un pâté sombre. Triangle plus étroit, du blanc autour, « N » non gras.
+  const larg = mmPx(3.0), haut = mmPx(4.2), air = mmPx(1.1);
+  const bx2 = S.W - larg - air * 2 - mmPx(1.2), by2 = mmPx(1.2);
+  const bw = larg + air * 2, bh = haut + t * 1.35 + air * 1.6;
+  oCtx.fillStyle = "rgba(255,255,255,0.88)";
+  oCtx.fillRect(bx2, by2, bw, bh);
+  oCtx.strokeStyle = "#0F2238"; oCtx.lineWidth = mmPx(0.2);
+  oCtx.strokeRect(bx2, by2, bw, bh);
+  const cxN = bx2 + bw / 2, yH = by2 + air;
+  oCtx.fillStyle = "#0F2238";
+  oCtx.beginPath();
+  oCtx.moveTo(cxN, yH);                                  // pointe
+  oCtx.lineTo(cxN + larg * 0.32, yH + haut);             // aile droite
+  oCtx.lineTo(cxN, yH + haut * 0.68);                    // creux
+  oCtx.lineTo(cxN - larg * 0.32, yH + haut);             // aile gauche
+  oCtx.closePath();
+  oCtx.fill();
+  oCtx.font = t + "px Georgia, 'Times New Roman', serif";
+  oCtx.fillText("N", cxN - oCtx.measureText("N").width / 2, yH + haut + air * 0.35);
+  oCtx.restore();
+}
+
+async function contourOrtho(p, rangs, total){
+  const g   = geoOrtho();
+  const brut = (p.get("poly") || "").trim();
+  const enPixels = bloc => bloc.split(";").map(c => {
+      const [a, b] = c.split(",").map(parseFloat);
+      return [Math.round((a - g.fx.b) / g.fx.a), Math.round((b - g.fy.b) / g.fy.a)];
+    }).filter(q => Number.isFinite(q[0]) && Number.isFinite(q[1]));
+  const polygones = brut.split("|").map(enPixels).filter(a => a.length >= 3);
+
+  const desc = "Vue aérienne IGN, zone CC" + S.ortho.zz + " (EPSG:" + S.ortho.epsg
+    + "), " + S.ortho.mParPx.toFixed(3) + " m/px, rendu " + S.W + "×" + S.H + " px, "
+    + "cadrage " + (S.ortho.cadre === "plan" ? "identique au plan cadastral"
+        : S.ortho.cadre === "contexte" ? "de contexte (×" + FACTEUR_CONTEXTE + " le repère)"
+        : "serré")
+    + ". Géoréférencement ANALYTIQUE — emprise commandée, non lue : aucun OCR."
+    + (S.ortho.surech > 1.5
+        ? " ⚠ Image suréchantillonnée ×" + S.ortho.surech.toFixed(1) + " : la finesse "
+          + "réelle reste celle de l'ortho (" + ORTHO.natifM.toFixed(2) + " m au sol par "
+          + "pixel), l'agrandissement n'ajoute aucun détail."
+        : "");
+  const repli = S.ortho.motifRepli ? " ⚠ " + S.ortho.motifRepli + "." : "";
+
+  if(!polygones.length){
+    tableauOrtho(rangs, total);
+    cartoucheOrtho();
+    setStatus("Vue aérienne chargée, sans contour à tracer (paramètre « poly » "
+      + "absent ou trop court). " + desc + repli, "warn");
+    return;
+  }
+
+  // ---- garde-fous, les seuls disponibles sur ce chemin ------------------
+  const som = polygones.flat();
+  const xs = som.map(q => q[0]), ys = som.map(q => q[1]);
+  const bx = Math.max(...xs) - Math.min(...xs), by = Math.max(...ys) - Math.min(...ys);
+  const dehors = som.filter(q => q[0] < 0 || q[1] < 0 || q[0] >= S.W || q[1] >= S.H).length;
+  const part = (bx * by) / (S.W * S.H);
+  if(dehors === som.length){
+    setStatus("Contour NON tracé : la totalité de ses " + som.length + " sommets tombe "
+      + "hors du rendu. Le lien et l'emprise ne concordent pas — ne versez pas cette "
+      + "pièce au dossier. " + desc, "err");
+    return;
+  }
+
+  const trace = S.ortho.trace;
+  oCtx.save();
+  oCtx.globalAlpha = 1;                       // un repère ne se dilue pas
+  oCtx.strokeStyle = S.color;
+  oCtx.lineJoin = "round";
+  if(trace === "contour"){
+    oCtx.lineWidth = mmPx(0.35);
+    oCtx.beginPath();
+    polygones.forEach(pts => {
+      oCtx.moveTo(pts[0][0], pts[0][1]);
+      for(let i = 1; i < pts.length; i++) oCtx.lineTo(pts[i][0], pts[i][1]);
+      oCtx.closePath();
+    });
+    oCtx.stroke();
+  }else{
+    // Trait plus épais que pour un contour : un repère doit se voir d'emblée
+    // sur une photographie chargée, là où un contour se suit du regard.
+    oCtx.lineWidth = mmPx(0.5);
+    // Les demi-axes se convertissent séparément : rien ne garantit que les deux
+    // pas soient rigoureusement égaux, la hauteur en pixels étant arrondie.
+    ellipsesDe(brut, trace).forEach(e => {
+      const px = (e.cx - g.fx.b) / g.fx.a, py = (e.cy - g.fy.b) / g.fy.a;
+      oCtx.beginPath();
+      oCtx.ellipse(px, py, e.a / Math.abs(g.fx.a), e.b / Math.abs(g.fy.a), 0, 0, 2 * Math.PI);
+      oCtx.stroke();
+    });
+  }
+  oCtx.restore();
+  pushUndo();
+  if(!S.legendLabels[S.color]) S.legendLabels[S.color] = "";
+  rebuildLegend();
+  const nb = tableauOrtho(rangs, total);
+  cartoucheOrtho();
+
+  let alerte = "";
+  // DISPERSION : un repère unique posé sur des parcelles éparpillées cerne
+  // surtout du terrain qui n'est pas celui du dossier. On avertit sans bloquer,
+  // la lisibilité d'une illustration appartenant au rédacteur.
+  if(trace === "rond" && polygones.length > 1){
+    const occ = dispersion(brut);
+    if(occ < 0.30) alerte += " ⚠ Les " + polygones.length + " parcelles n'occupent que "
+      + Math.round(occ * 100) + " % de la zone cernée : le rond englobe surtout du terrain "
+      + "étranger au dossier. Préférez « trace=ronds », un repère par parcelle.";
+  }
+  if(dehors) alerte += " ⚠ " + dehors + " sommet(s) sur " + som.length + " hors du rendu : "
+    + "le repère est tronqué au bord de l'image.";
+  if(part > 0.98) alerte += " ⚠ Le contour occupe la quasi-totalité du rendu : "
+    + "l'emprise est probablement trop serrée pour situer le bien.";
+  if(part < 0.005) alerte += " ⚠ Le contour n'occupe que "
+    + (part * 100).toFixed(2) + " % du rendu : à cette taille il est illisible, "
+    + "préférez le cadrage serré.";
+
+  // Le bandeau du canvas s'efface au bout de 2,6 s : il ne PORTE pas
+  // l'avertissement, il signale qu'il y en a un à lire.
+  if(alerte || repli) showHint("⚠ Vue aérienne : un avertissement vous attend dans le statut, "
+    + "en bas du panneau de gauche.");
+  const libelle = trace === "contour"
+    ? ((polygones.length > 1 ? "UNITÉ FONCIÈRE de " + polygones.length + " parcelles" : "Parcelle")
+       + " cernée par son CONTOUR EXACT, sans aplat")
+    : ((polygones.length > 1 && trace === "ronds"
+          ? polygones.length + " parcelles désignées chacune par un repère"
+          : (polygones.length > 1 ? "Ensemble de " + polygones.length + " parcelles" : "Parcelle")
+            + " désignée par un repère")
+       + " — ellipse circonscrite, pièce ILLUSTRATIVE qui désigne sans délimiter");
+  setStatus(libelle
+    + " — " + som.length + " sommets, emprise "
+    + bx + "×" + by + " px. " + desc
+    + (nb ? " " + nb + " ligne(s) de tableau." : "") + repli + alerte,
+    (alerte || repli) ? "warn" : "ok");
+}
+
+function preremplirDepuisURL(){
+  const p = new URLSearchParams(location.search);
+  const commune  = (p.get("commune")  || "").trim();
+  const section  = (p.get("section")  || "").trim().toUpperCase();
+  const parcelle = (p.get("parcelle") || "").trim();
+  if(!commune || !section || !parcelle) return;
+
+  const setVal = (id, v) => { const el = document.getElementById(id); if(el && v) el.value = v; };
+
+  // Voile de production : levé dès que docauto est su, AVANT toute manœuvre
+  // visible — c'est tout son objet.
+  if((p.get("doc") || "") === "1" && (p.get("docauto") || "") === "1"){
+    const volV = (p.get("vol") || "").trim();
+    montrerVoile((p.get("nomCommune") || commune).toUpperCase(),
+      volV ? "Volume " + volV.replace("/", " de ") : "Dossier complet");
+  }
+  selectedCommune2 = { code: commune, nom: p.get("nomCommune") || commune };
+  const nomEl = c2Nom(); if(nomEl) nomEl.value = selectedCommune2.nom;
+  ac2Mark("ok", "✓ " + selectedCommune2.nom + " — INSEE " + commune);
+
+  setVal("g_prefixe",  p.get("prefixe") || "");
+  setVal("g_section",  section);
+  setVal("g_parcelle", parcelle);
+  setVal("g_echelle",  p.get("echelle"));
+  setVal("g_format",   p.get("format"));
+
+  // Couleur imposable par l'appelant. MARTEAU en aura besoin pour distinguer ses
+  // trois statuts (concordant, déclaré mais absent du cadastre, non déclaré).
+  // On refuse l'orange par défaut, mais on n'interdit rien à qui le demande.
+  const couleur = (p.get("couleur") || "").trim();
+  if(/^#[0-9A-Fa-f]{6}$/.test(couleur)){
+    const sw = [...document.querySelectorAll(".sw")]
+      .find(el => (el.dataset.color || "").toLowerCase() === couleur.toLowerCase());
+    setColor(couleur, sw || null);
+  }
+
+  // Recentrage éventuel, transmis à l'endpoint par generateExtrait.
+  const rx = parseFloat(p.get("x") || ""), ry = parseFloat(p.get("y") || "");
+  S.recentrage = (Number.isFinite(rx) && Number.isFinite(ry)) ? { x: rx, y: ry } : null;
+
+  drop.classList.remove("hide");
+
+  // Le diagnostic ne dépend PAS de auto : un oubli de ce paramètre dans un lien
+  // rendait le mode muet, ce qui a coûté deux essais pour rien.
+  const auto = p.get("auto") === "1" || p.get("diaggeo") === "1";
+  setGenStatus("Références reçues : " + selectedCommune2.nom + " — section " + section
+    + " nº " + parcelle + (auto ? " — génération de l'extrait…" : "."), "");
+  // Dossier complet sur une commune dont l'ENSEMBLE déborde du cadre : REDPAR
+  // retire auto, l'écran ne génère rien — mais les plans PAR SECTION du
+  // document, eux, tiennent chacun dans leur cadre. Lancement direct : le
+  // document n'a plus besoin du plan de l'écran dès que poly est présent.
+  if(!auto && (p.get("doc") || "") === "1" && (p.get("docauto") || "") === "1"
+     && ((p.get("poly") || "").trim())){
+    S.docAutoLance = true;
+    showHint("Dossier complet : plans par section — génération directe du document…");
+    setTimeout(() => { doExportDocument(); }, 800);
+    return;
+  }
+  if(!auto) return;
+
+  // Une réserve d'un chargement précédent ne doit pas être imputée à celui-ci.
+  window.captureReserve = null;
+
+  (async () => {
+    try{
+      // BASCULE VUE AÉRIENNE. Le chargement doit avoir lieu ICI, et non plus
+      // bas : les constantes W et H sont capturées quelques lignes après, et
+      // dessinerTableau les retient dans sa fermeture. Charger l'ortho plus
+      // tard donnerait un tableau dessiné sur des dimensions nulles.
+      const modeOrtho = (p.get("fond") || "").toLowerCase() === "ortho";
+      if(modeOrtho){
+        S.ortho = null;
+        if(!await chargerOrtho(p)) return;   // motif déjà affiché
+      }else{
+        S.ortho = null;
+        await generateExtrait("ref");
+        if(!S.pdf) return;                 // génération échouée : message déjà affiché
+        // Mode document : le bouton n'apparaît QUE si le plan cadastral est
+        // chargé, puisque c'est lui qui fait la page 1.
+        if((p.get("doc") || "") === "1")
+          document.getElementById("docbtn").style.display = "inline-flex";
+        // docauto=1 — Dossier complet de REDPAR. ⚠ EXCEPTION ASSUMÉE, décision
+        // JFD du 01/08 : le livrable part TOUT SEUL, quelle que soit l'issue de
+        // la colorisation — succès, avertissement, repli ou refus. Le principe
+        // du 31/07 (« le contrôle humain est une pièce du dispositif ») reste
+        // la règle pour TOUT LE RESTE : liens unitaires, panier du plan à la
+        // carte — seul le Dossier complet, production en série, y déroge. Les
+        // statuts et le détecteur d'extraits identiques continuent de DIRE
+        // leurs réserves dans l'onglet et au statut final du document : ils ne
+        // RETIENNENT plus l'export, ils ne se taisent pas pour autant.
+        // Le déclenchement est dans le finally de cette chaîne : il part à la
+        // FIN du chemin automatique, quel que soit le return emprunté.
+        // Sans doc=1, docauto est ignoré.
+        S.docAuto = ((p.get("doc") || "") === "1") && ((p.get("docauto") || "") === "1");
+      }
+
+      // ================== COLORISATION AUTOMATIQUE ==========================
+      // MÉTHODE : recensement exhaustif, puis sélection par TAILLE ATTENDUE.
+      // On ne devine plus. Une seule passe étiquette toutes les régions claires du
+      // rendu avec leur boîte englobante, et l'on retient celle dont les dimensions
+      // correspondent à celles de la parcelle, transmises EN MÈTRES par l'appelant.
+      // Pourquoi c'est fondé : un extrait couvre une largeur de terrain connue
+      // (largeur de feuille × échelle), donc le rendu donne l'échelle pixels par
+      // mètre. AV 1 à Saint-Omer : 16,3 × 11,6 m à 1/1000 sur A4 portrait, rendu
+      // 1 700 px de large → 8,1 px/m → 132 × 94 px attendus, quand la voirie en
+      // faisait 808 × 928.
+      // L'OCR A ÉTÉ RETIRÉ de ce chemin : lent (chargement de Tesseract puis six
+      // passes angulaires) et porteur de deux modes d'échec supplémentaires
+      // (numéro illisible, numéro court présent plusieurs fois). Il ne fournissait
+      // qu'une position approximative, que la taille attendue rend superflue.
+      // La recherche manuelle par numéro, elle, continue de l'utiliser : intacte.
+      // TOUT LE DIAGNOSTIC EST AFFICHÉ À L'ÉCRAN et pas seulement en console :
+      // quatre mises au point ont été perdues faute de pouvoir lire les messages,
+      // ceux-ci partant dans le panneau de génération que loadPDFData masque.
+      const W = S.W, H = S.H, thr = S.threshold, NPIX = W * H;
+
+      const aLaMain = (msg) => {
+        // ⚠ Trace lisible par le parent quand cette page tourne dans l'iframe
+        // de capture d'un plan de section. Voir window.captureReserve.
+        window.captureReserve = msg;
+        S.tool = "fill";
+        setStatus(msg + " Cliquez dans la parcelle avec l'outil « Remplir », déjà sélectionné.", "warn");
+        showHint("Cliquez dans la parcelle, au centre de la carte.");
+      };
+
+      const largeursFeuille = { "A4|portrait": 0.210, "A4|paysage": 0.297,
+                                "A3|portrait": 0.297, "A3|paysage": 0.420 };
+      const fmt = p.get("format") || "A4|portrait";
+      const ech = parseFloat(p.get("echelle") || "1000");
+      const mDim = (p.get("dim") || "").trim().match(/^([0-9.]+)x([0-9.]+)$/);
+      // ⚠ CE PORTILLON NE CONCERNE PAS LA VUE AÉRIENNE. Il garde la détection
+      // par TAILLE ATTENDUE, qui a besoin de dim pour comparer des pixels à des
+      // mètres. Le chemin ortho, lui, ne compare rien : il commande l'emprise.
+      // Sortir ici en mode ortho chargeait la photo puis renonçait au contour,
+      // sans un mot — c'est le piège du § 4 d) de l'addendum REDPAR v5, reproduit
+      // cette fois DANS LE CODE et non dans un lien de test.
+      if(!modeOrtho && (!mDim || !largeursFeuille[fmt] || !(ech > 0))){
+        aLaMain("Dimensions de la parcelle non transmises : la colorisation automatique "
+          + "a besoin du paramètre « dim », que REDPAR fournit une fois les contours chargés.");
+        return;
+      }
+      const pxParMetre = W / (largeursFeuille[fmt] * ech);
+      // mDim peut être nul en mode ortho : le déstructurer sans garde jetterait.
+      const attendu = mDim
+        ? { bw: parseFloat(mDim[1]) * pxParMetre, bh: parseFloat(mDim[2]) * pxParMetre }
+        : { bw: 0, bh: 0 };
+      // TROISIÈME SIGNAL : l'AIRE, indépendante de la boîte englobante. Deux
+      // régions peuvent partager la même boîte et avoir des aires radicalement
+      // différentes — c'est le cas d'une parcelle et d'un fragment de voirie en
+      // diagonale. REDPAR transmet la surface réelle en m² (paramètre surface).
+      // CONTRAINTE ASYMÉTRIQUE, et c'est essentiel : les contours des bâtiments
+      // étant des traits sombres, la région atteinte peut être BEAUCOUP PLUS
+      // PETITE que la parcelle (un liseré autour du bâti), mais elle ne peut pas
+      // être beaucoup plus grande. On plafonne donc sans plancher.
+      const surfM2 = parseFloat(p.get("surface") || "0");
+      const airePx = surfM2 > 0 ? surfM2 * pxParMetre * pxParMetre : null;
+      // Facteur 1,3 et non 1,5 : une région ne peut légitimement pas dépasser
+      // l'aire du polygone, tout au plus le liseré de ses pixels de bordure —
+      // environ 7 % de plus sur une parcelle de 106 m² à 1/1000. À 1,5 une bande
+      // diagonale de la bonne boîte passait encore.
+      const AIRE_FACTEUR_MAX = 1.3;
+
+      // ================== MODE DIAGNOSTIC GÉORÉFÉRENCEMENT ==================
+      // Déclenché par &diaggeo=1. Ne colorie RIEN : lit les étiquettes de
+      // coordonnées portées en marge de l'extrait et affiche le géoréférencement
+      // qu'on en déduit.
+      // L'extrait porte, le long du cadre, des valeurs de la projection conique
+      // conforme (RGF93CC50 sur l'exemple de Saint-Omer) : abscisses en haut et en
+      // bas, ordonnées à gauche et à droite. Deux valeurs sur un axe suffisent à
+      // établir la correspondance pixels ↔ mètres.
+      // CE DIAGNOSTIC SE VÉRIFIE LUI-MÊME : l'échelle théorique est connue
+      // (largeur de feuille × échelle / largeur du rendu). Si l'ajustement calculé
+      // sur les étiquettes lues retombe sur cette valeur, la lecture est juste —
+      // sans avoir besoin d'aucune vérité terrain.
+      // ---- Géoréférencement par les étiquettes de marge, réutilisable --------
+      // Lit les valeurs de coordonnées portées le long du cadre et en déduit la
+      // correspondance pixels ↔ mètres projetés. Mesuré sur Saint-Omer :
+      // corrélation 1,0000 sur les deux axes, écart de 0,06 % à la théorie.
+      // ---- ANNOTATION SOUS LE TITRE DE L'EXTRAIT ---------------------------
+      // Écrit des lignes de texte sous « EXTRAIT DU PLAN CADASTRAL », par le
+      // mécanisme de NOTES déjà en place : elles partent ainsi dans l'export PNG
+      // et PDF (buildExportCanvas les dessine centrées sur leur ancrage), et
+      // restent déplaçables et modifiables à la main par double-clic.
+      // Le titre est repéré par OCR — le mot « CADASTRAL » — et non par une
+      // position figée, parce que la mise en page diffère entre portrait, où le
+      // titre est en haut au centre, et paysage, où le cartouche occupe la
+      // colonne de gauche.
+      // Rend compte de la voie employée : sans cela on ne sait pas si le titre a
+      // été localisé ou si l'on est retombé sur une proportion.
+      // ---- TABLEAU D'ANNOTATION SOUS LE TITRE ------------------------------
+      // Trois colonnes — section, numéro, contenance cadastrale — et une ligne de
+      // total. Choix de JFD, pour deux raisons : un tableau a une largeur définie,
+      // donc un centrage vérifiable, là où deux lignes de texte centrées de
+      // longueurs inégales décrochent de part et d'autre ; et il prépare les
+      // UNITÉS FONCIÈRES, où plusieurs parcelles coloriées sur un même plan
+      // demandent une ligne chacune et un total d'ensemble.
+      // DESSINÉ SUR LE CALQUE et non porté par le mécanisme de notes : celui-ci ne
+      // sait afficher qu'une ligne de texte centrée, sans colonnes ni filets. Le
+      // calque part dans les exports PNG et PDF (buildExportCanvas le compose) et
+      // reste couvert par l'annulation.
+      let annotMethode = "";
+
+      const axeDuTitre = async (taille) => {
+        // VOIE 1 — boîtes englobantes réelles par TSV, la plus précise.
+        const boite = await trouverLigneContenant("CADASTRAL");
+        if(boite){
+          // LES DEUX BORDS DE LA ZONE DU TITRE.
+          // Il n'y a PAS de cadre autour du titre : l'en-tête est fait d'un
+          // rectangle extérieur et de deux boîtes, à gauche et à droite, le titre
+          // occupant l'espace vide entre elles. La zone est donc bornée par le
+          // bord DROIT de la boîte de gauche et le bord GAUCHE de la boîte de
+          // droite.
+          // HAUTEUR D'ANALYSE = la ligne du titre SEULE. Un premier essai balayait
+          // deux interlignes de plus de chaque côté : la hauteur dépassait alors le
+          // haut de la boîte de droite, la continuité tombait sous le seuil, et le
+          // balayage filait jusqu'au cadre extérieur — 1 142 px de largeur trouvée
+          // au lieu de 240. Sur la seule hauteur du titre, un bord de boîte est
+          // continu, et l'on part de part et d'autre du texte donc on ne croise
+          // aucune lettre.
+          const portee = Math.round(S.W * 0.35);
+          const bordG = filetVertical(boite.x0, -1, boite.y0, boite.y1, portee);
+          const bordD = filetVertical(boite.x1, +1, boite.y0, boite.y1, portee);
+          // PLAUSIBILITÉ : la zone du titre ne peut pas occuper les deux tiers de
+          // la page. Au-delà, c'est le cadre extérieur qui a été trouvé.
+          const plausible = bordG !== null && bordD !== null
+            && bordD - bordG > taille * 6 && bordD - bordG < S.W * 0.55;
+          if(plausible){
+            annotMethode = "centré entre les bords de la zone du titre (x=" + bordG
+              + " et x=" + bordD + ", largeur disponible " + (bordD - bordG) + " px, TSV "
+              + boite.mots + " mots contigus"
+              + (boite.ecartes ? ", " + boite.ecartes + " mot(s) d'une autre colonne écarté(s)" : "")
+              + ")";
+            return { cx: (bordG + bordD) / 2, y: boite.y1 + taille * 1.6,
+                     bordG, bordD };
+          }
+          annotMethode = "titre localisé au pixel (TSV, " + boite.mots + " mots, étendue "
+            + Math.round(boite.x0) + "–" + Math.round(boite.x1) + " px)"
+            + (bordG === null && bordD === null ? ", aucun bord trouvé"
+               : bordG === null ? ", bord gauche non trouvé"
+               : bordD === null ? ", bord droit non trouvé"
+               : ", bords trouvés à " + bordG + " et " + bordD + " mais écart de "
+                 + (bordD - bordG) + " px jugé invraisemblable");
+          return { cx: (boite.x0 + boite.x1) / 2, y: boite.y1 + taille * 1.6 };
+        }
+        // VOIE 2 — les mots déjà lus pour les coordonnées, ligne la plus fournie.
+        const vocab = /^(DIRECTION|GENERALE|GÉNÉRALE|DES|FINANCES|PUBLIQUES|EXTRAIT|DU|PLAN|CADASTRAL)$/i;
+        const cands = ((S.ocrCache && S.ocrCache.words) || [])
+          .filter((w) => vocab.test(String(w.text).replace(/[^A-Za-zÀ-ÿ]/g, "")));
+        if(cands.length >= 2){
+          const paquets = [];
+          cands.forEach((w) => {
+            const q = paquets.find((g) => Math.abs(g[0].cy - w.cy) < taille);
+            if(q) q.push(w); else paquets.push([w]);
+          });
+          paquets.sort((a, b) => b.length - a.length);
+          const xs = paquets[0].map((w) => w.cx);
+          annotMethode = "titre estimé sur " + paquets[0].length + " mot(s) lus";
+          return { cx: (Math.min(...xs) + Math.max(...xs)) / 2,
+                   y: Math.max(...cands.map((w) => w.cy)) + taille * 2.2 };
+        }
+        // VOIE 3 — proportion, ajustable par l'appelant avec axe=0.42.
+        const paysage = /paysage/.test(fmt);
+        const impose = parseFloat(p.get("axe") || "");
+        const frac = Number.isFinite(impose) ? impose : (paysage ? 0.20 : 0.435);
+        annotMethode = "titre non localisé, axe proportionnel " + frac.toFixed(3);
+        return { cx: S.W * frac, y: paysage ? S.H * 0.16 : S.H * 0.115 };
+      };
+
+      const dessinerTableau = async (rangs, total) => {
+        if(!rangs.length) return 0;
+        const taille = Math.max(13, Math.round(S.W / 95));
+        const repere = await axeDuTitre(taille);
+        const { cx, y, bordG, bordD } = repere;
+        // HAUTEUR : alignée sur le filet supérieur du cartouche « Section /
+        // Feuille », à la demande de JFD. C'est un repère franc, mesurable au
+        // pixel, alors que le bas du titre dépend de la police. On repère le
+        // texte « Section » par TSV, puis le trait qui le surmonte.
+        let yHaut = y;
+        const boiteSection = await trouverLigneContenant("Section");
+        if(boiteSection){
+          // Seuil de continuité assoupli et balayage restreint à l'aplomb du texte
+          // « Section » : un filet de boîte y est continu, et l'on évite de compter
+          // sur une largeur qui dépasserait la boîte elle-même.
+          const filet = filetAuDessus(boiteSection.x0, boiteSection.x0 + taille * 8,
+                                      boiteSection.y0, taille * 3);
+          yHaut = filet !== null ? filet + 1 : boiteSection.y0 - Math.round(taille * 0.5);
+          annotMethode += filet !== null
+            ? ", haut aligné sur le filet du cartouche (y=" + filet + ")"
+            : ", haut aligné sur le texte « Section » (filet non trouvé)";
+        }
+        const entetes = ["Section", "Numéro", "Contenance cadastrale"];
+        const corps = rangs.map((r) => [r[0] || "", r[1] || "", r[2] || ""]);
+        const toutes = [entetes, ...corps].concat(total ? [["", "Total", total]] : []);
+
+        oCtx.save();
+        oCtx.globalAlpha = 1;
+
+        // LE TABLEAU DOIT TENIR DANS LA COLONNE **ET** EN HAUTEUR.
+        // En largeur : sans quoi il déborde sur le cartouche voisin.
+        // En hauteur : une unité foncière de vingt parcelles produit vingt-deux
+        // lignes, qui traversaient le cadre et se posaient sur la carte.
+        // On réduit d'abord la police ; si cela ne suffit pas, on RÉPARTIT EN
+        // PLUSIEURS COLONNES côte à côte, chacune reprenant l'en-tête. On ne rogne
+        // JAMAIS de lignes : sur une pièce de dossier, aucune parcelle ne peut être
+        // omise.
+        const dispoL = (bordG !== undefined && bordD !== undefined)
+          ? (bordD - bordG) - Math.round(taille * 1.2) : null;
+        // Limite basse : le filet qui ferme l'en-tête, ou le bord du cadre de la
+        // carte. Repli prudent à 30 % de la hauteur de page si aucun n'est trouvé.
+        const filetBas = filetHorizontalSous(yHaut + taille * 2, Math.round(S.H * 0.55),
+                                             bordG, bordD);
+        const dispoH = (filetBas !== null ? filetBas : Math.round(S.H * 0.30))
+          - Math.round(yHaut) - Math.round(taille * 0.8);
+
+        // « entetes » et « corps » sont déjà déclarés plus haut : on réutilise.
+        const lignesCorps = toutes.slice(1);
+        let police = taille, larg = null, largeurBloc = 0, pad = 0, hauteurLigne = 0;
+        let nCol = 1, parCol = lignesCorps.length;
+        for(let essai = 0; essai < 14; essai++){
+          oCtx.font = "600 " + police + "px \"Segoe UI\",sans-serif";
+          pad = Math.round(police * 0.7);
+          larg = [0, 1, 2].map((c) =>
+            Math.max(...toutes.map((l) => oCtx.measureText(String(l[c])).width)) + pad * 2);
+          largeurBloc = larg.reduce((a, b) => a + b, 0);
+          hauteurLigne = Math.round(police * 1.55);
+          const maxLignes = Math.max(2, Math.floor(dispoH / hauteurLigne));
+          // Chaque colonne reprend l'en-tête, d'où le « − 1 ».
+          parCol = Math.max(1, maxLignes - 1);
+          nCol = Math.ceil(lignesCorps.length / parCol);
+          const largeurTotale = nCol * largeurBloc + (nCol - 1) * pad;
+          const tientL = dispoL === null || largeurTotale <= dispoL;
+          const tientH = (Math.min(parCol, lignesCorps.length) + 1) * hauteurLigne <= dispoH;
+          if((tientL && tientH) || police <= 8) break;
+          police -= 1;
+        }
+        const largeurTotale = nCol * largeurBloc + (nCol - 1) * pad;
+        if(police !== taille) annotMethode += ", police réduite de " + taille + " à " + police + " px";
+        if(nCol > 1) annotMethode += ", réparti en " + nCol + " colonnes";
+
+        let x0 = Math.round(cx - largeurTotale / 2);
+        const gMin = (bordG !== undefined) ? bordG + 3 : 4;
+        const gMax = (bordD !== undefined) ? bordD - largeurTotale - 3 : S.W - largeurTotale - 4;
+        x0 = Math.max(Math.min(gMin, gMax), Math.min(x0, Math.max(gMin, gMax)));
+        const y0 = Math.round(yHaut);
+
+        // Découpage du corps en colonnes, le total refermant la dernière.
+        const blocs = [];
+        for(let i = 0; i < lignesCorps.length; i += parCol) blocs.push(lignesCorps.slice(i, i + parCol));
+        if(!blocs.length) blocs.push([]);
+
+        const hauteurMax = Math.max(...blocs.map((b) => (b.length + 1) * hauteurLigne));
+        oCtx.fillStyle = "rgba(255,255,255,0.85)";
+        oCtx.fillRect(x0, y0, largeurTotale, hauteurMax);
+
+        oCtx.textBaseline = "middle";
+        oCtx.strokeStyle = "#0F2238";
+        oCtx.lineWidth = Math.max(1, Math.round(police / 14));
+        blocs.forEach((bloc, ib) => {
+          const bx = x0 + ib * (largeurBloc + pad);
+          const contenu = [entetes, ...bloc];
+          contenu.forEach((ligne, i) => {
+            const yl = y0 + hauteurLigne * i;
+            const entete = i === 0;
+            const totalLigne = total && ligne[1] === "Total";
+            oCtx.fillStyle = "#0F2238";
+            oCtx.font = (entete || totalLigne ? "700 " : "500 ") + police + "px \"Segoe UI\",sans-serif";
+            let x = bx;
+            ligne.forEach((cel, c) => {
+              oCtx.textAlign = c === 2 ? "right" : "center";
+              const tx = c === 2 ? x + larg[c] - pad : x + larg[c] / 2;
+              oCtx.fillText(String(cel), tx, yl + hauteurLigne / 2);
+              x += larg[c];
+            });
+            if(entete || totalLigne){
+              const yFilet = entete ? yl + hauteurLigne : yl;
+              oCtx.beginPath();
+              oCtx.moveTo(bx, yFilet); oCtx.lineTo(bx + largeurBloc, yFilet);
+              oCtx.stroke();
+            }
+          });
+        });
+        oCtx.restore();
+        // Teintes propres au tableau : elles ne doivent pas peupler la légende.
+        S.couleursAnnot = ["#0F2238"];
+        pushUndo();
+        annotMethode += (filetBas !== null
+          ? ", limite basse au filet y=" + filetBas
+          : ", limite basse estimée faute de filet")
+          + ", tableau de " + toutes.length + " ligne(s) en " + nCol
+          + " colonne(s), largeur " + Math.round(largeurTotale) + " px, hauteur disponible "
+          + Math.round(dispoH) + " px, axe à x=" + Math.round(x0 + largeurTotale / 2);
+        return toutes.length;
+      };
+
+      // Contrat : tab=SECTION,NUMERO,CONTENANCE;SECTION,NUMERO,CONTENANCE…
+      // et total=… . Le total n'est porté que s'il est transmis, donc absent pour
+      // une parcelle seule où il ferait doublon.
+      const rangsAnnot = (p.get("tab") || "").split(";")
+        .map((r) => r.split(",").map((c) => c.trim()))
+        .filter((r) => r.length >= 2 && (r[0] || r[1]));
+      const totalAnnot = (p.get("total") || "").trim();
+
+      // ---- VUE AÉRIENNE : chemin court, et l'on sort ----------------------
+      // On NE TRAVERSE PAS le géoréférencement par étiquettes : il n'y a pas
+      // d'étiquette sur une orthophotographie, et son portillon d'échelle
+      // aberrante — calibré sur les échelles du service cadastral — n'a aucun
+      // sens pour une emprise que nous avons nous-mêmes écrite.
+      if(modeOrtho){
+        // On NE passe PAS par dessinerTableau : il repère le titre par Tesseract,
+        // or une orthophotographie n'a pas de titre. Tableau dessiné
+        // géométriquement, avec son propre fond.
+        await contourOrtho(p, rangsAnnot, totalAnnot);
+        return;
+      }
+
+      // attendus : { X, Y } transmis par l'appelant, sert à classer les groupes
+      // d'étiquettes par ordre de grandeur quand la corrélation ne suffit pas.
+      const georeferencer = async (attendus) => {
+        const cle = "geo|" + S.page + "|" + S.rotation;
+        if(!S.ocrCache || S.ocrCache.key !== cle) S.ocrCache = { key: cle, base: null, words: [], done: new Set() };
+        if(!S.ocrCache.base) S.ocrCache.base = await renderOcrBase();
+        for(const deg of [0, 90, -90]){
+          if(S.ocrCache.done.has(deg)) continue;
+          spinmsg.textContent = "Lecture des coordonnées" + (deg ? " (étiquettes à " + deg + "°)" : "") + "…";
+          S.ocrCache.words.push(...await ocrAngle(S.ocrCache.base, deg));
+          S.ocrCache.done.add(deg);
+        }
+        let etiquettes = S.ocrCache.words
+          .map((w) => ({ v: parseInt(String(w.text).replace(/[^0-9]/g, ""), 10),
+                         cx: w.cx, cy: w.cy, brut: w.text }))
+          .filter((e) => Number.isFinite(e.v) && e.v >= 100000 && e.v <= 99999999);
+        // Compte AVANT tout filtrage. Sans lui, un diagnostic affichant sept
+        // étiquettes légitimes est indistinguable selon que le filtre de
+        // vraisemblance a écarté deux parasites ou qu'il n'y en avait aucun —
+        // ce qui a fait conclure à tort, le 29/07/2026, que le défaut ne s'était
+        // pas reproduit.
+        const luesBrutes = etiquettes.length;
+        // Regroupement par ordre de grandeur : élimine les parasites isolés — le
+        // « 1/1000 » du cartouche lu 171000, la date d'édition lue 28072026.
+        const paquets = new Map();
+        etiquettes.forEach((e) => {
+          const k = Math.floor(e.v / 100000);
+          if(!paquets.has(k)) paquets.set(k, []);
+          paquets.get(k).push(e);
+        });
+        // RÉPARATION DES CHIFFRES DE TÊTE PERDUS PAR L'OCR.
+        // Constaté à Mézilles : « 1711500 » lu « 711500 ». Le contrôle de plage
+        // comparait alors un point à sept chiffres à une étiquette qui n'en avait
+        // plus que six, et refusait à tort. On répare en complétant l'étiquette
+        // avec les chiffres de tête de la coordonnée ATTENDUE, ce qui n'invente
+        // rien : on ne touche qu'au préfixe, et seulement si le résultat tombe à
+        // moins de 2 km de l'attendu. Les différences entre étiquettes, dont on
+        // tire l'échelle, ne sont pas affectées.
+        let parasites = [];
+        if(attendus){
+          const reparer = (v) => {
+            for(const cible of [attendus.X, attendus.Y]){
+              const sc = String(Math.round(cible)), sv = String(v);
+              if(sv.length >= sc.length) continue;
+              const candidat = parseInt(sc.slice(0, sc.length - sv.length) + sv, 10);
+              if(Math.abs(candidat - cible) < 2000) return candidat;
+            }
+            return v;
+          };
+          etiquettes.forEach((e) => { e.v = reparer(e.v); });
+          // ------------------------------------------------------------------
+          // ÉCARTER LES PARASITES PAR VRAISEMBLANCE — correctif du 29/07/2026.
+          // Le regroupement par ordre de grandeur n'élimine que les parasites
+          // ISOLÉS. Constaté à LA MADELEINE : le cartouche porte « Échelle
+          // d'origine : 1/1000 » et « Échelle d'édition : 1/2500 », dont l'OCR
+          // lit la barre de fraction comme un 7 — d'où 171000 et 172500. Ils
+          // sont DEUX, dans le même ordre de grandeur (1), donc le paquet passe
+          // le seuil de deux éléments ; ils sont empilés verticalement dans le
+          // cartouche, donc la corrélation les affecte aux ORDONNÉES ; et deux
+          // points donnant toujours |r| = 1, ils gagnent le départage. L'axe
+          // vertical était ainsi construit sur deux lignes du cartouche, et le
+          // point projeté — exact — rejeté au nom de cette lecture.
+          // CORRECTION : une étiquette de coordonnée est nécessairement PROCHE
+          // de la coordonnée attendue, que REDPAR transmet. Le plan le plus
+          // large du service couvre 1 580 m ; 5 km laissent donc une marge
+          // confortable tout en tuant les parasites, qui en sont à des
+          // millions. Ce filtre ne s'applique QUE si l'attendu est connu : sans
+          // lui — cas d'un PDF glissé — rien n'est écarté.
+          // ------------------------------------------------------------------
+          const PLAGE_VRAISEMBLABLE = 5000;
+          const vraisemblable = (v) => Math.abs(v - attendus.X) <= PLAGE_VRAISEMBLABLE
+                                    || Math.abs(v - attendus.Y) <= PLAGE_VRAISEMBLABLE;
+          parasites = etiquettes.filter((e) => !vraisemblable(e.v));
+          etiquettes = etiquettes.filter((e) => vraisemblable(e.v));
+          paquets.clear();
+          etiquettes.forEach((e) => {
+            const k = Math.floor(e.v / 100000);
+            if(!paquets.has(k)) paquets.set(k, []);
+            paquets.get(k).push(e);
+          });
+        }
+        const groupes = [...paquets.values()].filter((g) => g.length >= 2);
+        const rejetes = etiquettes.filter((e) => (paquets.get(Math.floor(e.v / 100000)) || []).length < 2);
+        const stats = (g, axe) => {
+          const u = g.map((e) => (axe === "x" ? e.cx : e.cy)), v = g.map((e) => e.v);
+          const n = g.length, mu = u.reduce((a, b) => a + b, 0) / n, mv = v.reduce((a, b) => a + b, 0) / n;
+          let num = 0, du = 0, dv = 0;
+          for(let i = 0; i < n; i++){
+            num += (u[i] - mu) * (v[i] - mv); du += (u[i] - mu) ** 2; dv += (v[i] - mv) ** 2;
+          }
+          if(du === 0 || dv === 0) return null;
+          const a = num / du;
+          return { a, b: mv - a * mu, n, r: num / Math.sqrt(du * dv),
+                   min: Math.min(...v), max: Math.max(...v) };
+        };
+        // AFFECTATION DES GROUPES AUX AXES.
+        // Par corrélation quand le groupe porte au moins deux valeurs distinctes.
+        // Sinon — cas fréquent, quand le plan ne traverse qu'une seule ligne de
+        // coordonnée sur un axe — par proximité aux valeurs attendues, que
+        // l'appelant transmet avec le point projeté.
+        let fx = null, fy = null, ancreX = null, ancreY = null;
+        groupes.forEach((g) => {
+          const distinctes = new Set(g.map((e) => e.v)).size;
+          if(distinctes >= 2){
+            const sx = stats(g, "x"), sy = stats(g, "y");
+            if(sx && sy && Math.abs(sx.r) >= Math.abs(sy.r)){
+              if(!fx || Math.abs(sx.r) > Math.abs(fx.r)) fx = sx;
+            }else if(sy){
+              if(!fy || Math.abs(sy.r) > Math.abs(fy.r)) fy = sy;
+            }
+          }else if(attendus){
+            // Une seule valeur : elle ne donne pas de pente, mais elle CALE un axe.
+            const v = g[0].v;
+            const dX = Math.abs(v - attendus.X), dY = Math.abs(v - attendus.Y);
+            const pos = dX <= dY
+              ? { v, u: g.reduce((t, e) => t + e.cx, 0) / g.length, axe: "x" }
+              : { v, u: g.reduce((t, e) => t + e.cy, 0) / g.length, axe: "y" };
+            if(pos.axe === "x" && !ancreX) ancreX = pos;
+            if(pos.axe === "y" && !ancreY) ancreY = pos;
+          }
+        });
+
+        // L'ÉCHELLE EST ISOTROPE : la projection est conforme et le plan imprimé à
+        // échelle uniforme. Mesuré sur Saint-Omer : 0,123457 m/px sur les deux
+        // axes. Une seule étiquette suffit donc à caler un axe dès que l'autre
+        // fournit l'échelle. Les sens sont connus : les abscisses croissent avec
+        // les pixels vers la droite, les ordonnées décroissent vers le bas.
+        const echelle = (fx && Math.abs(fx.a)) || (fy && Math.abs(fy.a)) || null;
+        if(!fx && ancreX && echelle){
+          fx = { a: echelle, b: ancreX.v - echelle * ancreX.u, n: 1, r: 1,
+                 min: ancreX.v, max: ancreX.v, cale: true };
+        }
+        if(!fy && ancreY && echelle){
+          fy = { a: -echelle, b: ancreY.v + echelle * ancreY.u, n: 1, r: -1,
+                 min: ancreY.v, max: ancreY.v, cale: true };
+        }
+        return { etiquettes, parasites, luesBrutes, groupes, rejetes, fx, fy, echelle };
+      };
+
+      if(p.get("diaggeo") === "1"){
+        try{
+          spin.classList.add("show"); spinmsg.textContent = "Lecture des coordonnées en marge…";
+          const mp = (p.get("pt") || "").match(/^(-?[0-9.]+),(-?[0-9.]+)$/);
+          const g = await georeferencer(mp ? { X: parseFloat(mp[1]), Y: parseFloat(mp[2]) } : null);
+          spin.classList.remove("show");
+
+          const theo = largeursFeuille[fmt] * ech / W;   // mètres par pixel attendus
+          const l = [];
+          l.push("Échelle théorique : " + (1 / theo).toFixed(2) + " px/m ("
+            + theo.toFixed(4) + " m/px), rendu de " + W + "×" + H + " px, " + fmt
+            + " à 1/" + ech + ".");
+          // DEUX FAMILLES DE PARASITES, À NE PAS CONFONDRE — 29/07/2026.
+          //  · par VRAISEMBLANCE : valeur trop éloignée de la coordonnée
+          //    attendue. C'est le filtre du 29/07, celui qui tue les mentions
+          //    d'échelle du cartouche lues comme des coordonnées.
+          //  · ISOLÉ : seul de son ordre de grandeur, donc sans pente possible.
+          // Les valeurs sont LISTÉES et POSITIONNÉES : un compte seul ne permet
+          // pas de savoir, après coup, ce que le filtre a effectivement écarté.
+          l.push((g.luesBrutes != null ? g.luesBrutes + " étiquette(s) numérique(s) lue(s), "
+                    + g.etiquettes.length + " retenue(s), "
+                  : g.etiquettes.length + " étiquette(s) numérique(s) lue(s), ")
+            + g.groupes.length + " groupe(s) cohérent(s).");
+          l.push("Parasites écartés par vraisemblance : "
+            + (g.parasites && g.parasites.length
+                ? g.parasites.length + " — " + g.parasites
+                    .map((e) => e.v + "@(" + Math.round(e.cx) + "," + Math.round(e.cy) + ")").join(" · ")
+                : "aucun")
+            + ". Parasites isolés : "
+            + (g.rejetes.length
+                ? g.rejetes.length + " — " + g.rejetes
+                    .map((e) => e.v + "@(" + Math.round(e.cx) + "," + Math.round(e.cy) + ")").join(" · ")
+                : "aucun") + ".");
+          const rendu = (f, nom) => f
+            ? nom + " : " + Math.abs(f.a).toFixed(6) + " m/px sur " + f.n + " point(s)"
+              + (f.cale ? ", axe CALÉ sur une étiquette unique (échelle reprise de l'autre axe)"
+                        : " (corrélation " + f.r.toFixed(4) + ")")
+              + ", écart à la théorie " + (100 * Math.abs(Math.abs(f.a) - theo) / theo).toFixed(2) + " %."
+            : nom + " : aucun groupe exploitable.";
+          l.push(rendu(g.fx, "Abscisses"));
+          l.push(rendu(g.fy, "Ordonnées"));
+          if(g.fx && g.fy && mp){
+            const px = Math.round((parseFloat(mp[1]) - g.fx.b) / g.fx.a);
+            const py = Math.round((parseFloat(mp[2]) - g.fy.b) / g.fy.a);
+            l.push("Point projeté → pixel (" + px + ", " + py + ").");
+          }
+          l.push("Valeurs lues : " + g.etiquettes.slice(0, 12)
+            .map((e) => e.v + "@(" + Math.round(e.cx) + "," + Math.round(e.cy) + ")").join(" · "));
+          console.log("PAINT diag géo :", { theo, ...g });
+          setStatus(l.join(" | "), g.fx && g.fy ? "ok" : "warn");
+          S.tool = "fill";
+          return;
+        }catch(e){
+          spin.classList.remove("show");
+          console.error("PAINT diag géo :", e);
+          setStatus("Diagnostic de géoréférencement interrompu : " + ((e && e.message) || e), "err");
+          return;
+        }
+      }
+
+      // ================== VOIE DÉTERMINISTE : LE POINT PROJETÉ ==============
+      // Si REDPAR transmet pt=X,Y — un point intérieur à la parcelle, exprimé
+      // dans la projection conique conforme du plan — on n'a plus rien à
+      // deviner : on lit le géoréférencement en marge, on convertit ce point en
+      // pixels, et l'on amorce le remplissage exactement là.
+      // C'est le troisième signal, et le plus fort : il ne dépend ni de la taille
+      // attendue ni de la lecture d'un numéro de parcelle.
+      const mPt = (p.get("pt") || "").match(/^(-?[0-9.]+),(-?[0-9.]+)$/);
+      // Raison du repli, TOUJOURS rapportée à l'écran. Retomber en silence sur la
+      // détection par taille a coûté un essai : on ne savait pas si la voie
+      // déterministe avait échoué ou n'avait pas été tentée.
+      let replPourquoi = mPt ? "" : "aucun point projeté transmis (pt absent de l'URL) — "
+        + "réexportez l'Excel après le chargement des contours, ou vérifiez que le "
+        + "dernier App.jsx de REDPAR est déployé";
+      if(mPt){
+        try{
+          spin.classList.add("show"); spinmsg.textContent = "Lecture des coordonnées en marge…";
+          const X = parseFloat(mPt[1]), Y = parseFloat(mPt[2]);
+          const g = await georeferencer({ X, Y });
+          spin.classList.remove("show");
+          // CONTRÔLE DE L'ÉCHELLE RÉELLEMENT DÉLIVRÉE.
+          // Constaté le 28/07/2026 : une demande à 1/10000 est SILENCIEUSEMENT
+          // servie à 1/1000 par le service du cadastre — cartouche à 1/1000, plan
+          // couvrant dix fois moins de terrain que demandé, aucun message. Le
+          // géoréférencement mesure l'échelle réelle : on la confronte donc à
+          // celle qui a été demandée, et l'on refuse en cas de désaccord.
+          // Sans ce contrôle, un plan servi à la mauvaise échelle serait colorié
+          // et remis tel quel, avec une emprise fausse.
+          // Le service ne propose que ces dix échelles : une mesure qui n'en
+          // approche aucune n'est pas une substitution, c'est une MESURE FAUSSE.
+          // Sans cette distinction, un géoréférencement mal lu faisait accuser le
+          // service d'avoir servi du 1/315000 — échelle qui n'existe pas — et
+          // refusait un plan probablement correct.
+          const ECHELLES_SERVICE = [200, 500, 650, 1000, 1250, 1500, 2000, 2500, 4000, 5000];
+          let mesureAberrante = false;
+          const theoMPx = largeursFeuille[fmt] * ech / W;
+          const reelMPx = g.echelle;
+          if(reelMPx && Math.abs(reelMPx - theoMPx) / theoMPx > 0.05){
+            const echReelle = reelMPx * W / largeursFeuille[fmt];
+            const proche = ECHELLES_SERVICE.find((e) => Math.abs(echReelle - e) / e < 0.10);
+            if(proche){
+              // Substitution PLAUSIBLE : on refuse, le plan ne couvre pas l'emprise.
+              S.tool = "fill";
+              setStatus("Colorisation refusée : l'échelle délivrée n'est pas celle demandée. "
+                + "Mesurée sur les coordonnées du plan : 1/" + proche + ", alors que 1/" + ech
+                + " a été demandé. Le service du cadastre a substitué une échelle sans le "
+                + "signaler ; ce plan ne couvre pas l'emprise attendue. Régénérez à une "
+                + "échelle acceptée, ou coloriez à la main en connaissance de cause.", "err");
+              return;
+            }
+            // Mesure ABERRANTE : aucune échelle du service n'en approche. On
+            // n'accuse pas le service, on écarte le géoréférencement et l'on
+            // retombe sur la détection par taille attendue.
+            replPourquoi = "géoréférencement écarté, échelle mesurée aberrante ("
+              + "1/" + Math.round(echReelle) + " alors que le service ne propose que "
+              + "de 1/200 à 1/5000) — la lecture des coordonnées en marge a échoué";
+            console.warn("PAINT : échelle mesurée aberrante", { echReelle, ech, g });
+            mesureAberrante = true;
+          }
+          if(!mesureAberrante && g.fx && g.fy
+             && (g.fx.cale || Math.abs(g.fx.r) > 0.99)
+             && (g.fy.cale || Math.abs(g.fy.r) > 0.99)){
+            const px = Math.round((X - g.fx.b) / g.fx.a);
+            const py = Math.round((Y - g.fy.b) / g.fy.a);
+            // Contrôles de vraisemblance : le point doit tomber dans le rendu, et
+            // ses coordonnées dans la plage des étiquettes lues. Un mauvais choix
+            // de zone de projection, ou l'outre-mer, échouent ici — et l'on
+            // retombe alors sur la détection par taille.
+            // Marge élargie quand un axe est calé sur une étiquette unique : la
+            // plage lue se réduit alors à un point, et 500 m ne suffiraient pas.
+            const margeX = g.fx.cale ? 400 : 500, margeY = g.fy.cale ? 400 : 500;
+            const dansPlage = X >= g.fx.min - margeX && X <= g.fx.max + margeX
+                           && Y >= g.fy.min - margeY && Y <= g.fy.max + margeY;
+            const dansRendu = px >= 0 && py >= 0 && px < W && py < H;
+            // ---- ZONES CONIQUES CONFRONTÉES — 27/08/2026 -----------------
+            // ⚠⚠ NE PAS SUPPRIMER en croyant la table par département de
+            // REDPAR suffisante : la DGFiP choisit la zone FEUILLE PAR FEUILLE,
+            // donc une table par département sera fausse quelque part, et ce
+            // jour-là c'est ce contrôle qui le dira. Le Y du contour reçu et
+            // celui des étiquettes lues en marge nomment chacun leur zone.
+            // Défaut vécu à TOULOUSE le 27/08/2026 : contour en CC44, plan servi
+            // en CC43, 888 931 m d'écart en Y — polygones hors cadre, overlay
+            // vide, plan correct mais non recentré, et pas un mot de lisible.
+            const zonePoly = zoneDeY(Y);
+            const zonePlan = zoneDeY((g.fy.min + g.fy.max) / 2);
+            if(zonePoly !== zonePlan){
+              replPourquoi = "ZONE CONIQUE CONFORME DISCORDANTE — le contour reçu est "
+                + "projeté en CC" + zonePoly + " (Y " + Math.round(Y) + ") tandis que le "
+                + "plan servi est géoréférencé en CC" + zonePlan + " (étiquettes "
+                + Math.round(g.fy.min) + " à " + Math.round(g.fy.max) + "), soit environ "
+                + Math.round(Math.abs(Y - (g.fy.min + g.fy.max) / 2) / 1000) + " km d'écart. "
+                + "La table ZONE_CC_PAR_DEPARTEMENT de REDPAR est donc fausse pour CETTE "
+                + "FEUILLE — la DGFiP tranche feuille par feuille. Corriger la ligne du "
+                + "département concerné, puis regénérer";
+              console.warn("PAINT : zones coniques discordantes",
+                { zonePoly, zonePlan, Y, fy: g.fy });
+            }
+            // L'OCR AVERTIT, IL NE TRANCHE PAS — correctif du 29/07/2026.
+            // La plage des étiquettes servait à INVALIDER le point projeté. Or
+            // ce point vient d'une projection validée à 4 cm contre la source,
+            // tandis que la plage vient d'une lecture d'image. La hiérarchie de
+            // confiance était inversée : une lecture fausse faisait échouer un
+            // calcul exact. Le hors-plage n'est donc plus qu'un AVERTISSEMENT.
+            // Ce que l'on ne perd pas : une erreur de zone de projection ne
+            // produit plus aucune étiquette vraisemblable, faute de quoi elles
+            // sont toutes écartées par le filtre ci-dessus — fx et fy restent
+            // alors nuls et l'on retombe sur la détection par taille, avec un
+            // motif explicite. La détection survit, ailleurs.
+            // Le HORS RENDU, lui, reste bloquant : un pixel hors de l'image
+            // n'est pas peignable, ce n'est pas une affaire de confiance.
+            let avertissement = "";
+            if(!dansPlage) avertissement = " ⚠ Le point projeté tombe hors de la plage des "
+              + "étiquettes lues [" + g.fx.min + "–" + g.fx.max + "] × [" + g.fy.min + "–"
+              + g.fy.max + "]" + (g.parasites && g.parasites.length
+                ? ", " + g.parasites.length + " étiquette(s) écartée(s) comme parasite(s)" : "")
+              + " : à vérifier à l'œil avant de verser la pièce au dossier.";
+            if(!dansRendu) replPourquoi = "le point projeté tombe hors du rendu ("
+              + px + ", " + py + ") pour un rendu de " + W + "×" + H;
+            // ---- POLYGONE PROJETÉ : on PEINT au lieu de REMPLIR ----------
+            // En rural, les limites sont tracées en traits d'axe interrompus —
+            // tirets et points — qu'un remplissage traverse : observé à Pusey,
+            // 42 % du plan atteint. Or on connaît le contour ET le
+            // géoréférencement : peindre le polygone rend la continuité des
+            // traits sans objet. C'est exact par construction.
+            // PLUSIEURS POLYGONES, séparés par une barre verticale : c'est ainsi
+            // qu'une UNITÉ FONCIÈRE est transmise — toutes ses parcelles coloriées
+            // sur un même plan, l'extrait ayant été recentré sur l'unité par les
+            // paramètres x et y côté REDPAR.
+            const brutPoly = (p.get("poly") || "").trim();
+            // zonePoly === zonePlan : peindre sous deux zones différentes
+            // poserait la couleur à côté de la parcelle, ce qui est pire qu'une
+            // absence de couleur sur une pièce destinée à un acte.
+            if(dansRendu && brutPoly && zonePoly === zonePlan){
+              const enPixels = (bloc) => bloc.split(";").map((c) => {
+                const [a, b] = c.split(",").map(parseFloat);
+                return [Math.round((a - g.fx.b) / g.fx.a), Math.round((b - g.fy.b) / g.fy.a)];
+              }).filter((q) => Number.isFinite(q[0]) && Number.isFinite(q[1]));
+              const polygones = brutPoly.split("|").map(enPixels).filter((a) => a.length >= 3);
+              const sommets = polygones.flat();
+              if(polygones.length){
+                oCtx.save();
+                oCtx.globalAlpha = S.opacity;
+                oCtx.fillStyle = S.color;
+                // Un seul tracé pour tous les polygones : les recouvrements
+                // éventuels ne se cumulent donc pas en surbrillance, ce qui
+                // arriverait avec un remplissage par polygone.
+                oCtx.beginPath();
+                polygones.forEach((pts) => {
+                  oCtx.moveTo(pts[0][0], pts[0][1]);
+                  for(let i = 1; i < pts.length; i++) oCtx.lineTo(pts[i][0], pts[i][1]);
+                  oCtx.closePath();
+                });
+                oCtx.fill();
+                oCtx.restore();
+                pushUndo();
+                if(!S.legendLabels[S.color]) S.legendLabels[S.color] = "";
+                rebuildLegend();
+                const nbAnnot = await dessinerTableau(rangsAnnot, totalAnnot);
+                const xs = sommets.map((q) => q[0]), ys = sommets.map((q) => q[1]);
+                setStatus((polygones.length > 1
+                    ? "UNITÉ FONCIÈRE de " + polygones.length + " parcelles coloriée"
+                    : "Parcelle coloriée")
+                  + " par POLYGONE PROJETÉ — contour cadastral projeté puis peint, sans "
+                  + "remplissage : insensible aux traits de limite interrompus. "
+                  + sommets.length + " sommets, emprise "
+                  + (Math.max(...xs) - Math.min(...xs)) + "×" + (Math.max(...ys) - Math.min(...ys))
+                  + " px. Géoréférencement " + Math.abs(g.fx.a).toFixed(6) + " m/px, "
+                  + "corrélations " + g.fx.r.toFixed(4) + " et " + g.fy.r.toFixed(4) + "."
+                  + (nbAnnot ? " " + nbAnnot + " ligne(s) de tableau : " + annotMethode + "." : ""), "ok");
+                return;
+              }
+            }
+            if(dansPlage && dansRendu){
+              const donnees0 = baseCtx.getImageData(0, 0, W, H).data;
+              const clair0 = (i) => (0.299 * donnees0[i * 4] + 0.587 * donnees0[i * 4 + 1]
+                + 0.114 * donnees0[i * 4 + 2]) >= thr;
+              // Le point peut tomber sur un trait de limite : on cherche le pixel
+              // clair le plus proche, dans un rayon de 12 px.
+              let ax = px, ay = py;
+              if(!clair0(py * W + px)){
+                let mieux = null;
+                for(let r = 1; r <= 12 && !mieux; r++){
+                  for(let a = 0; a < 8 * r; a++){
+                    const t = 2 * Math.PI * a / (8 * r);
+                    const x = Math.round(px + r * Math.cos(t)), y = Math.round(py + r * Math.sin(t));
+                    if(x >= 0 && y >= 0 && x < W && y < H && clair0(y * W + x)){ mieux = [x, y]; break; }
+                  }
+                }
+                if(mieux){ ax = mieux[0]; ay = mieux[1]; }
+              }
+              if(clair0(ay * W + ax)){
+                floodFill(ax, ay);
+                pushUndo();
+                rebuildLegend();
+                const peints0 = (() => {
+                  const im = oCtx.getImageData(0, 0, W, H).data;
+                  let n = 0;
+                  for(let i = 3; i < im.length; i += 4) if(im[i] > 0) n++;
+                  return n;
+                })();
+                const part0 = peints0 / (W * H);
+                const info = "Géoréférencement lu sur le plan : " + Math.abs(g.fx.a).toFixed(6)
+                  + " m/px en X" + (g.fx.cale ? " (axe calé sur une étiquette unique, échelle "
+                    + "reprise de l'autre axe)" : "")
+                  + " et " + Math.abs(g.fy.a).toFixed(6) + " en Y"
+                  + (g.fy.cale ? " (axe calé sur une étiquette unique)" : "")
+                  + ", corrélations " + g.fx.r.toFixed(4) + " et " + g.fy.r.toFixed(4)
+                  + ". Point projeté (" + Math.round(X) + ", " + Math.round(Y)
+                  + ") → pixel (" + ax + ", " + ay + ")." + avertissement;
+                if(part0 > 0.30){
+                  oCtx.clearRect(0, 0, W, H); S.legendLabels = {}; rebuildLegend();
+                  S.tool = "fill";
+                  setStatus("Colorisation écartée : la zone atteinte couvrait "
+                    + Math.round(part0 * 100) + " % du plan alors que le point projeté était "
+                    + "correct — le trait de limite de la parcelle est probablement interrompu. "
+                    + info + " Colorisez à la main avec l'outil « Remplir ».", "warn");
+                }else{
+                  const nb2 = await dessinerTableau(rangsAnnot, totalAnnot);
+                  setStatus("Parcelle coloriée par POSITION PROJETÉE, sans estimation ni "
+                    + "reconnaissance de numéro. " + info
+                    + (nb2 ? " " + nb2 + " ligne(s) d'annotation : " + annotMethode + "." : ""), "ok");
+                }
+                return;
+              }
+            }
+            console.warn("PAINT : point projeté hors plage ou hors rendu", { X, Y, px, py, dansPlage, dansRendu });
+          }else{
+            replPourquoi = "géoréférencement non concluant : "
+              + (g.groupes.length < 2
+                ? g.groupes.length + " groupe(s) d'étiquettes cohérent(s) au lieu de 2 attendus"
+                : "corrélations " + (g.fx ? g.fx.r.toFixed(3) : "—") + " et "
+                  + (g.fy ? g.fy.r.toFixed(3) : "—") + ", seuil 0,99")
+              + " sur " + g.etiquettes.length + " étiquette(s) lue(s)";
+            console.warn("PAINT : géoréférencement non concluant", g);
+          }
+        }catch(e){
+          spin.classList.remove("show");
+          replPourquoi = "voie déterministe interrompue : " + ((e && e.message) || e);
+          console.warn("PAINT : voie déterministe indisponible", e);
+        }
+      }
+
+      // ---- Recensement de toutes les régions claires, en une seule passe ----
+      const donnees = baseCtx.getImageData(0, 0, W, H).data;
+      const clair = (i) => (0.299 * donnees[i * 4] + 0.587 * donnees[i * 4 + 1]
+        + 0.114 * donnees[i * 4 + 2]) >= thr;
+      const etiquette = new Int32Array(NPIX);
+      const regions = [];
+      const AIRE_MINI = Math.max(120, Math.round(0.000005 * NPIX));
+      for(let depart = 0; depart < NPIX; depart++){
+        if(etiquette[depart] !== 0 || !clair(depart)) continue;
+        const id = regions.length + 1;
+        const pile = [depart]; etiquette[depart] = id;
+        let n = 0, x0 = W, x1 = 0, y0 = H, y1 = 0, bord = false;
+        while(pile.length){
+          const i = pile.pop(); n++;
+          const x = i % W, y = (i - x) / W;
+          if(x < x0) x0 = x;
+          if(x > x1) x1 = x;
+          if(y < y0) y0 = y;
+          if(y > y1) y1 = y;
+          if(x === 0 || y === 0 || x === W - 1 || y === H - 1) bord = true;
+          if(x > 0 && etiquette[i - 1] === 0 && clair(i - 1)){ etiquette[i - 1] = id; pile.push(i - 1); }
+          if(x < W - 1 && etiquette[i + 1] === 0 && clair(i + 1)){ etiquette[i + 1] = id; pile.push(i + 1); }
+          if(i >= W && etiquette[i - W] === 0 && clair(i - W)){ etiquette[i - W] = id; pile.push(i - W); }
+          if(i < W * (H - 1) && etiquette[i + W] === 0 && clair(i + W)){ etiquette[i + W] = id; pile.push(i + W); }
+        }
+        if(n >= AIRE_MINI){
+          regions.push({ id, aire: n, bw: x1 - x0 + 1, bh: y1 - y0 + 1,
+                         cx: (x0 + x1) / 2, cy: (y0 + y1) / 2, bord, x0, y0, x1, y1 });
+        }
+      }
+
+      // ---- Sélection : compatibilité de taille, puis proximité du centre ----
+      // La marge de page touche le bord de l'image : écartée d'office.
+      // L'extrait étant centré sur la parcelle demandée, la plus centrale des
+      // régions compatibles est la bonne.
+      // Tolérance resserrée à 30 % : à 45 %, un fragment de voirie de 39×39 px
+      // passait pour une parcelle de 66×47 attendue.
+      const TOLERANCE = 0.30;
+      // Marge d'ex æquo : au-delà, la ressemblance de taille primait déjà.
+      const BANDE = 0.12;
+      const ecart = (g) => Math.abs(g.bw - attendu.bw) / attendu.bw
+                         + Math.abs(g.bh - attendu.bh) / attendu.bh;
+      const compatible = (g) => Math.abs(g.bw - attendu.bw) / attendu.bw <= TOLERANCE
+                             && Math.abs(g.bh - attendu.bh) / attendu.bh <= TOLERANCE
+                             && (airePx === null || g.aire <= AIRE_FACTEUR_MAX * airePx);
+      const dist = (g) => Math.hypot(g.cx - W / 2, g.cy - H / 2);
+      // CLASSEMENT EN DEUX TEMPS, et l'ordre compte.
+      // La ressemblance de taille d'abord : classer par distance au centre laissait
+      // gagner un petit fragment de voirie central contre la vraie parcelle,
+      // pourtant exacte au pixel près mais plus excentrée.
+      // La position ne sert qu'à départager les quasi-ex æquo, ce qui est son rôle
+      // légitime puisque l'extrait est centré sur la parcelle demandée.
+      const utiles = regions.filter((g) => !g.bord);
+      const compatibles = utiles.filter(compatible).sort((a, b) => ecart(a) - ecart(b));
+      const retenues = compatibles.length
+        ? compatibles.filter((g) => ecart(g) <= ecart(compatibles[0]) + BANDE)
+                     .sort((a, b) => dist(a) - dist(b))
+        : [];
+      const proches = [...utiles].sort((a, b) => ecart(a) - ecart(b)).slice(0, 3);
+
+      const dims = (g) => g.bw + "×" + g.bh;
+      const prefixe = replPourquoi
+        ? "Position projetée non utilisée — " + replPourquoi + ". Repli sur la détection "
+          + "par taille. "
+        : "";
+      const resume = prefixe + "Attendu " + Math.round(attendu.bw) + "×" + Math.round(attendu.bh)
+        + " px, soit " + mDim[1] + "×" + mDim[2] + " m à 1/" + ech + " ("
+        + pxParMetre.toFixed(1) + " px/m)"
+        + (airePx ? ", aire au plus " + Math.round(AIRE_FACTEUR_MAX * airePx).toLocaleString("fr-FR")
+            + " px pour " + surfM2 + " m²" : "")
+        + ". " + regions.length + " région(s) recensée(s), "
+        + retenues.length + " compatible(s).";
+      console.log("PAINT auto :", { attendu, regions: regions.length, retenues, proches });
+
+      if(!retenues.length){
+        aLaMain(resume + " Les trois plus proches mesurent "
+          + proches.map(dims).join(" px, ") + " px.");
+        return;
+      }
+
+      // ================== VÉRIFICATION PAR LE NUMÉRO ========================
+      // Deux signaux INDÉPENDANTS doivent s'accorder avant de colorier :
+      //   — la TAILLE ATTENDUE trouve la région (signal géométrique) ;
+      //   — le NUMÉRO imprimé la confirme (signal textuel).
+      // L'OCR revient donc, mais en VÉRIFICATION et non en détection : il n'a
+      // plus à choisir, seulement à valider, ce qui le débarrasse de ses deux
+      // défauts d'origine (ambiguïté des numéros courts, dépendance à findSeed).
+      // Demandé par JFD après trop d'erreurs de colorisation : on préfère refuser
+      // que colorier faux, sur une pièce de dossier.
+      const num = String(parcelle).replace(/^0+/, "") || parcelle;
+      const numEl = document.getElementById("numinput");
+      if(numEl) numEl.value = num;
+
+      let numerosLus = 0, occurrences = [];
+      try{
+        const cle = S.page + "|" + S.rotation;
+        if(!S.ocrCache || S.ocrCache.key !== cle) S.ocrCache = { key: cle, base: null, words: [], done: new Set() };
+        spin.classList.add("show"); spinmsg.textContent = "Vérification du numéro…";
+        if(!S.ocrCache.base) S.ocrCache.base = await renderOcrBase();
+        for(const deg of OCR_ANGLES){
+          if(!S.ocrCache.done.has(deg)){
+            spinmsg.textContent = deg === 0 ? "Vérification du numéro…"
+              : "Numéro non lu à l'endroit, essai à " + deg + "°…";
+            S.ocrCache.words.push(...await ocrAngle(S.ocrCache.base, deg));
+            S.ocrCache.done.add(deg);
+          }
+          if(S.ocrCache.words.some((w) => w.text === num)) break;
+        }
+        numerosLus = S.ocrCache.words.length;
+        occurrences = S.ocrCache.words.filter((w) => w.text === num);
+      }catch(e){
+        console.warn("PAINT : OCR de vérification indisponible", e);
+      }finally{ spin.classList.remove("show"); }
+
+      // Une occurrence tombe-t-elle dans la région ? Marge de 4 px : le chiffre
+      // peut mordre sur le trait de limite.
+      const MARGE = 4;
+      const contientNumero = (g) => occurrences.some((w) =>
+        w.cx >= g.x0 - MARGE && w.cx <= g.x1 + MARGE
+        && w.cy >= g.y0 - MARGE && w.cy <= g.y1 + MARGE);
+
+      const confirmees = retenues.filter(contientNumero);
+      const diag = resume + " Numéros lus : " + numerosLus + ", occurrences de « "
+        + num + " » : " + occurrences.length + ".";
+
+      // ---- Échelle de sécurité ----
+      // On colorie si le numéro confirme. À défaut, seulement si la géométrie est
+      // sans ambiguïté ET que l'OCR n'a rien lu du tout. Dans tous les autres
+      // cas, on refuse : mieux vaut aucune couleur qu'une couleur fausse.
+      let cible = null, confiance = "";
+      if(confirmees.length === 1){
+        cible = confirmees[0];
+        confiance = " Confirmée par le numéro lu sur le plan.";
+      }else if(confirmees.length > 1){
+        cible = confirmees.sort((a, b) => dist(a) - dist(b))[0];
+        confiance = " " + confirmees.length + " régions portaient le numéro : la plus "
+          + "centrale a été retenue, vérifiez le résultat.";
+      }else if(occurrences.length > 0){
+        aLaMain("Colorisation refusée par sécurité : le numéro " + num + " a bien été lu "
+          + "sur le plan, mais hors de la région dont les dimensions correspondaient. "
+          + "Les deux indices se contredisent. " + diag);
+        return;
+      }else if(retenues.length === 1 && numerosLus === 0){
+        cible = retenues[0];
+        confiance = " ⚠ NON CONFIRMÉE : aucun numéro n'a pu être lu sur ce plan, "
+          + "la sélection repose sur les seules dimensions. À vérifier.";
+      }else{
+        aLaMain("Colorisation refusée par sécurité : le numéro " + num + " n'a pas été "
+          + "retrouvé sur le plan et " + (retenues.length > 1
+            ? retenues.length + " régions avaient des dimensions compatibles"
+            : "aucune confirmation n'est possible") + ". " + diag);
+        return;
+      }
+
+      const amorce = { x: Math.round(cible.cx), y: Math.round(cible.cy),
+                       bw: cible.bw, bh: cible.bh, aire: cible.aire };
+      // Le centre de la boîte peut tomber sur un trait ou dans un bâtiment : on
+      // reprend alors un pixel appartenant réellement à la région étiquetée.
+      if(etiquette[amorce.y * W + amorce.x] !== cible.id){
+        let trouve = false;
+        for(let y = cible.y0; y <= cible.y1 && !trouve; y++){
+          for(let x = cible.x0; x <= cible.x1; x++){
+            if(etiquette[y * W + x] === cible.id){ amorce.x = x; amorce.y = y; trouve = true; break; }
+          }
+        }
+      }
+
+      floodFill(amorce.x, amorce.y);
+      pushUndo();
+      rebuildLegend();
+
+      // ---- Garde-fou : refuser une colorisation qui aurait tout de même fui ----
+      // Sur une pièce de dossier, aucune couleur vaut mieux qu'une couleur fausse.
+      const img = oCtx.getImageData(0, 0, W, H).data;
+      let peints = 0;
+      for(let i = 3; i < img.length; i += 4) if(img[i] > 0) peints++;
+      const part = peints / NPIX;
+      if(part > 0.30){
+        oCtx.clearRect(0, 0, W, H);
+        S.legendLabels = {};
+        rebuildLegend();
+        aLaMain("Colorisation automatique écartée : la zone atteinte couvrait "
+          + Math.round(part * 100) + " % du plan — c'est la voirie, pas la parcelle.");
+      }else{
+        setStatus("Parcelle " + num + " coloriée — boîte " + amorce.bw + "×" + amorce.bh
+          + " px." + confiance + " " + diag, confiance.indexOf("NON CONFIRMÉE") >= 0 ? "warn" : "ok");
+      }
+    }catch(err){
+      // setStatus et NON setGenStatus : loadPDFData masque le panneau de
+      // génération (drop.classList.add("hide")) dès que le plan s'affiche, donc
+      // tout message écrit là devient invisible. C'est ce qui a rendu quatre
+      // tentatives de mise au point aveugles.
+      console.error("PAINT colorisation auto :", err);
+      S.tool = "fill";
+      setStatus("Colorisation automatique interrompue : " + ((err && err.message) || err)
+        + ". Le plan reste prêt : cliquez dans la parcelle avec l'outil « Remplir », "
+        + "déjà sélectionné. Détail technique dans la console du navigateur (F12).", "err");
+    }finally{
+      // Drapeau lu par capturerPlanSection depuis la page MÈRE (iframes de même
+      // origine) : le pipeline automatique est terminé — quel que soit son
+      // chemin —, le canvas est dans son état final, capturable.
+      // ⚠ SUR WINDOW : « const S » n'est pas une propriété window, le parent ne
+      // verrait jamais un drapeau posé sur S (leçon du 01/08 au soir).
+      window.capturePret = true;
+      // ---- docauto : DÉCLENCHEMENT UNIQUE, à la fin du chemin automatique.
+      // Un finally attrape TOUS les return de la chaîne — succès, repli, refus,
+      // erreur — c'est ce que veut l'exception du Dossier complet (voir le
+      // commentaire de S.docAuto). Garde S.pdf : sans plan chargé il n'y a pas
+      // de page 1, doExportDocument le dirait mais autant ne pas le lancer.
+      if(S.docAuto && S.pdf){
+        S.docAuto = false;   // un seul déclenchement par chargement
+        S.docAutoLance = true;   // autorise la fermeture de l'onglet en fin d'export
+        showHint("Dossier complet : le document se génère automatiquement…");
+        setTimeout(() => { doExportDocument(); }, 600);
+      }
+    }
+  })();
+}
+
+/* ================== AMORCE DU CHARGEMENT — 01/08/2026 ==================
+   LE MUR : Vercel refuse les URL au-delà de ~14 ko (URI_TOO_LONG, constaté
+   sur le Dossier complet de Watten, 152 parcelles ≈ 20 ko de paramètres).
+   Aucun réglage de budget ne repousse une limite de TRANSPORT.
+   LE CANAL : les paramètres voyagent AUTREMENT que par la requête serveur,
+   puis history.replaceState les pose dans la barre d'adresse SANS AUCUNE
+   REQUÊTE — et tout le code existant, qui lit location.search, fonctionne
+   INCHANGÉ. C'est ce qui évite la refonte : on change le facteur, pas la
+   lettre.
+   Trois modes :
+   — pas de paramètre charge : URL directe, comportement historique ;
+   — charge=iframe&cle=… : iframe de MÊME ORIGINE (plans de section), les
+     paramètres se lisent directement chez le parent (S.chargesIframe) ;
+   — charge=message : onglet ouvert par REDPAR (origine différente), qui
+     envoie la chaîne par postMessage après le ping « paint-pret ». REDPAR
+     n'emprunte ce canal que pour les liens trop longs. */
+(function amorcerChargement(){
+  const p0 = new URLSearchParams(location.search);
+  const mode = (p0.get("charge") || "").trim();
+  if(!mode){ preremplirDepuisURL(); return; }
+  if(mode === "iframe"){
+    try{
+      const qs = (window.parent && window.parent.chargesIframe)
+        ? window.parent.chargesIframe[p0.get("cle") || ""] : null;
+      if(qs){
+        history.replaceState(null, "", location.pathname + "?" + qs);
+        preremplirDepuisURL();
+        return;
+      }
+    }catch(e){ console.error("charge=iframe :", e); }
+    setGenStatus("Chargement par iframe demandé mais paramètres introuvables "
+      + "chez le parent — clé absente ou origine différente.", "err");
+    window.capturePret = true;   // ne jamais laisser le parent attendre 120 s pour rien
+    return;
+  }
+  if(mode === "message"){
+    let recu = false;
+    window.addEventListener("message", (e) => {
+      // Une seule livraison, du bon type. Les paramètres reçus n'ont pas plus
+      // d'autorité qu'une URL : c'est le même niveau de confiance, déplacé.
+      if(recu || !e.data || e.data.type !== "paint-params" || typeof e.data.qs !== "string") return;
+      recu = true;
+      history.replaceState(null, "", location.pathname + "?" + e.data.qs);
+      preremplirDepuisURL();
+    });
+    if(window.opener){ try{ window.opener.postMessage({ type: "paint-pret" }, "*"); }catch(e){} }
+    setGenStatus("En attente des données de REDPAR — lien trop long pour une URL, "
+      + "canal postMessage…", "");
+    setTimeout(() => { if(!recu) setGenStatus("Données non reçues de REDPAR après 15 s. "
+      + "Refermez cet onglet et relancez « Générer » depuis le panneau Dossier complet ; "
+      + "si l'échec persiste, vérifiez que REDPAR est bien à jour.", "err"); }, 15000);
+    return;
+  }
+  preremplirDepuisURL();
+})();
+
+</script>
+</body>
+</html>
