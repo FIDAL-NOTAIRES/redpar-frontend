@@ -49,9 +49,76 @@ const tIsometrique = (phi) => {
 const mParallele = (phi) =>
   Math.cos(phi) / Math.sqrt(1 - LAMBERT_E2 * Math.sin(phi) ** 2);
 
-const versConiqueConforme = (lat, lon) => {
+// ----------------------------------------------------------------------
+// ZONE CONIQUE CONFORME PAR DÉPARTEMENT — TABLE MESURÉE LE 27/08/2026
+// ----------------------------------------------------------------------
+// ⚠⚠ NE PAS REMPLACER PAR UN CALCUL SUR LA LATITUDE. C'est précisément ce que
+// faisait le code d'avant — `Math.round(lat)` sur la latitude de la PARCELLE —
+// et c'est FAUX, parce que les neuf zones se RECOUVRENT d'un degré et que la
+// DGFiP tranche par voie administrative, non par géométrie. Toutes les règles
+// latitudinaires ont été essayées et RÉFUTÉES sur des zones mesurées :
+//   round(lat de la parcelle)   : faux au nord de l'Aisne, faux à Toulouse
+//   round(lat du centroïde)     : faux pour l'Aisne (50 au lieu de 49),
+//                                 l'Hérault (44 au lieu de 43), la Lozère
+//   floor(lat du centroïde)     : faux pour Paris (48 au lieu de 49)
+//   « la zone doit couvrir tout le département » : AUCUNE solution pour
+//                                 l'Aisne, qui s'étend de 48,84° à 50,07° et
+//                                 est pourtant servie en CC49, soit 8 km hors
+//                                 de la bande théorique de la zone.
+//
+// PORTÉE DU DÉFAUT CORRIGÉ : 78 départements sur 96 avaient une partie de leur
+// territoire mal zonée par l'ancien calcul. Ce n'était donc pas un cas
+// exotique — il était latent presque partout, et n'avait échappé que parce que
+// les cas de contrôle du projet (Saint-Omer, Bergues, Watten, Paris) tombaient
+// tous du bon côté de l'arrondi. Le premier à tomber côté défavorable a été
+// TOULOUSE le 27/08/2026 : latitude 43,6037° arrondie à 44, alors que la
+// Haute-Garonne est servie en CC43 — 888 931 m d'écart en Y, colorisation
+// silencieusement morte, plan correct mais non recentré.
+//
+// COMMENT LA TABLE A ÉTÉ ÉTABLIE — et comment la refaire. Une parcelle réelle
+// par département (API Carto de l'IGN), interrogée par
+// paint-blue.vercel.app/api/extrait?...&diag=1, dont le champ
+// centre_du_service.y donne la zone SANS AMBIGUÏTÉ :
+//        zone = Math.round((y - 200000) / 1e6) + 41
+// Les zones sont séparées d'un MILLION de mètres en Y pour une étendue de
+// ±111 km : là où la latitude est ambiguë, le Y ne l'est pas. Marge la plus
+// faible mesurée sur les 96 relevés : 0,085 — très loin du 0,5 qui signalerait
+// un doute. 96 mesures, aucun échec.
+//
+// ⚠ LA TABLE RESTE UNE APPROXIMATION PAR DÉPARTEMENT. La DGFiP décide FEUILLE
+// PAR FEUILLE : un département hétérogène est possible, et alors cette table
+// sera fausse pour certaines de ses feuilles. C'est pourquoi PAINT compare, à
+// chaque extrait, la zone reçue à celle qu'il lit dans le plan, et le DIT.
+// Ne jamais supprimer cette comparaison en croyant la table suffisante.
+const ZONE_CC_PAR_DEPARTEMENT = {
+  '01':46, '02':49, '03':46, '04':44, '05':45, '06':44, '07':45, '08':50, '09':43, '10':48,
+  '11':43, '12':44, '13':44, '14':49, '15':45, '16':46, '17':46, '18':47, '19':45, '21':47,
+  '22':48, '23':46, '24':45, '25':47, '26':45, '27':49, '28':48, '29':48, '2A':42, '2B':42,
+  '30':44, '31':43, '32':44, '33':45, '34':43, '35':48, '36':47, '37':47, '38':45, '39':47,
+  '40':44, '41':48, '42':46, '43':45, '44':47, '45':48, '46':45, '47':44, '48':44, '49':47,
+  '50':49, '51':49, '52':48, '53':48, '54':49, '55':49, '56':48, '57':49, '58':47, '59':50,
+  '60':49, '61':49, '62':50, '63':46, '64':43, '65':43, '66':43, '67':49, '68':48, '69':46,
+  '70':48, '71':47, '72':48, '73':45, '74':46, '75':49, '76':50, '77':49, '78':49, '79':47,
+  '80':50, '81':44, '82':44, '83':43, '84':44, '85':47, '86':47, '87':46, '88':48, '89':48,
+  '90':48, '91':49, '92':49, '93':49, '94':49, '95':49
+};
+// Département au format des codes INSEE, outre-mer sur trois caractères comme
+// dans api/extrait.js de PAINT. Sur 97x la projection rend null de toute façon.
+const departementDe = (ref) => {
+  const c = String(ref || '');
+  return c.startsWith('97') ? c.slice(0, 3) : c.slice(0, 2);
+};
+// Zone à employer. Sans département connu, on retombe sur l'ancien arrondi —
+// repli assumé : mieux vaut une zone probable qu'aucune projection, et le
+// contrôle de PAINT signalera l'erreur si elle survient.
+const zoneCadastrale = (dep, lat) => {
+  const t = ZONE_CC_PAR_DEPARTEMENT[dep];
+  return t || Math.min(50, Math.max(42, Math.round(lat)));
+};
+
+const versConiqueConforme = (lat, lon, dep) => {
   if (!(lat > 41 && lat < 52)) return null;          // hors métropole et Corse
-  const z = Math.min(50, Math.max(42, Math.round(lat)));
+  const z = zoneCadastrale(dep, lat);
   const phi0 = enRad(z), phi1 = enRad(z - 0.75), phi2 = enRad(z + 0.75), lam0 = enRad(3);
   const X0 = 1700000, Y0 = (z - 41) * 1000000 + 200000;
   const phi = enRad(lat), lam = enRad(lon);
@@ -170,7 +237,7 @@ const pointInterieur = (anneau) => {
 // connaissant la largeur du rendu on connaît l'échelle pixels par mètre.
 // Projection locale équirectangulaire : suffisante à l'échelle d'une parcelle,
 // et sans dépendance à une bibliothèque de projection.
-const descripteursForme = (geom) => {
+const descripteursForme = (geom, dep) => {
   if (!geom) return null;
   const anneaux = geom.type === 'Polygon' ? [geom.coordinates[0]]
     : geom.type === 'MultiPolygon' ? geom.coordinates.map((p) => p[0]) : [];
@@ -195,7 +262,7 @@ const descripteursForme = (geom) => {
   if (!(largeur > 0) || !(hauteur > 0)) return null;
   // Point intérieur, projeté en conique conforme.
   const pi = pointInterieur(anneau);
-  const cc = pi ? versConiqueConforme(pi[1], pi[0]) : null;
+  const cc = pi ? versConiqueConforme(pi[1], pi[0], dep) : null;
 
   // CONTOUR PROJETÉ, sommet par sommet. C'est lui qui permet à PAINT de PEINDRE
   // le polygone au lieu de le tracer par remplissage. Décisif en rural : les
@@ -206,7 +273,7 @@ const descripteursForme = (geom) => {
   if (cc) {
     const projetes = [];
     for (const [lo, la] of anneau) {
-      const q = versConiqueConforme(la, lo);
+      const q = versConiqueConforme(la, lo, dep);
       if (!q || q.zone !== cc.zone) { projetes.length = 0; break; }
       projetes.push([q.X, q.Y]);
     }
@@ -566,6 +633,7 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) 
   if (geoms.length < 2) return null;
 
   let zone = null, minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  const dep = departementDe(membres[0]);
   const projetes = [];
   for (const g of geoms) {
     const anneaux = anneauxDe(g);
@@ -573,7 +641,7 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) 
     const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
     const pts = [];
     for (const [lo, la] of ext) {
-      const q = versConiqueConforme(la, lo);
+      const q = versConiqueConforme(la, lo, dep);
       if (!q) return null;
       if (zone === null) zone = q.zone;
       if (q.zone !== zone) return null;      // unité à cheval sur deux zones
@@ -674,6 +742,7 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) 
 const mesurerSelection = (refs, contours) => {
   if (!contours || !refs || !refs.length) return null;
   let zone = null, horsZone = false, sansContour = 0;
+  const dep = departementDe(refs[0]);
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   // Plus petite dimension de CHAQUE parcelle, pour dépister celles qui seront
   // invisibles à l'échelle retenue (voir plus bas).
@@ -685,7 +754,7 @@ const mesurerSelection = (refs, contours) => {
     const ext = anneaux.reduce((m, a) => (a.length > m.length ? a : m));
     let ax = Infinity, bx = -Infinity, ay = Infinity, by = -Infinity;
     for (const [lo, la] of ext) {
-      const q = versConiqueConforme(la, lo);
+      const q = versConiqueConforme(la, lo, dep);
       if (!q) { horsZone = true; continue; }
       if (zone === null) zone = q.zone;
       else if (q.zone !== zone) horsZone = true;
@@ -797,7 +866,7 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
   });
   // Dimensions réelles de la parcelle, en mètres, quand le contour est connu :
   // PAINT en déduit la taille attendue en pixels et cesse de deviner.
-  const f = descripteursForme(geom);
+  const f = descripteursForme(geom, departementDe(r));
   if (f) {
     const ef = choisirEchelle(f.largeur, f.hauteur);
     qs.set('echelle', ef.echelle);
@@ -880,7 +949,7 @@ const lienPaintAnnote = (codeParcelle, nomCommune, geom, contenance, autres, adr
 const lienVueAerienne = (codeParcelle, nomCommune, geom, contenance, autres, adresse) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
-  const f = descripteursForme(geom);
+  const f = descripteursForme(geom, departementDe(r));
   if (!f || !f.cc || !f.poly) return null;      // sans contour : repli appelant
   const qs = new URLSearchParams({
     commune: r.slice(0, 5),
@@ -1009,7 +1078,7 @@ const suffixePP = (refs, contoursMap) => {
   (refs || []).forEach((r) => {
     const c = String(r || '');
     if (c.length !== 14) return;
-    const f = descripteursForme(contoursMap && contoursMap.get ? contoursMap.get(r) : null);
+    const f = descripteursForme(contoursMap && contoursMap.get ? contoursMap.get(r) : null, departementDe(c));
     const ef = f ? choisirEchelle(f.largeur, f.hauteur) : null;
     rangs.push([c.slice(5, 8), c.slice(8, 10), c.slice(10, 14),
                 ef ? ef.echelle : '', ef ? ef.format : ''].join(','));
@@ -1041,7 +1110,7 @@ const lienExtraitCadastral = (codeParcelle, geom) => {
     echelle: '1000',
     taille: 'A4',
   });
-  const o = orientationDe(descripteursForme(geom));
+  const o = orientationDe(descripteursForme(geom, departementDe(r)));
   if (o && o.ef && !o.ef.deborde) {
     const [taille, sens] = o.ef.format.split('|');
     qs.set('echelle', o.ef.echelle);
