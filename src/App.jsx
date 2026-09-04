@@ -178,28 +178,94 @@ const fermerAnneau = (pts) => {
   return (a[0] === z[0] && a[1] === z[1]) ? pts : [...pts, [a[0], a[1]]];
 };
 
-// ⚠ ET ON DÉPENSE LE BUDGET. Le doublement seul SUR-SIMPLIFIE : sur un anneau
-// de 200 sommets à dentelure de 6 m, il passait de 0,5 m à 8 m de tolérance et
-// rendait NEUF sommets alors que quarante étaient permis — une parcelle réduite
-// à un ennéagone, donc coloriée « à peu près ». On encadre donc la tolérance par
-// doublements, puis on la resserre par dichotomie et l'on garde le tracé le plus
-// FIDÈLE qui tienne encore dans le budget.
+// PLAFONDS DE TRANSPORT — un par canal, et c'est le CANAL qui commande, jamais
+// le goût. Mesurés le 04/09/2026 sur des liens réels (banc `mesure-liens.js`) :
+// un sommet coûte une vingtaine de caractères d'URL.
+//   • EXCEL : les hyperliens d'un classeur plafonnent vers 2 000 caractères.
+//     Un lien de parcelle porte ~400 caractères de paramètres hors contour, il
+//     reste donc ~1 500 caractères, soit 70 sommets.
+//   • URL : <a href> et window.open direct. Vercel refuse au-delà de ~14 ko
+//     (URI_TOO_LONG, constaté le 01/08 sur Watten). 450 sommets ≈ 9 ko : la
+//     marge est large, et elle doit l'être — le lien porte aussi tab, pp, bat.
+//   • MESSAGE : canal postMessage (charge=message). Il n'y a plus de ligne de
+//     requête, donc plus de limite ; on borne quand même pour ne pas peindre
+//     un plan de section avec plus de sommets que le plan n'a de pixels.
+// ⚠ TOUT window.open D'UN LIEN CALIBRÉ À CANAL_MESSAGE DOIT PASSER PAR
+// ouvrirPaint — sinon on retombe dans l'URI_TOO_LONG que le canal évite.
+// `sommets` = budget visé ; `cars` = longueur maximale du lien, 0 pour « aucune
+// limite ». Le budget de sommets est une CIBLE, la longueur un PLAFOND VÉRIFIÉ :
+// lienPaintUnite compose, MESURE, et resserre tant que ça ne tient pas. C'est la
+// mesure qui garantit, pas l'estimation.
+// `sansPoly` dit ce qu'on fait quand MÊME le tracé minimal ne tient pas : à
+// l'écran on émet le lien sans contour (PAINT sort l'extrait brut et ÉCRIT que
+// la parcelle n'y est pas surlignée — contrat « reserve ») ; dans un CLASSEUR on
+// rend null, parce qu'une cellule intitulée « Colorier » qui ne colorie pas est
+// un mensonge, et que l'appelant sait écrire « voir à l'écran ».
+const CANAL_EXCEL = { sommets: 55, cars: 1900, sansPoly: false };
+const CANAL_URL = { sommets: 450, cars: 12000, sansPoly: true };
+const CANAL_MESSAGE = { sommets: 4000, cars: 0, sansPoly: true };
+
+// RÉPARTITION DU BUDGET AU PRORATA DES BESOINS. La part ÉGALE, en vigueur
+// jusqu'au 04/09/2026, affamait l'anneau dentelé et gaspillait sur le
+// quadrilatère : une parcelle en trois morceaux dont l'un porte trois cents
+// sommets et les autres quatre recevait 13 sommets chacun. Plancher de 5, sans
+// quoi un morceau minuscule disparaîtrait. Et si TOUT tient, on ne rabote RIEN.
+const PLANCHER_SOMMETS = 5;
+const repartirBudget = (tailles, total) => {
+  if (!tailles.length) return [];
+  const somme = tailles.reduce((t, v) => t + v, 0);
+  if (somme <= total) return tailles.slice();
+  return tailles.map((v) => Math.max(PLANCHER_SOMMETS, Math.floor(total * v / somme)));
+};
+
+// ⚠ ET ON DÉPENSE LE BUDGET — DANS LES DEUX SENS. Le doublement seul
+// SUR-SIMPLIFIE : sur un anneau de 200 sommets à dentelure de 6 m, il passait
+// de 0,5 m à 8 m de tolérance et rendait NEUF sommets alors que quarante
+// étaient permis. Mais la version du 03/09 ne corrigeait QUE ce sens-là : quand
+// la tolérance de départ rendait DÉJÀ moins de sommets que le budget, on gardait
+// ce compte-là et le reste du budget dormait. Mesuré sur le Dunkerque du 04/09 :
+// AK 164 coloriée avec CINQ sommets pour quarante permis, et son angle
+// nord-ouest arrondi coupé par une corde — un croissant blanc de 1,7 m.
+// Trois règles désormais :
+//   1. si l'anneau ENTIER tient dans le budget, on ne simplifie PAS DU TOUT ;
+//   2. sinon on encadre la tolérance dans le bon sens — doublements si elle rend
+//      trop de sommets, DIVISIONS si elle en rend trop peu — puis dichotomie ;
+//   3. on garde le tracé le plus FIDÈLE qui tienne encore dans le budget.
 const reduireAnneau = (pts, max, tol0) => {
   if (!pts || pts.length < 4) return null;
+  // 1. TRACÉ EXACT. C'est le cas le plus fréquent : une parcelle ordinaire porte
+  // de dix à cinquante sommets, très en dessous des plafonds de transport.
+  if (pts.length <= max) return fermerAnneau(pts);
+
+  // 2. Encadrement. `haut` = une tolérance qui TIENT dans le budget, `bas` = une
+  // tolérance qui n'y tient pas. On part de tol0 et l'on va du côté utile.
   let r = simplifier(pts, tol0);
+  let bas = 0, haut = tol0;
   if (r.length > max) {
-    let bas = tol0, haut = tol0, i = 0;
-    while (r.length > max && i < 14) { bas = haut; haut *= 2; r = simplifier(pts, haut); i += 1; }
-    if (r.length <= max) {
-      let meilleur = r;
-      for (let k = 0; k < 7; k += 1) {
-        const mid = (bas + haut) / 2;
-        const essai = simplifier(pts, mid);
-        if (essai.length <= max) { meilleur = essai; haut = mid; } else { bas = mid; }
-      }
-      r = meilleur;
+    bas = tol0;
+    let i = 0;
+    while (r.length > max && i < 20) { bas = haut; haut *= 2; r = simplifier(pts, haut); i += 1; }
+  } else {
+    let t = tol0;
+    for (let i = 0; i < 20; i += 1) {
+      t /= 2;
+      const essai = simplifier(pts, t);
+      if (essai.length > max) { bas = t; break; }
+      haut = t; r = essai;
     }
   }
+  // 3. Dichotomie : la plus PETITE tolérance qui tienne encore.
+  if (r.length <= max) {
+    let meilleur = r;
+    for (let k = 0; k < 12; k += 1) {
+      const mid = (bas + haut) / 2;
+      if (!(mid > bas) || !(mid < haut)) break;
+      const essai = simplifier(pts, mid);
+      if (essai.length <= max) { meilleur = essai; haut = mid; } else { bas = mid; }
+    }
+    r = meilleur;
+  }
+
   if (r.length > max || r.length < 4) {
     // Sommets uniques : le dernier point d'un anneau GeoJSON répète le premier.
     const uniques = pts.length - 1;
@@ -300,7 +366,11 @@ const pointInterieur = (anneau) => {
 // connaissant la largeur du rendu on connaît l'échelle pixels par mètre.
 // Projection locale équirectangulaire : suffisante à l'échelle d'une parcelle,
 // et sans dépendance à une bibliothèque de projection.
-const descripteursForme = (geom, dep) => {
+// ⚠ `max` = plafond de sommets du canal qui transportera le lien. Sa valeur par
+// défaut est celle d'EXCEL, la plus étroite des trois : tout appelant qui ne dit
+// rien obtient donc un lien qui tient dans un hyperlien de classeur. Les canaux
+// plus larges doivent le DIRE.
+const descripteursForme = (geom, dep, max = CANAL_EXCEL.sommets) => {
   if (!geom) return null;
   const anneaux = geom.type === 'Polygon' ? [geom.coordinates[0]]
     : geom.type === 'MultiPolygon' ? geom.coordinates.map((p) => p[0]) : [];
@@ -345,15 +415,16 @@ const descripteursForme = (geom, dep) => {
       }
       if (ok && projetes.length >= 4) projetesParAnneau.push({ src: a, pts: projetes });
     }
-    // ⚠ 40 SOMMETS AU TOTAL, pas par anneau : ce lien va dans l'EXCEL, dont les
-    // hyperliens plafonnent vers 2 000 caractères. Trois morceaux à 40 sommets
-    // chacun feraient 2 400 caractères de poly à eux seuls — lien cassé.
-    const parAnneau = Math.max(4, Math.floor(40 / Math.max(1, projetesParAnneau.length)));
+    // ⚠ LE BUDGET EST UN TOTAL, pas une part par anneau : trois morceaux à 70
+    // sommets chacun feraient 4 200 caractères de poly à eux seuls — hyperlien
+    // Excel cassé. Réparti au prorata des besoins de chaque morceau, et non plus
+    // à parts égales.
+    const parts = repartirBudget(projetesParAnneau.map((pa) => pa.pts.length), max);
     const rendus = [];
-    for (const pa of projetesParAnneau) {
-      const r = reduireAnneau(pa.pts, parAnneau, 0.5);
+    projetesParAnneau.forEach((pa, i) => {
+      const r = reduireAnneau(pa.pts, parts[i], 0.5);
       if (r) rendus.push({ src: pa.src, pts: r });
-    }
+    });
     if (rendus.length) {
       polys = rendus.map((r) => r.pts);
       // poly reste l'anneau PRINCIPAL (le plus vaste) : choisirOrientation et les
@@ -697,13 +768,13 @@ const designationCadastrale = (codeParcelle) => {
 // milliers de caractères, ce qu'un navigateur accepte mais qu'Excel plafonne
 // autour de deux mille. Le classeur garde donc ses liens par parcelle.
 // ----------------------------------------------------------------------
-// 250 sommets et non 400 : un sommet coûte une vingtaine de caractères d'URL, et
-// une unité de douze parcelles atteignait huit mille caractères — au-delà de ce
-// que certains serveurs acceptent dans une ligne de requête. À 250, on reste sous
-// cinq mille, ce qui laisse de la marge tout en conservant un tracé fidèle.
-const BUDGET_SOMMETS = 250;
-
-const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) => {
+// ⚠ `canal` = le CANAL de transport du lien : budget de sommets et plafond de
+// par le canal de transport (voir CANAL_EXCEL / CANAL_URL / CANAL_MESSAGE).
+// caractères. Par défaut CANAL_URL : la plupart des appelants sont des <a href>
+// ou un window.open direct, qui n'ont aucun repli si l'URL déborde. Les deux
+// chemins qui passent par ouvrirPaint (plan à la carte, dossier complet)
+// demandent CANAL_MESSAGE ; l'Excel demande CANAL_EXCEL.
+const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar, canal = CANAL_URL) => {
   if (!membres || membres.length < 2 || !contours) return null;
   if (membres.filter((r) => contours.get(r)).length < 2) return null;
 
@@ -753,68 +824,115 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar) 
   // affamait chaque contour du Dossier complet de Watten (150 parcelles → moins
   // de 2 sommets par polygone). Tout ce qui dérive des contours mourait EN
   // SILENCE : croix des cartes de situation, anneaux des vues aériennes,
-  // colorisation des plans de section. Désormais : cible 700 sommets au total,
-  // PLANCHER DE 5 SOMMETS PAR POLYGONE (échantillonnage uniforme de secours si
-  // la simplification descend trop bas), plafond 40 inchangé — les liens
-  // d'unités de quelques parcelles ne changent donc pas d'un octet.
-  // ⚠ CONTREPARTIE DITE, PAS TUE : au-delà de ~120 parcelles, chaque contour
-  // tombe vers 5 sommets — repères JUSTES (centres exacts), mais colorisation
-  // des plans de section APPROXIMATIVE (pentagones au lieu des vraies limites).
-  // La vraie sortie est un canal postMessage REDPAR→PAINT (chantier au mémo) :
-  // l'URL a une limite de transport qu'aucun réglage ne repousse.
-  // Budget réparti sur les ANNEAUX réellement émis, et non sur les parcelles :
-  // une parcelle en trois morceaux consomme trois anneaux.
-  const nbAnneaux = projetes.reduce((t, a) => t + (a ? a.length : 0), 0);
-  const parPoly = Math.max(5, Math.min(40, Math.floor(700 / Math.max(1, nbAnneaux))));
+  // colorisation des plans de section. Le budget est donc un TOTAL réparti sur
+  // les ANNEAUX réellement émis — une parcelle en trois morceaux consomme trois
+  // anneaux —, et il est réparti AU PRORATA de leurs besoins depuis le
+  // 04/09/2026 : la part égale donnait le même compte à un quadrilatère et à un
+  // contour dentelé de trois cents sommets. Le PLAFOND PAR ANNEAU A DISPARU :
+  // c'était lui, à 40, qui bornait la fidélité d'une unité de deux parcelles
+  // alors que le canal en autorise dix fois plus. Plancher de 5 conservé
+  // (échantillonnage uniforme de secours si la simplification descend trop bas).
+  // ⚠ CONTREPARTIE DITE, PAS TUE : sur un dossier de 150 parcelles, le prorata
+  // ramène chaque contour vers une vingtaine de sommets — repères JUSTES
+  // (centres exacts) et colorisation FIDÈLE au mètre, mais plus au décimètre.
+  // C'est le canal postMessage qui a repoussé la limite, pas un réglage.
   const tolDepart = Math.max(0.2, mParPixel / 2);
-  // ⚠ reduireAnneau REFERME l'anneau. L'ancien rééchantillonnage de secours
-  // s'arrêtait au dernier sommet échantillonné sans revenir au premier : le tour
-  // restait OUVERT et PAINT le fermait par une corde, laissant un lobe blanc.
-  const reduits = projetes.map((anneaux) => (anneaux
-    ? anneaux.map((pts) => reduireAnneau(pts, parPoly, tolDepart)).filter(Boolean)
-    : null));
+  const tailles = [];
+  projetes.forEach((anneaux) => { if (anneaux) anneaux.forEach((pts) => tailles.push(pts.length)); });
 
   const membre = membres.find((r) => contours.get(r)) || membres[0];
   const r = String(membre);
   const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-  const qs = new URLSearchParams({
-    commune: r.slice(0, 5),
-    nomCommune: nomCommune || '',
-    prefixe: r.slice(5, 8),
-    section: r.slice(8, 10),
-    parcelle: r.slice(10, 14),
-    // ⚠ LA SENTINELLE 25000 NE DOIT JAMAIS FUIR DANS UNE URL — constaté le
-    // 01/08 sur le Dossier complet de Watten : le sélecteur d'échelle de PAINT
-    // arrivait VIDE (aucune option 25000). Le garde-fou de fin juillet
-    // l'arrêtait à l'écran du panier, pas dans le lien. Au débordement, on
-    // émet la meilleure échelle RÉELLE du service ; auto reste retiré, et le
-    // mode « plans par section » de PAINT recalcule de toute façon les siennes.
-    echelle: ef.deborde ? '5000' : ef.echelle,
-    format: ef.deborde ? 'A3|paysage' : ef.format,
-    couleur: '#A01040',
-    x: cx.toFixed(1),
-    y: cy.toFixed(1),
-    pt: `${cx.toFixed(1)},${cy.toFixed(1)}`,
-    crs: `CC${zone}`,
-    dim: `${largeur}x${hauteur}`,
-    poly: reduits.map((anneaux) => (anneaux ? blocPoly(anneaux) : '')).join('|'),
-  });
-  if (!ef.deborde) qs.set('auto', '1');
 
-  const rangs = [];
-  let somme = 0;
-  membres.forEach((ref) => {
-    const sn = sectionEtNumero(ref);
-    if (!sn) return;
-    const m2 = Number(parParcelle.get(ref)) || 0;
-    somme += m2;
-    rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(adressePar && adressePar.get ? adressePar.get(ref) : '')}`);
-  });
-  if (rangs.length) {
-    qs.set('tab', rangs.join(';'));
-    if (somme > 0) qs.set('total', contenanceNotariale(somme));
+  // COMPOSITION À BUDGET DONNÉ, isolée pour pouvoir être REFAITE. C'est la
+  // longueur MESURÉE du lien qui décide, jamais une arithmétique de coin de
+  // table : l'encodage d'URL transforme « , » en %2C et « ; » en %3B, un sommet
+  // coûte donc VINGT-QUATRE caractères et non vingt, et le tableau de
+  // désignation (tab) pèse une quarantaine de caractères PAR PARCELLE — sur
+  // cent cinquante parcelles il fait à lui seul six mille caractères, ce
+  // qu'aucun budget de sommets ne peut rattraper.
+  const composer = (total, avecPoly) => {
+    const qs = new URLSearchParams({
+      commune: r.slice(0, 5),
+      nomCommune: nomCommune || '',
+      prefixe: r.slice(5, 8),
+      section: r.slice(8, 10),
+      parcelle: r.slice(10, 14),
+      // ⚠ LA SENTINELLE 25000 NE DOIT JAMAIS FUIR DANS UNE URL — constaté le
+      // 01/08 sur le Dossier complet de Watten : le sélecteur d'échelle de PAINT
+      // arrivait VIDE (aucune option 25000). Le garde-fou de fin juillet
+      // l'arrêtait à l'écran du panier, pas dans le lien. Au débordement, on
+      // émet la meilleure échelle RÉELLE du service ; auto reste retiré, et le
+      // mode « plans par section » de PAINT recalcule de toute façon les siennes.
+      echelle: ef.deborde ? '5000' : ef.echelle,
+      format: ef.deborde ? 'A3|paysage' : ef.format,
+      couleur: '#A01040',
+      x: cx.toFixed(1),
+      y: cy.toFixed(1),
+      pt: `${cx.toFixed(1)},${cy.toFixed(1)}`,
+      crs: `CC${zone}`,
+      dim: `${largeur}x${hauteur}`,
+    });
+    if (avecPoly) {
+      const parts = repartirBudget(tailles, total);
+      // ⚠ reduireAnneau REFERME l'anneau. L'ancien rééchantillonnage de secours
+      // s'arrêtait au dernier sommet échantillonné sans revenir au premier : le
+      // tour restait OUVERT et PAINT le fermait par une corde, laissant un lobe
+      // blanc.
+      // ⚠ `k` avance dans le MÊME ORDRE que la construction de `tailles` : c'est
+      // ce qui apparie chaque anneau à sa part. Ne pas réordonner l'un sans
+      // l'autre.
+      let k = 0;
+      const reduits = projetes.map((anneaux) => (anneaux
+        ? anneaux.map((pts) => reduireAnneau(pts, parts[k++], tolDepart)).filter(Boolean)
+        : null));
+      qs.set('poly', reduits.map((anneaux) => (anneaux ? blocPoly(anneaux) : '')).join('|'));
+    }
+    if (!ef.deborde) qs.set('auto', '1');
+
+    const rangs = [];
+    let somme = 0;
+    membres.forEach((ref) => {
+      const sn = sectionEtNumero(ref);
+      if (!sn) return;
+      const m2 = Number(parParcelle.get(ref)) || 0;
+      somme += m2;
+      rangs.push(`${sn.section},${sn.numero},${m2 > 0 ? contenanceNotariale(m2) : ''},${adresseM1(adressePar && adressePar.get ? adressePar.get(ref) : '')}`);
+    });
+    if (rangs.length) {
+      qs.set('tab', rangs.join(';'));
+      if (somme > 0) qs.set('total', contenanceNotariale(somme));
+    }
+    return `${PAINT_URL}/?${qs.toString()}`;
+  };
+
+  // AJUSTEMENT AU CANAL. On compose au budget demandé, puis on RESSERRE tant que
+  // le lien ne tient pas.
+  // ⚠ RESSERREMENT DOUX — 15 % par palier, et non 40 %. Mesuré le 04/09 : à
+  // 40 %, une unité de six parcelles dont le lien pesait 1 896 caractères pour
+  // un plafond de 1 900 retombait d'un coup de neuf sommets par parcelle à
+  // cinq. Un palier fin coûte quelques compositions de plus — quelques
+  // microsecondes — et rend un tracé au ras du plafond.
+  // Le plancher est 5 sommets par anneau : en dessous, repartirBudget ne sait
+  // plus rétrécir, la boucle tournerait à vide.
+  let total = Math.max(PLANCHER_SOMMETS, canal.sommets);
+  let url = composer(total, true);
+  if (canal.cars > 0) {
+    const minimum = PLANCHER_SOMMETS * Math.max(1, tailles.length);
+    let garde = 0;
+    while (url.length > canal.cars && total > minimum && garde < 40) {
+      total = Math.max(minimum, Math.floor(total * 0.85) - 1);
+      url = composer(total, true);
+      garde += 1;
+    }
+    // DERNIER RECOURS. Le tableau de désignation à lui seul peut dépasser le
+    // canal — quarante caractères par parcelle, six mille sur cent cinquante —
+    // et alors aucun budget de sommets ne sauve le lien. Plutôt qu'une URL
+    // refusée par Vercel (URI_TOO_LONG, écran d'erreur au clic), on émet selon
+    // le canal : l'extrait brut à l'écran, rien du tout dans un classeur.
+    if (url.length > canal.cars) url = canal.sansPoly ? composer(0, false) : null;
   }
-  return `${PAINT_URL}/?${qs.toString()}`;
+  return url;
 };
 
 // ----------------------------------------------------------------------
@@ -2209,12 +2327,45 @@ export default function App() {
      multi-parcelles et le pt de l'ensemble ; il suffit de lui adjoindre les
      suffixes. Les paramètres cadastraux qu'il émet (echelle, format, dim) sont
      sans effet en mode ortho, c'est acquis au contrat. */
+  // OUVERTURE D'UN LIEN PAINT — un seul chemin pour les deux usages qui portent
+  // des contours en nombre.
+  // ⚠ VERCEL REFUSE LES URL AU-DELÀ DE ~14 ko (URI_TOO_LONG, constaté le
+  // 01/08 sur Watten, 152 parcelles). Au-delà de 7 000 caractères — marge
+  // large —, les paramètres partent par postMessage : PAINT s'ouvre sur une
+  // URL LÉGÈRE (charge=message), envoie « paint-pret » dès qu'il écoute, et
+  // reçoit la chaîne complète qu'il pose lui-même dans sa barre d'adresse
+  // (history.replaceState, aucune requête). ⚠ PAS de 'noreferrer' sur ce
+  // chemin : il couperait window.opener, donc le canal.
+  // ⚠ LE 04/09/2026 CE GARDE-FOU N'EXISTAIT QUE POUR LE DOSSIER COMPLET. Le
+  // plan à la carte faisait un window.open direct : avec l'ancienne
+  // sur-simplification il ne dépassait jamais, mais un panier de 150 parcelles
+  // à 5 sommets valait déjà 15 ko — la panne était là, en sommeil. Mutualisé.
+  const ouvrirPaint = (lien) => {
+    if (!lien) return;
+    if (lien.length > 7000) {
+      const u = new URL(lien);
+      const w = window.open(u.origin + u.pathname + '?charge=message&cb=' + Date.now(), '_blank');
+      if (w) {
+        const qs = u.search.slice(1);
+        const h = (e) => {
+          if (e.source !== w || !e.data || e.data.type !== 'paint-pret') return;
+          w.postMessage({ type: 'paint-params', qs }, u.origin);
+          window.removeEventListener('message', h);
+        };
+        window.addEventListener('message', h);
+        setTimeout(() => window.removeEventListener('message', h), 30000);
+      }
+    } else {
+      window.open(lien, '_blank', 'noreferrer');
+    }
+  };
+
   const genererCarte = (mode = 'plan') => {
     if (!carteRefs.length) return;
     const nom = carteCommuneObj ? carteCommuneObj.nom : '';
     const avecContour = carteRefs.filter((r) => contoursPlan?.get(r));
     let lien = avecContour.length >= 2
-      ? lienPaintUnite(carteRefs, surfaceParRef, contoursPlan, nom, adresseParRef)
+      ? lienPaintUnite(carteRefs, surfaceParRef, contoursPlan, nom, adresseParRef, CANAL_MESSAGE)
       : null;
     // Repli : une seule parcelle coloriable, ou lienPaintUnite qui refuse. Le plan
     // est alors centré sur elle, mais le TABLEAU porte toute la sélection — on ne
@@ -2231,7 +2382,7 @@ export default function App() {
     if (mode === 'ortho') lien += '&fond=ortho&trace=rond&cadre=contexte';
     else if (mode === 'doc') lien += '&doc=1' + suffixeDossier
       + suffixeBati(carteRefs, batiParRef) + suffixePP(carteRefs, contoursPlan);
-    window.open(lien, '_blank', 'noreferrer');
+    ouvrirPaint(lien);
   };
 
   // ---- DOSSIER COMPLET — demandé par JFD le 01/08/2026 --------------------
@@ -2295,7 +2446,7 @@ export default function App() {
     const refs = lg.refs;   // déjà triées et tranchées en volume
     const avecContour = refs.filter((r) => contoursPlan?.get(r));
     let lien = avecContour.length >= 2
-      ? lienPaintUnite(refs, surfaceParRef, contoursPlan, lg.nom, adresseParRef)
+      ? lienPaintUnite(refs, surfaceParRef, contoursPlan, lg.nom, adresseParRef, CANAL_MESSAGE)
       : null;
     // Repli identique à genererCarte : une seule parcelle coloriable, ou
     // lienPaintUnite qui refuse — le tableau porte alors tout le volume.
@@ -2312,29 +2463,7 @@ export default function App() {
   const genererDossierCommune = (lg) => {
     const lien = lienDossierCommune(lg);
     if (!lien) return;
-    // ⚠ VERCEL REFUSE LES URL AU-DELÀ DE ~14 ko (URI_TOO_LONG, constaté le
-    // 01/08 sur Watten, 152 parcelles). Au-delà de 7 000 caractères — marge
-    // large —, les paramètres partent par postMessage : PAINT s'ouvre sur une
-    // URL LÉGÈRE (charge=message), envoie « paint-pret » dès qu'il écoute, et
-    // reçoit la chaîne complète qu'il pose lui-même dans sa barre d'adresse
-    // (history.replaceState, aucune requête). ⚠ PAS de 'noreferrer' ici :
-    // il couperait window.opener, donc le canal.
-    if (lien.length > 7000) {
-      const u = new URL(lien);
-      const w = window.open(u.origin + u.pathname + '?charge=message&cb=' + Date.now(), '_blank');
-      if (w) {
-        const qs = u.search.slice(1);
-        const h = (e) => {
-          if (e.source !== w || !e.data || e.data.type !== 'paint-pret') return;
-          w.postMessage({ type: 'paint-params', qs }, u.origin);
-          window.removeEventListener('message', h);
-        };
-        window.addEventListener('message', h);
-        setTimeout(() => window.removeEventListener('message', h), 30000);
-      }
-    } else {
-      window.open(lien, '_blank', 'noreferrer');
-    }
+    ouvrirPaint(lien);   // garde-fou des 7 000 caractères, mutualisé
     setDossierFaits((s) => new Set(s).add(lg.cle));
   };
   const basculerDossierFait = (insee) => setDossierFaits((s) => {
@@ -2900,17 +3029,26 @@ export default function App() {
             row.getCell(10).value = unite.length ? unite.map((o) => designationCadastrale(o.codeParcelle)).join(' ; ') : (etat === 'syndicat' ? 'non calculée' : 'limitée à la parcelle du lot');
             row.getCell(11).value = unite.length ? unite.reduce((t, o) => t + (Number(o.contenance) || 0), 0) : '';
             const refsUnite = unite.map((o) => o.codeParcelle);
+            // ⚠ CANAL_EXCEL, et non le défaut : ce lien-ci part dans un
+            // CLASSEUR, dont les hyperliens plafonnent vers 2 000 caractères.
+            // Calibré large, il tomberait dans le repli « voir à l'écran »
+            // ci-dessous et l'assiette perdrait son lien cliquable.
             const lien = refsUnite.length >= 2
-              ? lienPaintUnite(refsUnite, surfaceParRef, contoursPlan, a.commune, adresseParRef)
+              ? lienPaintUnite(refsUnite, surfaceParRef, contoursPlan, a.commune, adresseParRef, CANAL_EXCEL)
               : lienPaintColorise(a.codeParcelle, a.commune, contoursPlan?.get(a.codeParcelle));
             const cell = row.getCell(12);
             // ⚠ Le lien d'unité peut dépasser le plafond Excel (~2 000 caractères) :
             // on ne pose que ceux qui tiennent, les autres renvoient à l'écran.
+            // ⚠ DEPUIS LE 04/09, lienPaintUnite RÉPOND NULL sur CANAL_EXCEL quand
+            // il ne peut pas tenir — au-delà d'une dizaine de parcelles, le seul
+            // tableau de désignation remplit le plafond. Le renvoi « voir à
+            // l'écran » vaut donc aussi pour ce null, sinon la cellule resterait
+            // VIDE et l'assiette paraîtrait sans plan.
             if (lien && lien.length <= 2000) {
               cell.value = { text: refsUnite.length >= 2 ? 'Assiette entière' : 'Colorier', hyperlink: lien };
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
               cell.alignment = { horizontal: 'center', vertical: 'middle' };
-            } else cell.value = lien ? 'voir à l\'écran' : '';
+            } else cell.value = (lien || refsUnite.length >= 2) ? 'voir à l\'écran' : '';
           },
         });
       }
