@@ -1545,6 +1545,11 @@ function anneauxLeaflet(geom) {
 function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
+  // Plein écran. La carte reste LE MÊME noeud du DOM : on ne déplace que son
+  // conteneur. Recréer la carte ferait perdre le zoom, le centrage et les
+  // couches décochées, ce qui est exactement ce qu'on vient chercher en
+  // agrandissant.
+  const [plein, setPlein] = useState(false);
 
   useEffect(() => {
     if (!window.L || !mapRef.current) return;
@@ -1702,7 +1707,67 @@ function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) 
     };
   }, [parcelles, locaux, contours, companyName]);
 
-  return <div ref={mapRef} style={{ height: '500px', width: '100%' }} />;
+  // Leaflet mesure son conteneur une seule fois, à la création. Après tout
+  // changement de taille il faut le lui redire : sinon les tuiles restent
+  // calées sur l'ancien cadre (bandes grises à droite et en bas, clics
+  // décalés par rapport aux marqueurs). Le petit délai laisse au navigateur
+  // le temps d'appliquer la nouvelle géométrie avant la mesure.
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+    const t = setTimeout(() => map.invalidateSize({ animate: false }), 60);
+    return () => clearTimeout(t);
+  }, [plein]);
+
+  // Échap pour sortir, et page figée derrière l'overlay : sans cela la molette
+  // en bord de carte fait défiler le relevé sous le plein écran.
+  useEffect(() => {
+    if (!plein) return;
+    const onKey = (e) => { if (e.key === 'Escape') setPlein(false); };
+    window.addEventListener('keydown', onKey);
+    const scrollAvant = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      document.body.style.overflow = scrollAvant;
+    };
+  }, [plein]);
+
+  // Pas de bouton s'il n'y a rien à voir : sans coordonnée exploitable
+  // l'effet ci-dessus sort avant de créer la carte.
+  const aDesPoints = parcelles.some((p) => parseCoords(p.coordonnees))
+    || locaux.some((l) => parseCoords(l.coordonnees));
+
+  const styleConteneur = plein
+    ? { position: 'fixed', inset: 0, zIndex: 3000, background: '#fff' }
+    : { position: 'relative', height: '500px', width: '100%' };
+
+  return (
+    <div style={styleConteneur}>
+      <div ref={mapRef} style={{ height: '100%', width: '100%' }} />
+      {aDesPoints && (
+        <button
+          type="button"
+          onClick={() => setPlein((v) => !v)}
+          title={plein ? 'Quitter le plein écran (Échap)' : 'Afficher la carte en plein écran'}
+          style={{
+            // Sous le contrôle de zoom de Leaflet (deux boutons de 30 px plus
+            // sa marge de 10 px), et sous le sélecteur de couches qui occupe
+            // le coin haut droit.
+            position: 'absolute', top: 84, left: 10, zIndex: 1200,
+            display: 'flex', alignItems: 'center', gap: 6,
+            background: '#1e2952', color: '#fbbf24',
+            border: '2px solid #fff', borderRadius: 6,
+            padding: '6px 10px', fontSize: 12, fontWeight: 600,
+            fontFamily: 'system-ui', lineHeight: 1.2, cursor: 'pointer',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+          }}
+        >
+          {plein ? '✕ Réduire' : '⤢ Plein écran'}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export default function App() {
