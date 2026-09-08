@@ -1792,6 +1792,16 @@ export default function App() {
   const [geoStatus, setGeoStatus] = useState(null);
   // Millésime annoncé par le backend, jamais codé en dur côté interface.
   const [millesime, setMillesime] = useState('2025');
+  // Le millésime doit aussi être lisible DANS geocoderTout, qui est appelé dans
+  // la même passe que fetchParcelles : l'état React n'y est pas encore à jour,
+  // la référence l'est.
+  const millesimeRef = useRef('2025');
+  // Références restées sans géométrie, et pourquoi. Deux populations à ne pas
+  // confondre : celles qu'aucun millésime du plan ne connaît (irréductible, à
+  // instruire) et celles dont le lot d'interrogation a échoué (réseau, à
+  // relancer).
+  const [sansGeo, setSansGeo] = useState(null);
+  const [sansGeoOuvert, setSansGeoOuvert] = useState(false);
 
   // ----------------------------------------------------------------------
   // FILTRE PAR TITRE DE DROIT
@@ -2081,7 +2091,10 @@ export default function App() {
           for (let i = 0; i < ids.length; i += 400) {
             const suffixes = ids.slice(i, i + 400).map((x) => x.slice(5)).join(',');
             try {
-              const g = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}&contours=1`);
+              // Même repli millésime que le géocodage principal : l'assiette
+              // d'une copropriété est tout aussi susceptible d'avoir bougé.
+              const g = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}`
+                + `&ids=${suffixes}&contours=1&repli=${millesimeRef.current}-01-01`);
               if (!g.ok) continue;
               const dg = await g.json();
               Object.entries(dg.geo || {}).forEach(([ref, gg]) => { if (gg.contour) geoms.set(ref, gg.contour); });
@@ -2140,6 +2153,7 @@ export default function App() {
       for (let i = 0; i < liste.length; i += 400) taches.push([insee, liste.slice(i, i + 400)]);
     }
     setGeoStatus({ communes: parCommune.size, faites: 0, trouvees: 0, demandees: 0 });
+    setSansGeo(null); setSansGeoOuvert(false);
 
     // On mémorise aussi la contenance renvoyée par le PLAN cadastral : comparée
     // à celle de la MATRICE, elle alimente le contrôle de cohérence. Les deux
@@ -2148,30 +2162,62 @@ export default function App() {
     // arpentage — et qu'il faut instruire.
     const infos = new Map();
     const geometries = new Map();
+    const absentesDuPlan = [];   // qu'aucun millésime du plan ne connaît
+    const refsEchouees = [];     // dont le lot d'interrogation a échoué
     let faites = 0, trouvees = 0, demandees = 0;
     let curseur = 0;
+
+    // MILLÉSIME. « latest » est le plan d'aujourd'hui, la matrice décrit le
+    // 1er janvier de son millésime : toute parcelle divisée, réunie ou
+    // remembrée depuis a disparu du plan courant sous son ancienne référence,
+    // et se retrouvait « sans géométrie ». On passe donc au backend la DATE DE
+    // LA MATRICE, à charge pour lui de retenir les millésimes réellement
+    // publiés les plus proches — Etalab les conserve tous, mais à des dates
+    // irrégulières qu'il ne faut surtout pas deviner ici.
+    const cible = `${millesimeRef.current}-01-01`;
+    let millesimesUtilises = [];
+
+    // Un lot perdu, c'est jusqu'à quatre cents références déclarées « sans
+    // géométrie » pour une cause qui n'a rien de cadastral. On réessaie donc,
+    // avec un délai croissant, avant de conclure quoi que ce soit.
+    const attendre = (ms) => new Promise((r) => setTimeout(r, ms));
+    const interroger = async (insee, suffixes) => {
+      for (let essai = 0; essai < 3; essai++) {
+        if (essai) await attendre(400 * (2 ** (essai - 1)));
+        try {
+          // contours=1 : la géométrie voyage AVEC le géocodage. Les deux
+          // interrogeaient le même endpoint, les mêmes communes, les mêmes
+          // références — c'était deux séries d'appels pour rien.
+          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}`
+            + `&ids=${suffixes}&contours=1&cible=${cible}`);
+          if (r.ok) return await r.json();
+        } catch { /* réseau : on retente, sans casser la carte */ }
+      }
+      return null;
+    };
+
     const travailleur = async () => {
       while (curseur < taches.length) {
         const [insee, refs] = taches[curseur++];
         demandees += refs.length;
-        try {
-          const suffixes = refs.map((r) => r.slice(5)).join(',');
-          // contours=1 : la géométrie voyage AVEC le géocodage. Les deux
-          // interrogeaient le même endpoint, les mêmes communes, les mêmes
-          // références — c'était deux séries d'appels pour rien.
-          const r = await fetch(`${BACKEND_URL}/api/geo?insee=${insee}&ids=${suffixes}&contours=1`);
-          if (r.ok) {
-            const d = await r.json();
-            Object.entries(d.geo || {}).forEach(([ref, g]) => {
-              infos.set(ref, {
-                coordonnees: `${g.lat}, ${g.lng}`,
-                contenanceCadastre: g.contenance_cadastre ?? null,
-              });
-              if (g.contour) geometries.set(ref, g.contour);
-              trouvees++;
-            });
+        const d = await interroger(insee, refs.map((r) => r.slice(5)).join(','));
+        if (!d) {
+          refs.forEach((ref) => refsEchouees.push(ref));
+        } else {
+          if (!millesimesUtilises.length && Array.isArray(d.millesimes_essayes)) {
+            millesimesUtilises = d.millesimes_essayes;
           }
-        } catch { /* une commune absente du plan ne doit pas casser la carte */ }
+          Object.entries(d.geo || {}).forEach(([ref, g]) => {
+            infos.set(ref, {
+              coordonnees: `${g.lat}, ${g.lng}`,
+              contenanceCadastre: g.contenance_cadastre ?? null,
+              millesimePlan: g.millesime_plan || null,
+            });
+            if (g.contour) geometries.set(ref, g.contour);
+            trouvees++;
+          });
+          (d.manquants || []).forEach((ref) => absentesDuPlan.push(ref));
+        }
         faites++;
         setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees });
         setContours(new Map(geometries));   // tracé progressif : la carte se garnit
@@ -2179,13 +2225,30 @@ export default function App() {
     };
     await Promise.all(Array.from({ length: Math.min(6, taches.length) }, travailleur));
 
+    const echouees = new Set(refsEchouees);
     const poser = (o) => (infos.has(o.codeParcelle)
       ? { ...o, ...infos.get(o.codeParcelle), _planLu: true }
-      : { ...o, _planLu: true, _absenteDuPlan: true });
+      : {
+        ...o, _planLu: true, _absenteDuPlan: true,
+        ...(echouees.has(o.codeParcelle) ? { _lotEchoue: true } : {}),
+      });
     setParcellesBrutes((prev) => prev.map(poser));
     setLocauxBruts((prev) => prev.map(poser));
     setContours(new Map(geometries));
     setGeoStatus({ communes: parCommune.size, faites, trouvees, demandees, termine: true });
+
+    // Bilan nominatif : sans la liste, impossible de savoir si le reliquat est
+    // irréductible ou s'il faut relancer.
+    const nomsCommunes = new Map();
+    [...listeParcelles, ...listeLocaux].forEach((o) => {
+      if (o.codeParcelle && o.commune) nomsCommunes.set(o.codeParcelle, o.commune);
+    });
+    const decorer = (ref) => ({ ref, commune: nomsCommunes.get(ref) || '' });
+    setSansGeo({
+      millesimes: millesimesUtilises.filter((m) => m !== 'latest'),
+      absentes: [...new Set(absentesDuPlan)].sort().map(decorer),
+      echouees: [...echouees].sort().map(decorer),
+    });
 
     // Assiettes : les parcelles des locaux absentes du non bâti. La recherche
     // du syndicat part APRÈS le géocodage, dont elle réutilise les contours.
@@ -2193,6 +2256,16 @@ export default function App() {
     const refsAssiette = [...new Set(listeLocaux.map((o) => o.codeParcelle).filter((r) => r && !refsNB.has(r)))];
     if (refsAssiette.length) rechercherSyndicats(refsAssiette, listeLocaux, geometries);
     else setAssiettesInfo(new Map());
+  };
+
+  // Relance du géocodage sur le relevé déjà chargé. On repart de TOUT plutôt
+  // que des seules manquantes : le cache du backend rend la seconde passe
+  // rapide, et un recollement partiel serait la porte ouverte aux incohérences
+  // entre contours, unités foncières et assiettes de copropriété.
+  const relancerGeocodage = () => {
+    if (geoStatus && !geoStatus.termine) return;
+    if (!parcellesBrutes.length && !locauxBruts.length) return;
+    geocoderTout(parcellesBrutes, locauxBruts);
   };
 
   const fetchParcelles = async (siren) => {
@@ -2206,6 +2279,7 @@ export default function App() {
       setTotalParcelles(data.total || 0);
       setTruncated(data.truncated || false);
       setMillesime(data.millesime || '2025');
+      millesimeRef.current = data.millesime || '2025';
       setParcellesLoading(false);
       return liste;
     } catch (e) {
@@ -2253,6 +2327,7 @@ export default function App() {
     setStep(1); setCompanyName(''); setPappersResults([]); setSelectedCompany(null);
     setPappersError(null); setParcellesBrutes([]); setTotalParcelles(0); setParcellesError(null); setTruncated(false);
     setLocauxBruts([]); setTotalLocaux(0); setLocauxError(null); setGeoStatus(null); setLocauxTronque(false);
+    setSansGeo(null); setSansGeoOuvert(false);
     setDroitsChoisis(null);
     setAssiettesInfo(null); setContoursAssiette(null);
   };
@@ -3814,10 +3889,82 @@ export default function App() {
                     {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les lots détenus sur la parcelle.
                     {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
                     {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
-                    {geoStatus?.termine && geoStatus.trouvees < (geoStatus.demandees || 0) && (
-                      <span className="text-amber-700"> {((geoStatus.demandees || 0) - geoStatus.trouvees).toLocaleString('fr-FR')} référence(s) sans géométrie : le millésime du plan peut différer de celui de la matrice.</span>
+                    {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
+                      <span className="text-amber-700"> {(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s) sans géométrie — détail ci-dessous.</span>
                     )}
                   </div>
+                  {/* Le reliquat sans géométrie, nommément. Deux motifs qu'il
+                      ne faut pas confondre : ce que le plan ne connaît à aucun
+                      millésime (à instruire) et ce qui n'a pas pu être
+                      interrogé (à relancer). */}
+                  {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
+                    <div className="px-6 py-3 border-t border-amber-200 bg-amber-50">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
+                        <span className="text-xs text-amber-900 flex-1 min-w-[16rem]">
+                          {sansGeo.absentes.length > 0 && (
+                            <>
+                              <strong>{sansGeo.absentes.length.toLocaleString('fr-FR')}</strong>
+                              {' '}référence(s) inconnue(s) du plan, ni au millésime courant
+                              {sansGeo.millesimes.length ? ` ni au${sansGeo.millesimes.length > 1 ? 'x' : ''} millésime${sansGeo.millesimes.length > 1 ? 's' : ''} ${sansGeo.millesimes.join(' et ')}` : ''}
+                              {' '}: parcelles divisées, réunies ou remembrées, à instruire au relevé
+                              {' '}de propriété.
+                            </>
+                          )}
+                          {sansGeo.absentes.length > 0 && sansGeo.echouees.length > 0 && ' '}
+                          {sansGeo.echouees.length > 0 && (
+                            <>
+                              <strong>{sansGeo.echouees.length.toLocaleString('fr-FR')}</strong>
+                              {' '}référence(s) non interrogée(s) : le lot a échoué après trois
+                              {' '}tentatives, rien ne dit qu'elles manquent au plan.
+                            </>
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSansGeoOuvert((v) => !v)}
+                          className="text-xs font-semibold text-blue-950 underline"
+                        >
+                          {sansGeoOuvert ? 'masquer la liste' : 'voir la liste'}
+                        </button>
+                        {sansGeo.echouees.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={relancerGeocodage}
+                            disabled={!!geoStatus && !geoStatus.termine}
+                            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded bg-blue-950 text-amber-400 disabled:opacity-50"
+                          >
+                            <RotateCcw className="w-3 h-3" />Relancer le géocodage
+                          </button>
+                        )}
+                      </div>
+                      {sansGeoOuvert && (
+                        <div className="mt-3 max-h-52 overflow-y-auto rounded border border-amber-200 bg-white">
+                          <table className="w-full text-xs">
+                            <thead className="bg-stone-50 sticky top-0">
+                              <tr className="text-left text-stone-500">
+                                <th className="px-3 py-1.5 font-medium">Référence</th>
+                                <th className="px-3 py-1.5 font-medium">Commune</th>
+                                <th className="px-3 py-1.5 font-medium">Motif</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {[
+                                ...sansGeo.absentes.map((o) => ({ ...o, motif: 'absente du plan' })),
+                                ...sansGeo.echouees.map((o) => ({ ...o, motif: 'lot en échec' })),
+                              ].map((o) => (
+                                <tr key={`${o.motif}-${o.ref}`} className="border-t border-stone-100">
+                                  <td className="px-3 py-1.5 font-mono text-blue-950">{o.ref}</td>
+                                  <td className="px-3 py-1.5 text-stone-600">{o.commune}</td>
+                                  <td className="px-3 py-1.5 text-stone-500">{o.motif}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
