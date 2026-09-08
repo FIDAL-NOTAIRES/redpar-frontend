@@ -2354,6 +2354,10 @@ export default function App() {
 
   const classerEcart = (o) => {
     if (!o._planLu) return 'attente';
+    // Un lot d'interrogation en échec n'est PAS une parcelle absente du plan :
+    // on n'en sait rien. La ranger parmi les absentes gonflait le contrôle de
+    // cohérence d'un chiffre qui ne veut rien dire.
+    if (o._lotEchoue) return 'echec';
     if (o._absenteDuPlan || o.contenanceCadastre == null) return 'absente';
     const m = Number(o.contenance || 0);
     const pl = Number(o.contenanceCadastre);
@@ -2381,6 +2385,7 @@ export default function App() {
       mineurs: parClasse('mineur').length,
       notables: parClasse('notable').length,
       absentes: parClasse('absente').length,
+      echecs: parClasse('echec').length,
       attente: parClasse('attente').length,
       ecarts,
     };
@@ -3846,6 +3851,9 @@ export default function App() {
                     {coherence.absentes > 0 && coherence.attente === 0 && (
                       <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
                     )}
+                    {coherence.echecs > 0 && coherence.attente === 0 && (
+                      <div className="text-xs text-amber-700">{coherence.echecs.toLocaleString('fr-FR')} non contrôlée(s) : lot en échec, à relancer</div>
+                    )}
                   </div>
                   <div className="bg-white border border-stone-200 rounded-lg p-4">
                     <div className="text-xs text-stone-500 mb-1">Géocodage</div>
@@ -3939,6 +3947,7 @@ export default function App() {
                         )}
                       </div>
                       {sansGeoOuvert && (
+                        <>
                         <div className="mt-3 max-h-52 overflow-y-auto rounded border border-amber-200 bg-white">
                           <table className="w-full text-xs">
                             <thead className="bg-stone-50 sticky top-0">
@@ -3946,22 +3955,48 @@ export default function App() {
                                 <th className="px-3 py-1.5 font-medium">Référence</th>
                                 <th className="px-3 py-1.5 font-medium">Commune</th>
                                 <th className="px-3 py-1.5 font-medium">Motif</th>
+                                <th className="px-3 py-1.5 font-medium">Vérifier</th>
                               </tr>
                             </thead>
                             <tbody>
                               {[
                                 ...sansGeo.absentes.map((o) => ({ ...o, motif: 'absente du plan' })),
                                 ...sansGeo.echouees.map((o) => ({ ...o, motif: 'lot en échec' })),
-                              ].map((o) => (
-                                <tr key={`${o.motif}-${o.ref}`} className="border-t border-stone-100">
-                                  <td className="px-3 py-1.5 font-mono text-blue-950">{o.ref}</td>
-                                  <td className="px-3 py-1.5 text-stone-600">{o.commune}</td>
-                                  <td className="px-3 py-1.5 text-stone-500">{o.motif}</td>
-                                </tr>
-                              ))}
+                              ].map((o) => {
+                                // Sans contour, PAINT ne peut ni recentrer ni colorier : on
+                                // pointe l'extrait officiel au 1/1000 A4, qui s'ouvre quand
+                                // même et permet de lever la référence sur pièce.
+                                const extrait = lienExtraitCadastral(o.ref, null);
+                                return (
+                                  <tr key={`${o.motif}-${o.ref}`} className="border-t border-stone-100">
+                                    <td className="px-3 py-1.5 font-mono text-blue-950">{o.ref}</td>
+                                    <td className="px-3 py-1.5 text-stone-600">{o.commune}</td>
+                                    <td className="px-3 py-1.5 text-stone-500">{o.motif}</td>
+                                    <td className="px-3 py-1.5">
+                                      {extrait && (
+                                        <a
+                                          href={extrait}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-blue-950 font-semibold underline whitespace-nowrap"
+                                        >
+                                          Extrait DGFiP ↗
+                                        </a>
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>
+                        <p className="mt-2 text-[11px] text-stone-500">
+                          L'extrait est édité au 1/1000 sur A4 et sans colorisation : faute de
+                          contour, PAINT ne peut ni choisir l'échelle ni peindre la parcelle.
+                          À ouvrir une référence à la fois — le service de consultation du plan
+                          est limité en débit et refuserait une édition en masse.
+                        </p>
+                        </>
                       )}
                     </div>
                   )}
