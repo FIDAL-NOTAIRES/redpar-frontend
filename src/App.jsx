@@ -2787,7 +2787,24 @@ export default function App() {
   // Fabrique d'onglet à la charte FIDAL, partagée par les deux volets : même
   // bandeau, même ligne de sujet, mêmes en-têtes navy et or, même filtre
   // automatique. Un seul endroit à corriger le jour où la charte bouge.
-  const ajouterOnglet = (wb, { nom, headers, widths, sujet, lignes, remplir, aligner }) => {
+  // ⚠ DEUX PLAFONDS D'EXCEL SUR LES LIENS HYPERTEXTE (23/09/2026). Excel refuse
+  // d'ouvrir — ou « répare » en vidant la feuille de ses liens — un classeur qui
+  // dépasse l'un des deux :
+  //  1. 65 530 liens hypertexte PAR FEUILLE. « Tous les biens » empile parcelles
+  //     et locaux avec QUATRE colonnes de liens : au-delà de 16 380 lignes, le
+  //     plafond est crevé (17 087 lignes × 4 = 68 348). C'est ce qui a rendu
+  //     l'export « tout » inouvrable depuis l'ajout de la colonne « Plan annoté ».
+  //  2. ~2 080 caractères par lien. Un lien PAINT avec contour peut s'en approcher
+  //     (l'onglet des assiettes se protégeait déjà, pas les autres).
+  // Les liens en trop deviennent du TEXTE « voir à l'écran », colonne par colonne
+  // dans l'ordre de sacrifice indiqué par l'appelant (la moins utile d'abord),
+  // jamais ligne par ligne : toutes les lignes gardent les mêmes colonnes actives.
+  const EXCEL_MAX_LIENS_FEUILLE = 65000;   // marge sous le plafond de 65 530
+  const EXCEL_MAX_CARS_LIEN = 2000;        // marge sous le plafond de ~2 080
+  const VOIR_ECRAN = 'voir à l\'écran';
+  const POLICE_VOIR_ECRAN = { name: 'Calibri', size: 9, italic: true, color: { argb: 'FF6B7280' } };
+
+  const ajouterOnglet = (wb, { nom, headers, widths, sujet, lignes, remplir, aligner, ordreSacrifice }) => {
     const numCols = headers.length;
     const ws = wb.addWorksheet(nom, { views: [{ state: 'frozen', ySplit: 3 }] });
     ws.columns = widths.map((w) => ({ width: w }));
@@ -2840,6 +2857,14 @@ export default function App() {
     headerRow.height = Math.max(24, lignesEntete * 14 + 10);
 
     const navy = { name: 'Calibri', size: 10, color: { argb: 'FF0F2238' } };
+    const estLien = (v) => v && typeof v === 'object' && typeof v.hyperlink === 'string';
+    const enTexte = (cell) => {
+      cell.value = VOIR_ECRAN;
+      cell.font = POLICE_VOIR_ECRAN;
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+    };
+    const liensParColonne = new Array(numCols + 1).fill(0);
+    let liensTropLongs = 0;
     lignes.forEach((item, i) => {
       const row = ws.getRow(i + 4);
       remplir(row, item, i);
@@ -2850,8 +2875,40 @@ export default function App() {
         if (a.nombre) { cell.alignment = { horizontal: 'right', vertical: 'middle' }; cell.numFmt = '#,##0'; }
         else if (a.centre) cell.alignment = { horizontal: 'center', vertical: 'middle' };
         else cell.alignment = { vertical: 'middle' };
+        // Plafond 2 : un lien trop long ferait « réparer » le classeur.
+        if (estLien(cell.value)) {
+          if (cell.value.hyperlink.length > EXCEL_MAX_CARS_LIEN) { enTexte(cell); liensTropLongs++; }
+          else liensParColonne[c]++;
+        }
       }
     });
+
+    // Plafond 1 : trop de liens sur la feuille. On retire des colonnes ENTIÈRES,
+    // dans l'ordre de sacrifice, jusqu'à repasser sous la marge.
+    let total = liensParColonne.reduce((t, n) => t + n, 0);
+    const sacrifiees = [];
+    if (total > EXCEL_MAX_LIENS_FEUILLE) {
+      const ordre = (ordreSacrifice && ordreSacrifice.length)
+        ? ordreSacrifice
+        : headers.map((_, k) => numCols - k);   // défaut : dernière colonne d'abord
+      for (const c of ordre) {
+        if (total <= EXCEL_MAX_LIENS_FEUILLE) break;
+        if (!liensParColonne[c]) continue;
+        for (let i = 0; i < lignes.length; i++) {
+          const cell = ws.getRow(i + 4).getCell(c);
+          if (estLien(cell.value)) enTexte(cell);
+        }
+        total -= liensParColonne[c];
+        liensParColonne[c] = 0;
+        sacrifiees.push(headers[c - 1]);
+      }
+    }
+    if (sacrifiees.length || liensTropLongs) {
+      const avert = [];
+      if (sacrifiees.length) avert.push(`Excel plafonne à 65 530 liens par feuille : colonne(s) « ${sacrifiees.join(' », « ')} » livrée(s) sans lien (voir à l'écran)`);
+      if (liensTropLongs) avert.push(`${liensTropLongs} lien(s) trop long(s) pour Excel remplacé(s) par « voir à l'écran »`);
+      sujetCell.value = `${sujet}  |  ⚠ ${avert.join('  |  ')}`;
+    }
 
     ws.autoFilter = { from: { row: 3, column: 1 }, to: { row: 3 + lignes.length, column: numCols } };
     return ws;
@@ -2936,6 +2993,10 @@ export default function App() {
           widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
           sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
           lignes: tousBiens,
+          // Au-delà du plafond Excel, on lâche d'abord la vue aérienne, puis le
+          // plan annoté, puis l'extrait brut ; « Colorier » — l'outil de travail,
+          // celui d'où part l'utilisateur — est le dernier à céder.
+          ordreSacrifice: [16, 19, 17, 18],
           aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13 || c === 15,
             nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
           remplir: (row, o, i) => {
@@ -3025,6 +3086,7 @@ export default function App() {
             + `${coherence.controlees} parcelle(s) contrôlée(s)  |  ${coherence.concordantes} concordante(s)`
             + `  |  Matrice DGFiP contre plan cadastral (version Etalab)  |  Écart notable au-delà de 2 m² ou 1 %`,
           lignes: coherence.ecarts,
+          ordreSacrifice: [12, 15, 13, 14],
           aligner: (c) => ({ centre: c === 1 || c === 2, nombre: c >= 7 && c <= 10, styleLibre: c >= 12 }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
@@ -3218,6 +3280,7 @@ export default function App() {
         ['Contrôle de cohérence', `La contenance figure dans deux produits DGFiP distincts, mis à jour par des chaînes différentes : la matrice, qui porte la propriété, et le plan cadastral, qui porte la géométrie. Résultat sur ce relevé : ${coherence.concordantes} parcelle(s) concordante(s), ${coherence.notables} écart(s) notable(s), ${coherence.mineurs} écart(s) mineur(s), ${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s). Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Rappel : la contenance cadastrale n'est qu'indicative, seul un arpentage fait foi.`],
         ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
         ...(assiettes.length ? [['Assiettes de copropriété', `${assiettes.length} parcelle(s) où la société ne détient que des lots (onglet dédié). Le sol d'une copropriété n'est pas au compte de chaque copropriétaire : il est au syndicat des copropriétaires quand celui-ci est recensé au fichier des parcelles (groupe de personne « copropriétaires »), sinon aux copropriétaires eux-mêmes, hors fichier lorsqu'ils sont des personnes physiques. La parcelle d'assiette vient du fichier des locaux ; sa contenance est celle du PLAN cadastral ; elle n'entre pas dans la surface du portefeuille. Lorsque le syndicat est recensé, l'assiette entière est reconstituée comme l'unité foncière du syndicat contenant la parcelle du lot. La source ne donne ni numéro de lot d'EDD ni tantièmes : la désignation du lot reste au relevé de propriété ou au règlement de copropriété.`]] : []),
+        ['Plafonds Excel', "Excel n'accepte pas plus de 65 530 liens hypertexte par feuille ni de lien de plus d'environ 2 080 caractères ; au-delà, le classeur ne s'ouvre pas ou se « répare » en perdant ses liens. Sur un portefeuille très étendu, certaines colonnes de liens de la feuille « Tous les biens » sont donc livrées en texte « voir à l'écran » (l'avertissement figure dans la ligne de titre de la feuille) : les liens restent disponibles dans REDPAR, et dans les feuilles « Parcelles » et « Locaux », qui n'en portent qu'une colonne."],
         ['Liens cartographiques', (() => {
           const tousDont = [...parcelles, ...locaux];
           const localises = tousDont.filter((o) => o.coordonnees).length;
