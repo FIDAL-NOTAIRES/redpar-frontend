@@ -3009,7 +3009,7 @@ export default function App() {
         const nomsPris = new Set(['Sommaire', 'Écarts de contenance', 'Parcelles', 'Locaux',
           'Assiettes de copropriété', 'Sources et limites']);
         const nomOnglet = (g) => {
-          const propre = (s) => String(s || '').replace(/[\[\]:*?\/\\]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '');
+          const propre = (s) => String(s || '').replace(/[\[\]:*?\/\\"]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '');
           let base = propre(g.commune) || propre(g.codeInsee) || 'Commune';
           let nom = base.slice(0, 31);
           if (nomsPris.has(nom)) {
@@ -3049,9 +3049,14 @@ export default function App() {
             row.getCell(7).value = g.nbLocaux;
             row.getCell(8).value = g.surface || '';
             row.getCell(9).value = g.nbEcarts;
-            // Lien INTERNE vers l'onglet : l'apostrophe se double dans la référence.
+            // Lien INTERNE vers l'onglet, par la FORMULE LIEN_HYPERTEXTE et non par
+            // un objet { text, hyperlink } : pour une cible « #'Feuille'!A4 »,
+            // ExcelJS écrit une relation externe dont la cible n'est pas une URI,
+            // et Excel « répare » le classeur en supprimant tous les liens de la
+            // feuille (constaté le 23/09/2026). La formule ne crée aucune relation.
+            // L'apostrophe se double dans la référence de feuille.
             const cell = row.getCell(10);
-            cell.value = { text: 'Ouvrir', hyperlink: `#'${g.onglet.replace(/'/g, "''")}'!A4` };
+            cell.value = { formula: `HYPERLINK("#'${g.onglet.replace(/'/g, "''")}'!A4","Ouvrir")`, result: 'Ouvrir' };
             cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
             cell.alignment = { horizontal: 'center', vertical: 'middle' };
           },
