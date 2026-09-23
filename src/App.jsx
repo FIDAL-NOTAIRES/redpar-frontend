@@ -2984,18 +2984,108 @@ export default function App() {
         const BEIGE_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5EDD3' } };
         const CYAN_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFDFF1F3' } };
         const NAVY_TEXTE = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF0F2238' } };
-        ajouterOnglet(wb, {
-          nom: 'Tous les biens',
+
+        // ⚠ UNE FEUILLE PAR COMMUNE (décision JFD du 23/09/2026). L'ancienne
+        // feuille unique « Tous les biens » crevait le plafond Excel de 65 530
+        // liens par feuille dès 16 380 lignes (quatre colonnes de liens), et le
+        // classeur ne s'ouvrait plus. Répartir par commune garde les quatre
+        // liens partout ; la vue d'ensemble passe dans une feuille « Sommaire »
+        // en tête, une ligne par commune, avec un lien interne vers son onglet.
+        const cleCommune = (o) => o.codeInsee || (o.commune || '').toUpperCase() || '?';
+        const groupes = new Map();
+        tousBiens.forEach((o) => {
+          const k = cleCommune(o);
+          if (!groupes.has(k)) groupes.set(k, { cle: k, commune: o.commune || '', codeInsee: o.codeInsee || '',
+            departement: o.departement || '', region: o.region || '', lignes: [] });
+          groupes.get(k).lignes.push(o);
+        });
+        const communes = [...groupes.values()].sort((a, b) =>
+          a.departement.localeCompare(b.departement, 'fr') || a.commune.localeCompare(b.commune, 'fr')
+          || a.codeInsee.localeCompare(b.codeInsee));
+
+        // Nom d'onglet Excel : 31 caractères au plus, sans [ ] : * ? / \ ni
+        // apostrophe en tête ou en queue, unique dans le classeur. En cas
+        // d'homonymie (communes de départements différents), suffixe INSEE.
+        const nomsPris = new Set(['Sommaire', 'Écarts de contenance', 'Parcelles', 'Locaux',
+          'Assiettes de copropriété', 'Sources et limites']);
+        const nomOnglet = (g) => {
+          const propre = (s) => String(s || '').replace(/[\[\]:*?\/\\]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '');
+          let base = propre(g.commune) || propre(g.codeInsee) || 'Commune';
+          let nom = base.slice(0, 31);
+          if (nomsPris.has(nom)) {
+            const suf = ` ${g.codeInsee || nomsPris.size}`;
+            nom = base.slice(0, 31 - suf.length) + suf;
+          }
+          let n = 2;
+          while (nomsPris.has(nom)) { const suf = ` (${n++})`; nom = base.slice(0, 31 - suf.length) + suf; }
+          nomsPris.add(nom);
+          return nom;
+        };
+        communes.forEach((g) => { g.onglet = nomOnglet(g); });
+
+        // --- Feuille 1 : SOMMAIRE, une ligne par commune ---
+        const ecartsDe = (g) => coherence.ecarts.filter((e) => cleCommune(e) === g.cle).length;
+        communes.forEach((g) => {
+          g.nbParcelles = g.lignes.filter((o) => !o._bati).length;
+          g.nbLocaux = g.lignes.filter((o) => o._bati).length;
+          g.surface = g.lignes.reduce((t, o) => t + (o._surfaceASommer || 0), 0);
+          g.nbEcarts = ecartsDe(g);
+        });
+        const wsS = ajouterOnglet(wb, {
+          nom: 'Sommaire',
+          headers: ['#', 'Commune', 'Code INSEE', 'Département', 'Région',
+            'Lignes non bâti', 'Lignes bâti', 'Surface à sommer (m²)', 'Écarts de contenance', 'Feuille'],
+          widths: [5, 30, 12, 20, 22, 14, 12, 20, 18, 16],
+          sujet: sujet(`bien(s) répartis sur ${communes.length} commune(s) — une feuille par commune, ● non bâti, ■ bâti`, tousBiens.length),
+          lignes: communes,
+          aligner: (c) => ({ centre: c === 1 || c === 3, nombre: c >= 6 && c <= 9, styleLibre: c === 10 }),
+          remplir: (row, g, i) => {
+            row.getCell(1).value = i + 1;
+            row.getCell(2).value = g.commune;
+            row.getCell(3).value = g.codeInsee;
+            row.getCell(4).value = g.departement;
+            row.getCell(5).value = g.region;
+            row.getCell(6).value = g.nbParcelles;
+            row.getCell(7).value = g.nbLocaux;
+            row.getCell(8).value = g.surface || '';
+            row.getCell(9).value = g.nbEcarts;
+            // Lien INTERNE vers l'onglet : l'apostrophe se double dans la référence.
+            const cell = row.getCell(10);
+            cell.value = { text: 'Ouvrir', hyperlink: `#'${g.onglet.replace(/'/g, "''")}'!A4` };
+            cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
+            cell.alignment = { horizontal: 'center', vertical: 'middle' };
+          },
+        });
+        // Ligne de total sous le sommaire.
+        const rT = wsS.getRow(4 + communes.length);
+        const gras = { name: 'Calibri', size: 10, bold: true, color: { argb: 'FF0F2238' } };
+        rT.getCell(2).value = 'TOTAL';
+        rT.getCell(6).value = communes.reduce((t, g) => t + g.nbParcelles, 0);
+        rT.getCell(7).value = communes.reduce((t, g) => t + g.nbLocaux, 0);
+        rT.getCell(8).value = communes.reduce((t, g) => t + g.surface, 0);
+        rT.getCell(9).value = communes.reduce((t, g) => t + g.nbEcarts, 0);
+        for (let c = 1; c <= 10; c++) {
+          const cell = rT.getCell(c);
+          cell.font = gras;
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF5EDD3' } };
+          cell.border = { top: { style: 'medium', color: { argb: 'FF0F2238' } } };
+          if (c >= 6 && c <= 9) { cell.alignment = { horizontal: 'right', vertical: 'middle' }; cell.numFmt = '#,##0'; }
+        }
+
+        // --- Feuilles suivantes : UNE PAR COMMUNE, colonnes de l'ancienne
+        // feuille « Tous les biens », tri par référence cadastrale ---
+        communes.forEach((g) => ajouterOnglet(wb, {
+          nom: g.onglet,
           headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
             'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
             'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit',
             'Unité foncière', 'Vue aérienne', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
           widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
-          sujet: sujet('bien(s) — ● non bâti, ■ bâti', tousBiens.length),
-          lignes: tousBiens,
-          // Au-delà du plafond Excel, on lâche d'abord la vue aérienne, puis le
-          // plan annoté, puis l'extrait brut ; « Colorier » — l'outil de travail,
-          // celui d'où part l'utilisateur — est le dernier à céder.
+          sujet: sujet(`bien(s) à ${g.commune}${g.codeInsee ? ` (INSEE ${g.codeInsee})` : ''}${g.departement ? ` — ${g.departement}` : ''} — ● non bâti, ■ bâti`, g.lignes.length),
+          lignes: g.lignes,
+          // Au-delà du plafond Excel (improbable sur une seule commune), on lâche
+          // d'abord la vue aérienne, puis le plan annoté, puis l'extrait brut ;
+          // « Colorier » — l'outil de travail — est le dernier à céder.
           ordreSacrifice: [16, 19, 17, 18],
           aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13 || c === 15,
             nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
@@ -3069,7 +3159,7 @@ export default function App() {
               cellAn.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cellAn.value = '';
           },
-        });
+        }));
       }
 
       // --- Onglet 2 : la liste courte des écarts de contenance ---
@@ -3270,7 +3360,7 @@ export default function App() {
         ['Portée', "Donnée de pré-contrôle. Seul le relevé de propriété ou l'état hypothécaire fait foi."],
         ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
-        ['Feuille « Tous les biens »', "Tri par défaut : commune, puis référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
+        ['Feuilles « Sommaire » et feuilles par commune', "La première feuille récapitule le portefeuille commune par commune (lignes de non bâti et de bâti, surface à sommer, écarts de contenance) et ouvre chaque onglet communal par le lien « Ouvrir ». Chaque commune a ensuite sa feuille, bâti et non bâti confondus, triée par référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
         ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export. Lorsque le contour est connu, l'échelle, le format et, s'il y a lieu, une rotation de la zone d'impression sont choisis pour que la parcelle tienne au plus près du 1/1000 ; la rotation n'est appliquée que si elle permet une échelle plus fine, et le plan porte alors sa flèche du nord inclinée d'autant. Les échelles vont du 1/1000 au 1/5000, plafond du service."],
         ['Unités foncières', `Une unité foncière est, au sens de la jurisprudence administrative, l'îlot de propriété d'un seul tenant appartenant au même propriétaire. Le regroupement est calculé sur les contours du plan cadastral : deux parcelles sont réunies lorsqu'elles partagent au moins deux sommets, donc une limite commune — un simple contact par un angle ne suffit pas. Résultat sur ce relevé : ${unitesF ? `${unitesF.unites.length} unité(s), dont ${unitesF.groupees} d'un seul tenant de plusieurs parcelles et ${unitesF.isolees} isolée(s)` : 'non calculé, faute de contours chargés'}. LIMITE ESSENTIELLE : ce relevé ne connaît que les parcelles de la société interrogée. Une parcelle voisine appartenant au même propriétaire mais détenue sous un autre SIREN, ou par une personne physique, n'y figure pas et n'a donc pas été regroupée. L'unité indiquée est l'unité au sein du portefeuille, non l'unité foncière au sens plein.`],
@@ -3280,7 +3370,7 @@ export default function App() {
         ['Contrôle de cohérence', `La contenance figure dans deux produits DGFiP distincts, mis à jour par des chaînes différentes : la matrice, qui porte la propriété, et le plan cadastral, qui porte la géométrie. Résultat sur ce relevé : ${coherence.concordantes} parcelle(s) concordante(s), ${coherence.notables} écart(s) notable(s), ${coherence.mineurs} écart(s) mineur(s), ${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s). Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Rappel : la contenance cadastrale n'est qu'indicative, seul un arpentage fait foi.`],
         ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
         ...(assiettes.length ? [['Assiettes de copropriété', `${assiettes.length} parcelle(s) où la société ne détient que des lots (onglet dédié). Le sol d'une copropriété n'est pas au compte de chaque copropriétaire : il est au syndicat des copropriétaires quand celui-ci est recensé au fichier des parcelles (groupe de personne « copropriétaires »), sinon aux copropriétaires eux-mêmes, hors fichier lorsqu'ils sont des personnes physiques. La parcelle d'assiette vient du fichier des locaux ; sa contenance est celle du PLAN cadastral ; elle n'entre pas dans la surface du portefeuille. Lorsque le syndicat est recensé, l'assiette entière est reconstituée comme l'unité foncière du syndicat contenant la parcelle du lot. La source ne donne ni numéro de lot d'EDD ni tantièmes : la désignation du lot reste au relevé de propriété ou au règlement de copropriété.`]] : []),
-        ['Plafonds Excel', "Excel n'accepte pas plus de 65 530 liens hypertexte par feuille ni de lien de plus d'environ 2 080 caractères ; au-delà, le classeur ne s'ouvre pas ou se « répare » en perdant ses liens. Sur un portefeuille très étendu, certaines colonnes de liens de la feuille « Tous les biens » sont donc livrées en texte « voir à l'écran » (l'avertissement figure dans la ligne de titre de la feuille) : les liens restent disponibles dans REDPAR, et dans les feuilles « Parcelles » et « Locaux », qui n'en portent qu'une colonne."],
+        ['Plafonds Excel', "Excel n'accepte pas plus de 65 530 liens hypertexte par feuille ni de lien de plus d'environ 2 080 caractères ; au-delà, le classeur ne s'ouvre pas ou se « répare » en perdant ses liens. C'est pourquoi les biens sont répartis en une feuille par commune plutôt que sur une feuille unique. Si une seule feuille dépassait encore le plafond, certaines de ses colonnes de liens seraient livrées en texte « voir à l'écran » (l'avertissement figure alors dans sa ligne de titre) ; les liens restent disponibles dans REDPAR."],
         ['Liens cartographiques', (() => {
           const tousDont = [...parcelles, ...locaux];
           const localises = tousDont.filter((o) => o.coordonnees).length;
