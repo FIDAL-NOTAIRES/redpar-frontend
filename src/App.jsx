@@ -1844,6 +1844,51 @@ export default function App() {
   const [carteSel, setCarteSel] = useState(() => new Set());
   const [carteDepliees, setCarteDepliees] = useState(() => new Set());
   const [communesDepliees, setCommunesDepliees] = useState(false);
+  // Détail des parcelles et des locaux REPLIÉS par défaut — demandé par JFD le
+  // 28/09/2026 : sur un gros portefeuille les deux tableaux noyaient la page.
+  // Taper dans leur champ de recherche les déplie.
+  const [parcellesDepliees, setParcellesDepliees] = useState(false);
+  const [locauxDeplies, setLocauxDeplies] = useState(false);
+  // Communes dépliables à l'intérieur des deux tableaux de détail — demandé
+  // par JFD le 28/09/2026. Toutes repliées au départ ; dépliées d'office quand
+  // une recherche est tapée (on veut voir les résultats) ou quand le relevé ne
+  // porte que sur une commune (le clic ne servirait à rien).
+  const [communesParcOuvertes, setCommunesParcOuvertes] = useState(() => new Set());
+  const [communesLocOuvertes, setCommunesLocOuvertes] = useState(() => new Set());
+  // Regroupe une liste DÉJÀ FILTRÉE ET TRIÉE par commune (code INSEE en tête de
+  // la référence, qui départage les homonymes) : une ligne d'en-tête cliquable
+  // par commune, puis ses lignes dans l'ordre du tri choisi. Les communes sont
+  // classées par ordre alphabétique. La numérotation repart à 1 par commune.
+  const rangsParCommune = (liste, ouvertes, setOuvertes, forcer, compter, rendre) => {
+    const groupes = new Map();
+    liste.forEach((o) => {
+      const r = String(o.codeParcelle || '');
+      const cle = r.length === 14 ? r.slice(0, 5) : (o.commune || '—');
+      if (!groupes.has(cle)) groupes.set(cle, { cle, nom: o.commune || cle, dep: o.departement || '', lignes: [] });
+      groupes.get(cle).lignes.push(o);
+    });
+    const tries = [...groupes.values()].sort((a, b) => a.nom.localeCompare(b.nom, 'fr') || a.cle.localeCompare(b.cle));
+    const toutOuvert = forcer || tries.length === 1;
+    const basculer = (cle) => setOuvertes((s) => {
+      const n = new Set(s);
+      if (n.has(cle)) n.delete(cle); else n.add(cle);
+      return n;
+    });
+    return tries.flatMap((g) => {
+      const ouverte = toutOuvert || ouvertes.has(g.cle);
+      const tete = (
+        <tr key={'commune-' + g.cle} onClick={() => basculer(g.cle)}
+          className="bg-stone-100 border-b border-stone-200 cursor-pointer hover:bg-stone-200 select-none">
+          <td colSpan={99} className="px-4 py-2 text-sm">
+            <span className="inline-block w-4 text-blue-950">{ouverte ? '▾' : '▸'}</span>
+            <span className="font-semibold text-blue-950">{g.nom}</span>
+            <span className="text-xs text-stone-500"> ({g.cle}{g.dep ? ` · ${g.dep}` : ''}) — {compter(g.lignes.length)}</span>
+          </td>
+        </tr>
+      );
+      return ouverte ? [tete, ...g.lignes.map((o, i) => rendre(o, i))] : [tete];
+    });
+  };
   const [qCarteCommune, setQCarteCommune] = useState('');
   // Dossier complet : un document PAR COMMUNE pour TOUT le relevé (filtré),
   // communes triées alphabétiquement, parcelles triées section puis numéro.
@@ -4220,7 +4265,8 @@ export default function App() {
                                           href={extrait}
                                           target="_blank"
                                           rel="noreferrer"
-                                          className="text-blue-950 font-semibold underline whitespace-nowrap"
+                                          className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90"
+                                          style={{ backgroundColor: '#0F2238' }}
                                         >
                                           Extrait DGFiP ↗
                                         </a>
@@ -4361,7 +4407,7 @@ export default function App() {
                                   {lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle)) && (
                                     <a href={lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle))} target="_blank" rel="noreferrer"
                                       title="Ouvre PAINT pour confronter l'écart au plan, parcelle déjà coloriée"
-                                      className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
+                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
                                   )}
                                 </td>
                               </tr>
@@ -4466,7 +4512,7 @@ export default function App() {
                                   {lienUnite && (
                                     <a href={lienUnite} target="_blank" rel="noreferrer"
                                       title={refsUnite.length >= 2 ? "Plan de l'assiette entière, toutes parcelles coloriées" : 'Plan de la parcelle d\'assiette, coloriée'}
-                                      className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
+                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
                                   )}
                                 </td>
                               </tr>
@@ -4775,9 +4821,14 @@ export default function App() {
 
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+                    <button onClick={() => setParcellesDepliees((v) => !v)} title={parcellesDepliees ? "Replier" : "Déplier"}
+                      className="w-6 h-6 flex items-center justify-center rounded text-blue-950 hover:bg-stone-100 text-sm">
+                      {parcellesDepliees ? '▾' : '▸'}
+                    </button>
                     <MapPin className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950">Détail des parcelles</h3>
-                    <input value={qParcelles} onChange={(e) => setQParcelles(e.target.value)}
+                    <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setParcellesDepliees((v) => !v)}>Détail des parcelles</h3>
+                    {!parcellesDepliees && <span className="text-xs text-stone-500">({parcelles.length.toLocaleString('fr-FR')} ligne(s) — cliquer pour déplier)</span>}
+                    <input value={qParcelles} onChange={(e) => { setQParcelles(e.target.value); setParcellesDepliees(true); }}
                       placeholder="Rechercher : commune, adresse, référence, droit..."
                       className="ml-2 px-3 py-1.5 text-sm border border-stone-300 rounded-lg w-72 focus:outline-none focus:border-blue-900" />
                     {qParcelles && (
@@ -4797,6 +4848,7 @@ export default function App() {
                       Dossier complet
                     </button>
                   </div>
+                  {parcellesDepliees && (
                   <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                     <table className="w-full text-sm">
                       <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
@@ -4817,7 +4869,7 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {parcellesAffichees.map((p, i) => {
+                        {rangsParCommune(parcellesAffichees, communesParcOuvertes, setCommunesParcOuvertes, !!qParcelles, (n) => `${n.toLocaleString('fr-FR')} ligne${n > 1 ? 's' : ''}`, (p, i) => {
                           const link = lienVueAerienne(p.codeParcelle, p.commune,
                               contours?.get(p.codeParcelle), p.contenance, null, p.adresse)
                             || buildSatelliteLink(p.coordonnees);
@@ -4866,13 +4918,13 @@ export default function App() {
                                         la ligne par parcelle porte quatre liens. L'entrée la plus
                                         naturelle vers le multi-parcelles était donc la plus pauvre.
                                         Mêmes suffixes que le plan à la carte, aucun calcul nouveau. */}
-                                      <div className="mt-0.5 flex gap-1.5 justify-center">
+                                      <div className="mt-1 flex gap-1 justify-center">
                                         <a href={`${lienU}&fond=ortho&trace=rond&cadre=contexte`} target="_blank" rel="noreferrer"
                                           title="Vue aérienne de l'unité entière, un repère sur l'ensemble"
-                                          className="text-[10px] underline" style={{ color: '#0F2238' }}>aérienne</a>
+                                          className="inline-block px-1.5 py-0.5 text-[10px] font-semibold text-white rounded whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#1E3A8A' }}>aérienne</a>
                                         <a href={`${lienU}&doc=1${suffixeDossier}${suffixeBati(u.membres, batiParRef)}${suffixePP(u.membres, contours)}`} target="_blank" rel="noreferrer"
                                           title="Document deux pages de l'unité entière"
-                                          className="text-[10px] underline" style={{ color: '#33838B' }}>doc</a>
+                                          className="inline-block px-1.5 py-0.5 text-[10px] font-semibold text-white rounded whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#33838B' }}>doc</a>
                                       </div>
                                     </>
                                   );
@@ -4880,28 +4932,28 @@ export default function App() {
                               </td>
                               <td className="px-4 py-3 text-center">
                                 {link && (
-                                  <a href={link} target="_blank" rel="noreferrer" className="text-blue-900 hover:text-blue-700 underline text-xs font-medium">Voir</a>
+                                  <a href={link} target="_blank" rel="noreferrer" className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#1E3A8A' }}>Voir</a>
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
                                 {lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle)) && (
                                   <a href={lienPaintColorise(p.codeParcelle, p.commune, contours?.get(p.codeParcelle))} target="_blank" rel="noreferrer"
                                     title="Ouvre PAINT : extrait cadastral officiel généré et parcelle coloriée"
-                                    className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
+                                    className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
                                 {lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse) && (
                                   <a href={lienPaintAnnote(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse)} target="_blank" rel="noreferrer"
                                     title="Plan colorié ET annoté : désignation cadastrale et contenance en hectares, ares, centiares portées sous le titre"
-                                    className="underline text-xs font-semibold" style={{ color: '#0F2238' }}>Annoté</a>
+                                    className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#0F2238' }}>Annoté</a>
                                 )}
                               </td>
                               <td className="px-4 py-3 text-center">
                                 {lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) && (
                                   <a href={lienDocument(p.codeParcelle, p.commune, contours?.get(p.codeParcelle), p.contenance, null, p.adresse, batiParRef, contours) + suffixeDossier} target="_blank" rel="noreferrer"
                                     title="Un seul PDF en deux pages : le plan cadastral colorié et annoté, puis la vue aérienne. Ouvre PAINT, contrôlez le plan, puis cliquez « Document 2 pages »."
-                                    className="underline text-xs font-semibold" style={{ color: '#33838B' }}>Document</a>
+                                    className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#33838B' }}>Document</a>
                                 )}
                               </td>
                             </tr>
@@ -4910,14 +4962,20 @@ export default function App() {
                       </tbody>
                     </table>
                   </div>
+                  )}
                 </div>
 
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+                    <button onClick={() => setLocauxDeplies((v) => !v)} title={locauxDeplies ? "Replier" : "Déplier"}
+                      className="w-6 h-6 flex items-center justify-center rounded text-blue-950 hover:bg-stone-100 text-sm">
+                      {locauxDeplies ? '▾' : '▸'}
+                    </button>
                     <Building2 className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950">Détail des locaux</h3>
+                    <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setLocauxDeplies((v) => !v)}>Détail des locaux</h3>
+                    {!locauxDeplies && !locauxLoading && <span className="text-xs text-stone-500">({locaux.length.toLocaleString('fr-FR')} ligne(s) — cliquer pour déplier)</span>}
                     <span className="text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Volet bâti — millésime {millesime}</span>
-                    <input value={qLocaux} onChange={(e) => setQLocaux(e.target.value)}
+                    <input value={qLocaux} onChange={(e) => { setQLocaux(e.target.value); setLocauxDeplies(true); }}
                       placeholder="Rechercher : commune, adresse, référence..."
                       className="ml-2 px-3 py-1.5 text-sm border border-stone-300 rounded-lg w-64 focus:outline-none focus:border-blue-900" />
                     <div className="flex rounded-lg overflow-hidden border border-stone-300 text-xs">
@@ -4935,6 +4993,7 @@ export default function App() {
                     )}
                   </div>
 
+                  {locauxDeplies && (<>
                   {locauxLoading && (
                     <div className="px-6 py-8 flex items-center justify-center gap-2 text-sm text-blue-950">
                       <Loader2 className="w-4 h-4 text-amber-500 animate-spin" />Relevé du bâti en cours...
@@ -4989,7 +5048,7 @@ export default function App() {
                           </thead>
                           <tbody>
                             {locauxGroupes
-                              ? immeublesAffiches.map((im, i) => (
+                              ? rangsParCommune(immeublesAffiches, communesLocOuvertes, setCommunesLocOuvertes, !!qLocaux, (n) => `${n.toLocaleString('fr-FR')} immeuble${n > 1 ? 's' : ''}`, (im, i) => (
                                 <tr key={(im.codeParcelle || '') + '-g' + i} className="border-b border-stone-100 hover:bg-stone-50">
                                   <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
                                   <td className="px-4 py-3 text-blue-950">{im.commune}</td>
@@ -5002,12 +5061,12 @@ export default function App() {
                                     {lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle)) && (
                                       <a href={lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle))} target="_blank" rel="noreferrer"
                                         title="Ouvre PAINT : extrait généré et parcelle coloriée"
-                                        className="underline text-xs font-semibold" style={{ color: '#A01040' }}>Colorier</a>
+                                        className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
                                     )}
                                   </td>
                                 </tr>
                               ))
-                              : locauxAffiches.map((l, i) => (
+                              : rangsParCommune(locauxAffiches, communesLocOuvertes, setCommunesLocOuvertes, !!qLocaux, (n) => `${n.toLocaleString('fr-FR')} ${n > 1 ? 'locaux' : 'local'}`, (l, i) => (
                                 <tr key={(l.codeParcelle || '') + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
                                   <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
                                   <td className="px-4 py-3 text-blue-950">{l.commune}</td>
@@ -5025,6 +5084,7 @@ export default function App() {
                       </div>
                     </>
                   )}
+                  </>)}
                 </div>
               </>
             )}
