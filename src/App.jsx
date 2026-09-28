@@ -1880,7 +1880,7 @@ export default function App() {
         <tr key={'commune-' + g.cle} onClick={() => basculer(g.cle)}
           className="bg-stone-100 border-b border-stone-200 cursor-pointer hover:bg-stone-200 select-none">
           <td colSpan={99} className="px-4 py-2 text-sm">
-            <span className="inline-block w-4 text-blue-950">{ouverte ? '▾' : '▸'}</span>
+            <span className="inline-flex align-middle mr-1.5"><ChevronRight className={`w-5 h-5 text-blue-950 transition-transform ${ouverte ? 'rotate-90' : ''}`} strokeWidth={2.5} /></span>
             <span className="font-semibold text-blue-950">{g.nom}</span>
             <span className="text-xs text-stone-500"> ({g.cle}{g.dep ? ` · ${g.dep}` : ''}) — {compter(g.lignes.length)}</span>
           </td>
@@ -3206,19 +3206,26 @@ export default function App() {
         // feuille « Tous les biens », tri par référence cadastrale ---
         communes.forEach((g) => ajouterOnglet(wb, {
           nom: g.onglet,
-          headers: ['#', 'Nature', 'Référence cadastrale', 'Commune', 'Département', 'Région',
-            'Adresse', 'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
-            'Écart (m²)', 'Nature culture', 'Lot bât./ent./niv./porte', 'Droit',
-            'Unité foncière', 'Vue aérienne', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté'],
-          widths: [5, 16, 19, 22, 18, 20, 32, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16],
+          // ⚠ ORDRE ALIGNÉ SUR L'ÉCRAN — décision JFD du 28/09/2026 : Commune,
+          // Adresse, puis référence courte (préfixe, section, numéro), puis la
+          // NATURE DU SOL des locaux détenus sans le sol. La référence complète à
+          // 14 caractères est gardée en DERNIÈRE colonne : d'autres outils du
+          // cabinet (FUSION, acte de TUP) relisent ces exports et s'y appuient.
+          headers: ['#', 'Nature', 'Commune', 'Adresse', 'Référence (préfixe section numéro)', 'Sol',
+            'Département', 'Région',
+            'Surface parcelle (m²)', 'Surface à sommer (m²)', 'Surface plan (m²)',
+            'Écart (m²)', 'Nature culture', 'Local bât./ent./niv./porte', 'Droit',
+            'Unité foncière', 'Vue aérienne', 'Extrait DGFiP', 'Plan colorisé', 'Plan annoté',
+            'Référence complète'],
+          widths: [5, 16, 22, 32, 20, 24, 18, 20, 16, 17, 15, 13, 16, 27, 26, 15, 16, 16, 16, 16, 18],
           sujet: sujet(`bien(s) à ${g.commune}${g.codeInsee ? ` (INSEE ${g.codeInsee})` : ''}${g.departement ? ` — ${g.departement}` : ''} — ● non bâti, ■ bâti`, g.lignes.length),
           lignes: g.lignes,
           // Au-delà du plafond Excel (improbable sur une seule commune), on lâche
           // d'abord la vue aérienne, puis le plan annoté, puis l'extrait brut ;
           // « Colorier » — l'outil de travail — est le dernier à céder.
-          ordreSacrifice: [16, 19, 17, 18],
-          aligner: (c) => ({ centre: c === 1 || c === 12 || c === 13 || c === 15,
-            nombre: c >= 8 && c <= 11, styleLibre: c === 2 || c >= 16 }),
+          ordreSacrifice: [17, 20, 18, 19],
+          aligner: (c) => ({ centre: c === 1 || c === 5 || c === 13 || c === 14 || c === 16,
+            nombre: c >= 9 && c <= 12, styleLibre: c === 2 || (c >= 17 && c <= 20) }),
           remplir: (row, o, i) => {
             row.getCell(1).value = i + 1;
             // Trois marqueurs redondants : couleur, symbole et mot. Le tableau
@@ -3228,34 +3235,39 @@ export default function App() {
             nat.fill = o._bati ? CYAN_FILL : BEIGE_FILL;
             nat.font = NAVY_TEXTE;
             nat.alignment = { horizontal: 'center', vertical: 'middle' };
-            row.getCell(3).value = o.codeParcelle || '';
-            row.getCell(4).value = o.commune || '';
-            row.getCell(5).value = o.departement || '';
-            row.getCell(6).value = o.region || '';
-            row.getCell(7).value = o.adresse || '';
+            row.getCell(3).value = o.commune || '';
+            row.getCell(4).value = o.adresse || '';
+            row.getCell(5).value = refCourte(o.codeParcelle);
+            // Nature du sol, seulement là où la société détient des locaux sans
+            // le sol ; même qualification qu'à l'écran et dans le document.
+            const ns = natureSol(o.codeParcelle);
+            row.getCell(6).value = ns ? LIBELLE_SOL[ns][0] : SANS_OBJET;
+            row.getCell(7).value = o.departement || '';
+            row.getCell(8).value = o.region || '';
+            row.getCell(21).value = o.codeParcelle || '';
             // Un tiret marque le SANS OBJET ; une cellule vide en colonne 9
             // signifie « surface déjà comptée sur une ligne précédente ».
-            row.getCell(8).value = o._bati ? SANS_OBJET : (o.contenance || 0);
-            row.getCell(9).value = o._bati ? SANS_OBJET : (o._surfaceASommer || '');
+            row.getCell(9).value = o._bati ? SANS_OBJET : (o.contenance || 0);
+            row.getCell(10).value = o._bati ? SANS_OBJET : (o._surfaceASommer || '');
             // Contrôle de cohérence : contenance du PLAN et écart avec la matrice.
             const ec = o._bati ? null : ecartDe(o);
-            row.getCell(10).value = o._bati ? SANS_OBJET
+            row.getCell(11).value = o._bati ? SANS_OBJET
               : (o.contenanceCadastre != null ? Number(o.contenanceCadastre) : '');
-            row.getCell(11).value = ec == null ? (o._bati ? SANS_OBJET : '') : ec;
-            row.getCell(12).value = o._bati ? SANS_OBJET : (o.natureCulture || '');
-            row.getCell(13).value = o._bati
+            row.getCell(12).value = ec == null ? (o._bati ? SANS_OBJET : '') : ec;
+            row.getCell(13).value = o._bati ? SANS_OBJET : (o.natureCulture || '');
+            row.getCell(14).value = o._bati
               ? [o.batiment, o.entree, o.niveau, o.porte].filter(Boolean).join(' / ')
               : SANS_OBJET;
-            row.getCell(14).value = o.codeDroit || '';
+            row.getCell(15).value = o.codeDroit || '';
             // Unité foncière : numéro, et nombre de parcelles quand il y en a
             // plusieurs d'un seul tenant. Un tiret pour le bâti et pour les
             // parcelles sans contour, qui n'ont pas pu être regroupées.
             const nU = unitesF?.numero.get(o.codeParcelle);
             const uu = nU ? unitesF.unites[nU - 1] : null;
-            row.getCell(15).value = !uu ? SANS_OBJET
+            row.getCell(16).value = !uu ? SANS_OBJET
               : uu.membres.length > 1 ? `${nU} (${uu.membres.length} parcelles)` : String(nU);
             const lien = lienCarte(o);
-            const cell = row.getCell(16);
+            const cell = row.getCell(17);
             if (lien) {
               cell.value = { text: o.coordonnees ? 'Voir (parcelle)' : 'Voir (adresse)', hyperlink: lien };
               cell.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF33838B' } };
@@ -3266,14 +3278,14 @@ export default function App() {
             // PAINT, qui génère l'extrait ET colorie la parcelle en carmin — c'est
             // l'outil de travail, et c'est de là que part l'utilisateur en pratique.
             const extrait = lienExtraitCadastral(o.codeParcelle, contours?.get(o.codeParcelle));
-            const cellEx = row.getCell(17);
+            const cellEx = row.getCell(18);
             if (extrait) {
               cellEx.value = { text: 'Extrait DGFiP', hyperlink: extrait };
               cellEx.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
               cellEx.alignment = { horizontal: 'center', vertical: 'middle' };
             } else cellEx.value = '';
             const colorise = lienPaintColorise(o.codeParcelle, o.commune, contours?.get(o.codeParcelle));
-            const cellCo = row.getCell(18);
+            const cellCo = row.getCell(19);
             if (colorise) {
               cellCo.value = { text: 'Colorier', hyperlink: colorise };
               cellCo.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FFA01040' } };
@@ -3282,7 +3294,7 @@ export default function App() {
             // Plan colorié ET annoté : désignation cadastrale et contenance en
             // hectares, ares, centiares, portées sous le titre de l'extrait.
             const annote = lienPaintAnnote(o.codeParcelle, o.commune, contours?.get(o.codeParcelle), o.contenance, null, o.adresse);
-            const cellAn = row.getCell(19);
+            const cellAn = row.getCell(20);
             if (annote) {
               cellAn.value = { text: 'Annoté', hyperlink: annote };
               cellAn.font = { name: 'Calibri', size: 10, bold: true, underline: true, color: { argb: 'FF0F2238' } };
@@ -3490,7 +3502,7 @@ export default function App() {
         ['Portée', "Donnée de pré-contrôle. Seul le relevé de propriété ou l'état hypothécaire fait foi."],
         ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
-        ['Feuilles « Sommaire » et feuilles par commune', "La première feuille récapitule le portefeuille commune par commune (lignes de non bâti et de bâti, surface à sommer, écarts de contenance) et ouvre chaque onglet communal par le lien « Ouvrir ». Chaque commune a ensuite sa feuille, bâti et non bâti confondus, triée par référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
+        ['Feuilles « Sommaire » et feuilles par commune', "La première feuille récapitule le portefeuille commune par commune (lignes de non bâti et de bâti, surface à sommer, écarts de contenance) et ouvre chaque onglet communal par le lien « Ouvrir ». Chaque commune a ensuite sa feuille, bâti et non bâti confondus, triée par référence cadastrale. Ses colonnes suivent l'ordre de l'écran : commune, adresse, référence réduite au préfixe, à la section et au numéro, puis la nature du sol pour les locaux détenus sans le sol (assiette de copropriété, sol à un tiers, sol non identifié) ; la référence complète à quatorze caractères figure en dernière colonne. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
         ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un local s'identifie par bâtiment, entrée, niveau et porte. Un local est une unité fiscale (appartement, commerce, garage), pas nécessairement un lot de copropriété."],
         ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export. Lorsque le contour est connu, l'échelle, le format et, s'il y a lieu, une rotation de la zone d'impression sont choisis pour que la parcelle tienne au plus près du 1/1000 ; la rotation n'est appliquée que si elle permet une échelle plus fine, et le plan porte alors sa flèche du nord inclinée d'autant. Les échelles vont du 1/1000 au 1/5000, plafond du service."],
         ['Unités foncières', `Une unité foncière est, au sens de la jurisprudence administrative, l'îlot de propriété d'un seul tenant appartenant au même propriétaire. Le regroupement est calculé sur les contours du plan cadastral : deux parcelles sont réunies lorsqu'elles partagent au moins deux sommets, donc une limite commune — un simple contact par un angle ne suffit pas. Résultat sur ce relevé : ${unitesF ? `${unitesF.unites.length} unité(s), dont ${unitesF.groupees} d'un seul tenant de plusieurs parcelles et ${unitesF.isolees} isolée(s)` : 'non calculé, faute de contours chargés'}. LIMITE ESSENTIELLE : ce relevé ne connaît que les parcelles de la société interrogée. Une parcelle voisine appartenant au même propriétaire mais détenue sous un autre SIREN, ou par une personne physique, n'y figure pas et n'a donc pas été regroupée. L'unité indiquée est l'unité au sein du portefeuille, non l'unité foncière au sens plein.`],
@@ -4689,7 +4701,7 @@ export default function App() {
                                     title="Toute la section" />
                                   <button onClick={() => basculerSectionCarte(s.cle)}
                                     className="flex-1 text-left flex items-baseline gap-2">
-                                    <span className="text-stone-400 text-xs">{deplie ? '▾' : '▸'}</span>
+                                    <span className="inline-flex self-center"><ChevronRight className={`w-5 h-5 text-blue-950 transition-transform ${deplie ? 'rotate-90' : ''}`} strokeWidth={2.5} /></span>
                                     <span className="font-medium text-blue-950">Section {s.cle}</span>
                                     <span className="text-xs text-stone-500">
                                       {s.lignes.length.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(s.surface)}
@@ -4822,8 +4834,8 @@ export default function App() {
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <button onClick={() => setParcellesDepliees((v) => !v)} title={parcellesDepliees ? "Replier" : "Déplier"}
-                      className="w-6 h-6 flex items-center justify-center rounded text-blue-950 hover:bg-stone-100 text-sm">
-                      {parcellesDepliees ? '▾' : '▸'}
+                      className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                      <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${parcellesDepliees ? 'rotate-90' : ''}`} strokeWidth={2.5} />
                     </button>
                     <MapPin className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setParcellesDepliees((v) => !v)}>Détail des parcelles</h3>
@@ -4968,8 +4980,8 @@ export default function App() {
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <button onClick={() => setLocauxDeplies((v) => !v)} title={locauxDeplies ? "Replier" : "Déplier"}
-                      className="w-6 h-6 flex items-center justify-center rounded text-blue-950 hover:bg-stone-100 text-sm">
-                      {locauxDeplies ? '▾' : '▸'}
+                      className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                      <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${locauxDeplies ? 'rotate-90' : ''}`} strokeWidth={2.5} />
                     </button>
                     <Building2 className="w-4 h-4 text-blue-950" />
                     <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setLocauxDeplies((v) => !v)}>Détail des locaux</h3>
