@@ -741,6 +741,18 @@ const sectionEtNumero = (codeParcelle) => {
   return { section: prefixe !== '000' ? `${prefixe} ${section}` : section, numero };
 };
 
+// Référence courte des tableaux de détail — demandée par JFD le 28/09/2026 :
+// la commune a désormais sa propre colonne, le code INSEE en tête de la
+// référence faisait doublon. On garde PRÉFIXE, SECTION et NUMÉRO tels qu'au
+// fichier (« 000 AB 0617 »), sans rien retrancher : l'écran reste le reflet de
+// la donnée. La référence complète reste en infobulle, et le tri se fait
+// toujours sur le code à 14 caractères.
+const refCourte = (codeParcelle) => {
+  const r = String(codeParcelle || '');
+  if (r.length !== 14) return r;
+  return `${r.slice(5, 8)} ${r.slice(8, 10)} ${r.slice(10, 14)}`;
+};
+
 // Désignation cadastrale lisible, à partir de la référence à 14 caractères.
 // Le préfixe n'est mentionné que s'il n'est pas 000 : il ne l'est que dans les
 // communes issues de fusion, où il identifie l'ancienne commune.
@@ -4773,7 +4785,7 @@ export default function App() {
                               <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
                               <td className="px-4 py-3 text-blue-950">{p.commune}</td>
                               <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
-                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
+                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap" title={p.codeParcelle}>{refCourte(p.codeParcelle)}</td>
                               <td className="px-4 py-3 text-stone-600">{p.departement}</td>
                               <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
                               <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
@@ -4941,7 +4953,7 @@ export default function App() {
                                   <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
                                   <td className="px-4 py-3 text-blue-950">{im.commune}</td>
                                   <td className="px-4 py-3 text-blue-950 text-xs">{im.adresse}</td>
-                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{im.codeParcelle}</td>
+                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap" title={im.codeParcelle}>{refCourte(im.codeParcelle)}</td>
                                   <td className="px-4 py-3 text-right text-blue-950 font-medium whitespace-nowrap">{im.nbLots.toLocaleString('fr-FR')}</td>
                                   <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
                                   <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
@@ -4959,7 +4971,7 @@ export default function App() {
                                   <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
                                   <td className="px-4 py-3 text-blue-950">{l.commune}</td>
                                   <td className="px-4 py-3 text-blue-950 text-xs">{l.adresse}</td>
-                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
+                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap" title={l.codeParcelle}>{refCourte(l.codeParcelle)}</td>
                                   <td className="px-4 py-3 text-center text-blue-950">{l.batiment}</td>
                                   <td className="px-4 py-3 text-center text-blue-950">{l.entree}</td>
                                   <td className="px-4 py-3 text-center text-blue-950">{l.niveau}</td>
