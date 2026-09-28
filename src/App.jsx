@@ -2676,6 +2676,36 @@ export default function App() {
     return m;
   })();
 
+  // ---- BÂTI DANS LE PLAN À LA CARTE — demandé par JFD le 28/09/2026 --------
+  // Le document transmettait déjà la grille des locaux, mais on cochait à
+  // l'aveugle : rien ne disait quelle parcelle porte des lots. Même comptage que
+  // suffixeBati, pour que l'écran annonce ce que le document imprimera :
+  // bâtiments comptés PAR PARCELLE (le code bâtiment est relatif à sa parcelle,
+  // correctif du 03/09), et au moins un bâtiment dès qu'il y a un lot.
+  const batiDeRef = (r) => {
+    const e = batiParRef.get(r);
+    if (!e || !e.lots.length) return null;
+    return { bats: Math.max(1, e.bats.size), lots: e.lots.length };
+  };
+  const carteBati = carteRefs.reduce((t, r) => {
+    const b = batiDeRef(r);
+    if (b) { t.parcelles += 1; t.bats += b.bats; t.lots += b.lots; }
+    return t;
+  }, { parcelles: 0, bats: 0, lots: 0 });
+  const refsBatiesCommune = carteCommuneObj
+    ? carteCommuneObj.sectionsTriees.flatMap((s) => s.lignes.filter((l) => batiDeRef(l.ref)).map((l) => l.ref))
+    : [];
+  // Coche d'un geste les parcelles bâties de la commune, SANS décocher le reste
+  // (le panier est additif), et déplie les sections concernées pour qu'on voie
+  // ce qui vient d'être coché.
+  const cocherBatiesCarte = () => {
+    if (!carteCommuneObj || !refsBatiesCommune.length) return;
+    setCarteSel((sel) => new Set([...sel, ...refsBatiesCommune]));
+    const cles = carteCommuneObj.sectionsTriees
+      .filter((s) => s.lignes.some((l) => batiDeRef(l.ref))).map((s) => s.cle);
+    setCarteDepliees((d) => new Set([...d, ...cles]));
+  };
+
   const locauxAffiches = trierListe(
     filtrerTexte(locaux, qLocaux,
       ['codeParcelle', 'commune', 'departement', 'adresse', 'batiment', 'entree', 'niveau', 'porte', 'codeDroit']),
@@ -4481,7 +4511,11 @@ export default function App() {
                           className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
                       </div>
 
-                      {!contours && (
+                      {/* ⚠ contoursPlan et non contours — correctif du 28/09/2026 : une
+                          société qui ne détient que des lots n'a de contours que par ses
+                          assiettes ; le test sur `contours` grisait « Générer le plan »
+                          alors que Vue aérienne et Document fonctionnaient. */}
+                      {!contoursPlan && (
                         <div className="px-6 py-2 text-xs text-amber-800 bg-amber-50 border-b border-amber-200">
                           ⚠ Contours non chargés : la colorisation et le choix de l'échelle en dépendent. Lancer le géocodage d'abord.
                         </div>
@@ -4521,6 +4555,19 @@ export default function App() {
                       {/* ÉTAPE 2 — sections en accordéon, panier traversant */}
                       {carteCommuneObj && (
                         <div className="flex-1 overflow-y-auto">
+                          <div className="px-6 py-2 flex items-center gap-3 border-b border-stone-200 text-xs text-stone-600">
+                            <span>
+                              {refsBatiesCommune.length
+                                ? `${refsBatiesCommune.length.toLocaleString('fr-FR')} parcelle(s) bâtie(s) dans cette commune`
+                                : 'Aucune parcelle bâtie dans cette commune'}
+                            </span>
+                            <button onClick={cocherBatiesCarte} disabled={!refsBatiesCommune.length}
+                              title="Coche toutes les parcelles portant des lots, sans décocher les autres"
+                              className="ml-auto px-3 py-1 font-semibold text-white rounded-lg disabled:opacity-40"
+                              style={{ backgroundColor: '#33838B' }}>
+                              Parcelles bâties seulement
+                            </button>
+                          </div>
                           {carteCommuneObj.sectionsTriees.map((s) => {
                             const deplie = carteDepliees.has(s.cle);
                             const cochees = s.lignes.filter((l) => carteSel.has(l.ref)).length;
@@ -4551,6 +4598,12 @@ export default function App() {
                                       onChange={() => basculerParcelleCarte(l.ref)} />
                                     <span className="font-medium text-blue-950 w-16">n° {l.numero}</span>
                                     <span className="text-xs text-stone-500 flex-1 truncate">{l.adresse || '—'}</span>
+                                    {batiDeRef(l.ref) && (
+                                      <span className="text-xs font-semibold whitespace-nowrap" style={{ color: '#33838B' }}
+                                        title="Locaux bâtis détenus sur cette parcelle">
+                                        {batiDeRef(l.ref).bats.toLocaleString('fr-FR')} bât. · {batiDeRef(l.ref).lots.toLocaleString('fr-FR')} lot{batiDeRef(l.ref).lots > 1 ? 's' : ''}
+                                      </span>
+                                    )}
                                     {l.assiette && (
                                       <span className="text-xs px-1.5 rounded border border-stone-300 text-stone-600" title="La société n'y détient que des lots : parcelle d'assiette de la copropriété, hors surface du portefeuille">assiette</span>
                                     )}
@@ -4574,6 +4627,11 @@ export default function App() {
                               {carteRefs.length.toLocaleString('fr-FR')} parcelle(s)
                             </span>
                             <span className="text-stone-600">{contenanceNotariale(carteSurface)}</span>
+                            {carteBati.lots > 0 && (
+                              <span className="text-xs font-semibold" style={{ color: '#33838B' }}>
+                                {carteBati.bats.toLocaleString('fr-FR')} bâtiment(s) · {carteBati.lots.toLocaleString('fr-FR')} lot(s) sur {carteBati.parcelles.toLocaleString('fr-FR')} parcelle(s)
+                              </span>
+                            )}
                             {carteApercu && carteApercu.mesurable && (
                               <span className="text-xs px-2 py-0.5 rounded border"
                                 style={carteApercu.deborde
@@ -4589,7 +4647,7 @@ export default function App() {
                                 className="text-xs underline text-stone-500">tout décocher</button>
                             )}
                             <button onClick={() => genererCarte('plan')}
-                              disabled={!carteRefs.length || !contours || (carteApercu && carteApercu.horsZone)}
+                              disabled={!carteRefs.length || !contoursPlan || (carteApercu && carteApercu.horsZone)}
                               className="ml-auto px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
                               style={{ backgroundColor: '#A01040' }}>
                               Générer le plan
