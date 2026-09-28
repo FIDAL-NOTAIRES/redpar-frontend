@@ -1831,6 +1831,7 @@ export default function App() {
   const [carteCommune, setCarteCommune] = useState(null);
   const [carteSel, setCarteSel] = useState(() => new Set());
   const [carteDepliees, setCarteDepliees] = useState(() => new Set());
+  const [communesDepliees, setCommunesDepliees] = useState(false);
   const [qCarteCommune, setQCarteCommune] = useState('');
   // Dossier complet : un document PAR COMMUNE pour TOUT le relevé (filtré),
   // communes triées alphabétiquement, parcelles triées section puis numéro.
@@ -3707,8 +3708,12 @@ export default function App() {
   const totalSurface = surfaceDistincte(parcelles);
   const parcellesDistinctes = new Set(parcelles.map((p) => p.codeParcelle).filter(Boolean)).size;
   const stats = parcelles.length > 0 ? computeStats() : { depts: [], communes: [] };
-  const showAllCommunes = stats.communes.length <= 10;
-  const displayedCommunes = showAllCommunes ? stats.communes : stats.communes.slice(0, 10);
+  // Palmarès des communes : 5 lignes, dépliable sur la liste entière — demandé
+  // par JFD le 28/09/2026 (le top 10 prenait trop de hauteur). N'affecte que
+  // l'écran : l'export PDF garde son propre top 10.
+  const COMMUNES_REPLIEES = 5;
+  const showAllCommunes = stats.communes.length <= COMMUNES_REPLIEES || communesDepliees;
+  const displayedCommunes = showAllCommunes ? stats.communes : stats.communes.slice(0, COMMUNES_REPLIEES);
 
   return (
     <div className="min-h-screen bg-stone-50 p-4 md:p-8">
@@ -4218,8 +4223,18 @@ export default function App() {
                     <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
                       <MapPin className="w-4 h-4 text-blue-950" />
                       <h3 className="font-semibold text-blue-950">
-                        {showAllCommunes ? `Communes (${stats.communes.length})` : `Top 10 communes (sur ${stats.communes.length})`}
+                        {stats.communes.length <= COMMUNES_REPLIEES
+                          ? `Communes (${stats.communes.length})`
+                          : communesDepliees
+                            ? `Toutes les communes (${stats.communes.length})`
+                            : `${COMMUNES_REPLIEES} premières communes (sur ${stats.communes.length})`}
                       </h3>
+                      {stats.communes.length > COMMUNES_REPLIEES && (
+                        <button onClick={() => setCommunesDepliees((v) => !v)}
+                          className="ml-auto text-xs underline text-blue-900">
+                          {communesDepliees ? 'replier' : `voir les ${stats.communes.length} communes`}
+                        </button>
+                      )}
                     </div>
                     <div className="p-4">
                       <table className="w-full text-sm">
@@ -4328,8 +4343,8 @@ export default function App() {
                       <table className="w-full text-sm">
                         <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
                           <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette</th>
                             <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette</th>
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Lots</th>
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
                             <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Sol</th>
@@ -4359,11 +4374,11 @@ export default function App() {
                             }[etat] || ['bg-stone-50 text-stone-500 border-stone-300', etat];
                             return (
                               <tr key={a.codeParcelle} className="border-b border-stone-100 hover:bg-stone-50 align-top">
+                                <td className="px-4 py-3 text-blue-950">{a.commune}<div className="text-xs text-stone-500">{a.adresse}</div></td>
                                 <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">
                                   {a.codeParcelle}
                                   <div className="font-sans text-stone-500">{designationCadastrale(a.codeParcelle)}</div>
                                 </td>
-                                <td className="px-4 py-3 text-blue-950">{a.commune}<div className="text-xs text-stone-500">{a.adresse}</div></td>
                                 <td className="px-4 py-3 text-right text-blue-950">{a.nbLots.toLocaleString('fr-FR')}</td>
                                 <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{a.contenance != null ? `${Number(a.contenance).toLocaleString('fr-FR')} m²` : '—'}</td>
                                 <td className="px-4 py-3 text-xs">
@@ -4734,10 +4749,10 @@ export default function App() {
                       <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
                         <tr>
                           <EnTete label="#" champ="" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Référence" champ="codeParcelle" tri={triParcelles} onTri={setTriParcelles} />
                           <EnTete label="Commune" champ="commune" tri={triParcelles} onTri={setTriParcelles} />
-                          <EnTete label="Département" champ="departement" tri={triParcelles} onTri={setTriParcelles} />
                           <EnTete label="Adresse" champ="adresse" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Référence" champ="codeParcelle" tri={triParcelles} onTri={setTriParcelles} />
+                          <EnTete label="Département" champ="departement" tri={triParcelles} onTri={setTriParcelles} />
                           <EnTete label="Surface" champ="contenance" tri={triParcelles} onTri={setTriParcelles} align="text-right" />
                           <EnTete label="Nature" champ="natureCulture" tri={triParcelles} onTri={setTriParcelles} align="text-center" />
                           <EnTete label="Droit" champ="codeDroit" tri={triParcelles} onTri={setTriParcelles} />
@@ -4756,10 +4771,10 @@ export default function App() {
                           return (
                             <tr key={p.codeParcelle + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
                               <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
                               <td className="px-4 py-3 text-blue-950">{p.commune}</td>
-                              <td className="px-4 py-3 text-stone-600">{p.departement}</td>
                               <td className="px-4 py-3 text-blue-950 text-xs">{p.adresse}</td>
+                              <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{p.codeParcelle}</td>
+                              <td className="px-4 py-3 text-stone-600">{p.departement}</td>
                               <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{(p.contenance || 0).toLocaleString('fr-FR')} m²</td>
                               <td className="px-4 py-3 text-center text-blue-950">{p.natureCulture}</td>
                               <td className="px-4 py-3 text-stone-600 text-xs">{p.codeDroit}</td>
@@ -4897,9 +4912,9 @@ export default function App() {
                             {locauxGroupes ? (
                               <tr>
                                 <EnTete label="#" champ="" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Lots" champ="nbLots" tri={triLocaux} onTri={setTriLocaux} align="text-right" />
                                 <EnTete label="Bâtiments" champ="batimentsTxt" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
                                 <EnTete label="Titres" champ="titresTxt" tri={triLocaux} onTri={setTriLocaux} />
@@ -4908,9 +4923,9 @@ export default function App() {
                             ) : (
                               <tr>
                                 <EnTete label="#" champ="" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
+                                <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Bât." champ="batiment" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
                                 <EnTete label="Entrée" champ="entree" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
                                 <EnTete label="Niv." champ="niveau" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
@@ -4924,9 +4939,9 @@ export default function App() {
                               ? immeublesAffiches.map((im, i) => (
                                 <tr key={(im.codeParcelle || '') + '-g' + i} className="border-b border-stone-100 hover:bg-stone-50">
                                   <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{im.codeParcelle}</td>
                                   <td className="px-4 py-3 text-blue-950">{im.commune}</td>
                                   <td className="px-4 py-3 text-blue-950 text-xs">{im.adresse}</td>
+                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{im.codeParcelle}</td>
                                   <td className="px-4 py-3 text-right text-blue-950 font-medium whitespace-nowrap">{im.nbLots.toLocaleString('fr-FR')}</td>
                                   <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
                                   <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
@@ -4942,9 +4957,9 @@ export default function App() {
                               : locauxAffiches.map((l, i) => (
                                 <tr key={(l.codeParcelle || '') + '-' + i} className="border-b border-stone-100 hover:bg-stone-50">
                                   <td className="px-4 py-3"><div className="w-6 h-6 rounded-full bg-blue-950 text-amber-400 text-xs font-semibold flex items-center justify-center">{i + 1}</div></td>
-                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
                                   <td className="px-4 py-3 text-blue-950">{l.commune}</td>
                                   <td className="px-4 py-3 text-blue-950 text-xs">{l.adresse}</td>
+                                  <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">{l.codeParcelle}</td>
                                   <td className="px-4 py-3 text-center text-blue-950">{l.batiment}</td>
                                   <td className="px-4 py-3 text-center text-blue-950">{l.entree}</td>
                                   <td className="px-4 py-3 text-center text-blue-950">{l.niveau}</td>
