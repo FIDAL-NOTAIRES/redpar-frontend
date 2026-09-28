@@ -1691,7 +1691,7 @@ function ParcellesMap({ parcelles, locaux = [], contours = null, companyName }) 
             <div style="font-weight:700;color:#33838B;margin-bottom:6px;border-bottom:2px solid #6DD5DC;padding-bottom:4px">Immeuble bâti</div>
             <div style="font-size:12px;color:#1e2952;margin-bottom:3px"><strong>📍 ${im.adresse || ''}</strong></div>
             <div style="font-size:12px;color:#475569;margin-bottom:3px">${im.commune || ''} (${im.departement || ''})</div>
-            <div style="font-size:12px;color:#475569;margin-bottom:3px">🏢 ${im.lots.toLocaleString('fr-FR')} lot(s) au nom de la société</div>
+            <div style="font-size:12px;color:#475569;margin-bottom:3px">🏢 ${im.lots.toLocaleString('fr-FR')} ${im.lots > 1 ? 'locaux' : 'local'} au nom de la société</div>
             <div style="font-family:monospace;font-size:10px;color:#94a3b8">${im.codeParcelle || ''}</div>
           </div>`);
         groupeBati.addLayer(m);
@@ -1946,6 +1946,36 @@ export default function App() {
     return [...m.values()];
   })();
   const assietteRefs = new Set([...assiettes, ...assiettesEtendues].map((a) => a.codeParcelle));
+  // ---- NATURE DU SOL — décision JFD du 28/09/2026 ------------------------
+  // Le fichier des locaux ne dit pas si un local est un LOT DE COPROPRIÉTÉ : ce
+  // sont des unités fiscales (appartement, commerce, garage), sans numéro de
+  // lot ni tantièmes. Que la société ne détienne pas le sol ne prouve pas la
+  // copropriété : bail emphytéotique, bail à construction ou division en
+  // volumes donnent la même image. D'où trois qualifications, et la mention
+  // « copropriété » RÉSERVÉE au sol d'un syndicat recensé :
+  //   copro    sol à un syndicat (avec ou sans SIREN), ou parcelle ajoutée par
+  //            la reconstitution de l'assiette du syndicat ;
+  //   tiers    sol à une autre personne morale ;
+  //   inconnu  aucune personne morale au sol, recherche indisponible ou en
+  //            échec — on ne présume rien ;
+  //   attente  recherche pas encore faite.
+  const assiettesEtenduesRefs = new Set(assiettesEtendues.map((a) => a.codeParcelle));
+  const natureSol = (r) => {
+    if (!assietteRefs.has(r)) return null;
+    if (assiettesEtenduesRefs.has(r)) return 'copro';
+    const info = assiettesInfo ? assiettesInfo.get(r) : null;
+    if (!info) return 'attente';
+    if (info.etat === 'syndicat' || info.etat === 'majic') return 'copro';
+    if (info.etat === 'autre_titulaire') return 'tiers';
+    if (info.etat === 'recherche') return 'attente';
+    return 'inconnu';
+  };
+  const LIBELLE_SOL = {
+    copro: ['assiette de copropriété', 'Sol au syndicat des copropriétaires recensé au fichier des parcelles'],
+    tiers: ['sol à un tiers', "Sol à une autre personne morale : bail emphytéotique, bail à construction ou division en volumes possibles — à vérifier au titre"],
+    inconnu: ['sol non identifié', 'Aucune personne morale au sol, ou recherche impossible : la nature du droit reste à établir au titre'],
+    attente: ['sol en recherche', 'Recherche du titulaire du sol en cours'],
+  };
   // UNION pour la chaîne des plans. ⚠ unitesF, coherence et les indicateurs de
   // surface restent sur `parcelles` : le foncier DÉTENU.
   const parcellesPlan = [...parcelles, ...assiettes, ...assiettesEtendues];
@@ -2433,7 +2463,14 @@ export default function App() {
     // société n'y détient que des lots. adresseM1 le passe en capitales.
     parcellesPlan.forEach((o) => {
       if (o.codeParcelle && !m.has(o.codeParcelle)) {
-        m.set(o.codeParcelle, (o.adresse || '') + (o._assiette ? ' · ASSIETTE DE COPROPRIÉTÉ (LOTS SEULS)' : ''));
+        // ⚠ 28/09/2026 : plus de « LOTS SEULS » ni de copropriété présumée —
+        // la mention suit la nature du sol (voir natureSol).
+        const ns = o._assiette ? natureSol(o.codeParcelle) : null;
+        const marque = !ns ? ''
+          : ns === 'copro' ? ' · ASSIETTE DE COPROPRIÉTÉ (LOCAUX SEULS)'
+          : ns === 'tiers' ? ' · SOL À UN TIERS (LOCAUX SEULS)'
+          : ' · LOCAUX SEULS, SOL NON IDENTIFIÉ';
+        m.set(o.codeParcelle, (o.adresse || '') + marque);
       }
     });
     return m;
@@ -3050,7 +3087,7 @@ export default function App() {
         // apostrophe en tête ou en queue, unique dans le classeur. En cas
         // d'homonymie (communes de départements différents), suffixe INSEE.
         const nomsPris = new Set(['Sommaire', 'Écarts de contenance', 'Parcelles', 'Locaux',
-          'Assiettes de copropriété', 'Sources et limites']);
+          'Locaux sans le sol', 'Sources et limites']);
         const nomOnglet = (g) => {
           const propre = (s) => String(s || '').replace(/[\[\]:*?\/\\"]/g, ' ').replace(/\s+/g, ' ').trim().replace(/^'+|'+$/g, '');
           let base = propre(g.commune) || propre(g.codeInsee) || 'Commune';
@@ -3339,19 +3376,19 @@ export default function App() {
         const libelleEtat = {
           syndicat: 'Syndicat recensé — assiette reconstituée',
           majic: 'Syndicat sans identifiant recherchable — identifié, assiette non reconstituée',
-          autre_titulaire: 'Sol à une autre personne morale',
-          non_recense: 'Syndicat non recensé — copropriétaires personnes physiques, hors fichier',
+          autre_titulaire: 'Sol à une autre personne morale — bail emphytéotique, bail à construction ou volumes possibles',
+          non_recense: 'Aucune personne morale au sol — titulaire hors fichier, nature du droit à établir',
           indisponible: 'Recherche inverse indisponible sur cette release FPMU',
           erreur: 'Recherche en échec',
           recherche: 'Recherche en cours à l\'export',
         };
         ajouterOnglet(wb, {
-          nom: 'Assiettes de copropriété',
-          headers: ['#', 'Parcelle d\'assiette', 'Commune', 'Adresse', 'Lots de la société',
+          nom: 'Locaux sans le sol',
+          headers: ['#', 'Parcelle', 'Commune', 'Adresse', 'Locaux de la société',
             'Contenance plan (m²)', 'État', 'Syndicat', 'SIREN syndicat', 'Assiette entière (parcelles)',
             'Contenance assiette (m²)', 'Plan colorisé'],
           widths: [5, 19, 22, 30, 12, 14, 44, 40, 14, 50, 16, 16],
-          sujet: `${selectedCompany?.nom || ''}  |  ${assiettes.length} parcelle(s) d'assiette — la société n'y détient que des LOTS`
+          sujet: `${selectedCompany?.nom || ''}  |  ${assiettes.length} parcelle(s) — la société y détient des LOCAUX sans le sol (copropriété seulement si le sol est à un syndicat)`
             + `  |  surfaces NON comprises dans le total du portefeuille  |  ni numéro de lot d'EDD ni tantièmes dans la source`,
           lignes: assiettes,
           aligner: (c) => ({ centre: c === 1 || c === 5, nombre: c === 6 || c === 11, styleLibre: c === 12 }),
@@ -3371,7 +3408,7 @@ export default function App() {
               ? (info.syndicat.sirenReel ? info.syndicat.siren
                 : (info.syndicat.siren ? `${info.syndicat.siren} (identifiant MAJIC, sans SIREN)` : (info.syndicat.majic ? `MAJIC ${info.syndicat.majic}` : '')))
               : '';
-            row.getCell(10).value = unite.length ? unite.map((o) => designationCadastrale(o.codeParcelle)).join(' ; ') : (etat === 'syndicat' ? 'non calculée' : 'limitée à la parcelle du lot');
+            row.getCell(10).value = unite.length ? unite.map((o) => designationCadastrale(o.codeParcelle)).join(' ; ') : (etat === 'syndicat' ? 'non calculée' : 'limitée à la parcelle des locaux');
             row.getCell(11).value = unite.length ? unite.reduce((t, o) => t + (Number(o.contenance) || 0), 0) : '';
             const refsUnite = unite.map((o) => o.codeParcelle);
             // ⚠ CANAL_EXCEL, et non le défaut : ce lien-ci part dans un
@@ -3409,7 +3446,7 @@ export default function App() {
         ['Périmètre', 'Personnes physiques, entreprises individuelles et sociétés unipersonnelles exclues par construction du fichier. Les personnes morales simplement locataires n\'y figurent pas.'],
         ['Surfaces', "La surface totale est calculée sur les parcelles distinctes : une parcelle figure autant de fois qu'elle a de titulaires de droits (propriétaire, gérant, syndic, usufruitier...)."],
         ['Feuilles « Sommaire » et feuilles par commune', "La première feuille récapitule le portefeuille commune par commune (lignes de non bâti et de bâti, surface à sommer, écarts de contenance) et ouvre chaque onglet communal par le lien « Ouvrir ». Chaque commune a ensuite sa feuille, bâti et non bâti confondus, triée par référence cadastrale. Deux colonnes de surface : « Surface parcelle » est la contenance, répétée sur chacune des lignes de la parcelle — ne la totalisez pas ; « Surface à sommer » ne la porte qu'une fois par parcelle, c'est celle-là qui se totalise sans erreur. Un tiret (—) signale une donnée SANS OBJET : un local n'a ni surface ni nature de culture dans la source, une parcelle n'a pas de numéro de lot. Une cellule VIDE en « Surface à sommer » signifie que la contenance a déjà été comptée sur une ligne précédente de la même parcelle."],
-        ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte."],
+        ['Bâti', "La source ne fournit aucune surface pour les locaux, ni de numéro invariant : un local s'identifie par bâtiment, entrée, niveau et porte. Un local est une unité fiscale (appartement, commerce, garage), pas nécessairement un lot de copropriété."],
         ['Plans cadastraux — trois liens', "La colonne « Extrait DGFiP » ouvre le PDF de l'extrait officiel du plan, pièce autonome que l'on peut joindre à un dossier. La colonne « Plan colorisé » ouvre l'application PAINT du cabinet, qui génère le même extrait ET colorie la parcelle en carmin. « Plan annoté » fait de plus porter, sous le titre de l'extrait, la désignation cadastrale et la contenance exprimée en hectares, ares et centiares ; ces mentions sont déplaçables et modifiables dans PAINT, et suivent dans les exports PNG et PDF. Le service interroge le service de consultation du plan cadastral : les liens sont à cliquer un par un, une extraction en masse serait refusée. La colorisation automatique exige que les contours aient été chargés au moment de l'export. Lorsque le contour est connu, l'échelle, le format et, s'il y a lieu, une rotation de la zone d'impression sont choisis pour que la parcelle tienne au plus près du 1/1000 ; la rotation n'est appliquée que si elle permet une échelle plus fine, et le plan porte alors sa flèche du nord inclinée d'autant. Les échelles vont du 1/1000 au 1/5000, plafond du service."],
         ['Unités foncières', `Une unité foncière est, au sens de la jurisprudence administrative, l'îlot de propriété d'un seul tenant appartenant au même propriétaire. Le regroupement est calculé sur les contours du plan cadastral : deux parcelles sont réunies lorsqu'elles partagent au moins deux sommets, donc une limite commune — un simple contact par un angle ne suffit pas. Résultat sur ce relevé : ${unitesF ? `${unitesF.unites.length} unité(s), dont ${unitesF.groupees} d'un seul tenant de plusieurs parcelles et ${unitesF.isolees} isolée(s)` : 'non calculé, faute de contours chargés'}. LIMITE ESSENTIELLE : ce relevé ne connaît que les parcelles de la société interrogée. Une parcelle voisine appartenant au même propriétaire mais détenue sous un autre SIREN, ou par une personne physique, n'y figure pas et n'a donc pas été regroupée. L'unité indiquée est l'unité au sein du portefeuille, non l'unité foncière au sens plein.`],
         ['Statut de la société', `${selectedCompany?.statut === 'Cessée'
@@ -3417,7 +3454,7 @@ export default function App() {
           : "Société active au répertoire Sirene à la date de génération du présent document."} Source du statut : API Recherche d'Entreprises (gouv.fr), distincte des fichiers cadastraux.`],
         ['Contrôle de cohérence', `La contenance figure dans deux produits DGFiP distincts, mis à jour par des chaînes différentes : la matrice, qui porte la propriété, et le plan cadastral, qui porte la géométrie. Résultat sur ce relevé : ${coherence.concordantes} parcelle(s) concordante(s), ${coherence.notables} écart(s) notable(s), ${coherence.mineurs} écart(s) mineur(s), ${coherence.absentes} absente(s) du plan, sur ${coherence.controlees} contrôlée(s). Un écart signale une parcelle qui a bougé — division, réunion, remembrement, document d'arpentage — donc une désignation à vérifier avant reprise. Rappel : la contenance cadastrale n'est qu'indicative, seul un arpentage fait foi.`],
         ['Titres de droit', `${libelleFiltre}. Le fichier DGFiP recense les détenteurs de droits réels, pas seulement les propriétaires : gérant, gestionnaire d'un bien de l'État, syndic de copropriété, emphytéote, nu-propriétaire, usufruitier, preneur ou bailleur à construction. Ce classeur ne contient que les lignes portant les titres retenus ci-dessus.`],
-        ...(assiettes.length ? [['Assiettes de copropriété', `${assiettes.length} parcelle(s) où la société ne détient que des lots (onglet dédié). Le sol d'une copropriété n'est pas au compte de chaque copropriétaire : il est au syndicat des copropriétaires quand celui-ci est recensé au fichier des parcelles (groupe de personne « copropriétaires »), sinon aux copropriétaires eux-mêmes, hors fichier lorsqu'ils sont des personnes physiques. La parcelle d'assiette vient du fichier des locaux ; sa contenance est celle du PLAN cadastral ; elle n'entre pas dans la surface du portefeuille. Lorsque le syndicat est recensé, l'assiette entière est reconstituée comme l'unité foncière du syndicat contenant la parcelle du lot. La source ne donne ni numéro de lot d'EDD ni tantièmes : la désignation du lot reste au relevé de propriété ou au règlement de copropriété.`]] : []),
+        ...(assiettes.length ? [['Locaux sans le sol', `${assiettes.length} parcelle(s) où la société détient des locaux sans le sol (onglet dédié). Seul un sol au syndicat des copropriétaires désigne une copropriété ; un sol à une autre personne morale peut relever d'un bail emphytéotique, d'un bail à construction ou d'une division en volumes, à vérifier au titre. Le sol d'une copropriété n'est pas au compte de chaque copropriétaire : il est au syndicat des copropriétaires quand celui-ci est recensé au fichier des parcelles (groupe de personne « copropriétaires »), sinon aux copropriétaires eux-mêmes, hors fichier lorsqu'ils sont des personnes physiques. La parcelle d'assiette vient du fichier des locaux ; sa contenance est celle du PLAN cadastral ; elle n'entre pas dans la surface du portefeuille. Lorsque le syndicat est recensé, l'assiette entière est reconstituée comme l'unité foncière du syndicat contenant la parcelle des locaux. La source ne donne ni numéro de lot d'EDD ni tantièmes : la désignation des lots reste au relevé de propriété ou au règlement de copropriété.`]] : []),
         ['Plafonds Excel', "Excel n'accepte pas plus de 65 530 liens hypertexte par feuille ni de lien de plus d'environ 2 080 caractères ; au-delà, le classeur ne s'ouvre pas ou se « répare » en perdant ses liens. C'est pourquoi les biens sont répartis en une feuille par commune plutôt que sur une feuille unique. Si une seule feuille dépassait encore le plafond, certaines de ses colonnes de liens seraient livrées en texte « voir à l'écran » (l'avertissement figure alors dans sa ligne de titre) ; les liens restent disponibles dans REDPAR."],
         ['Liens cartographiques', (() => {
           const tousDont = [...parcelles, ...locaux];
@@ -4099,7 +4136,7 @@ export default function App() {
                   <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
                   <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
                     Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
-                    {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les lots détenus sur la parcelle.
+                    {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les locaux détenus sur la parcelle.
                     {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
                     {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
                     {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
@@ -4342,14 +4379,14 @@ export default function App() {
                 {assiettes.length > 0 && (
                   <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                     <div className="px-6 py-4 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
-                      <h3 className="font-semibold text-blue-950">Copropriétés — parcelles d'assiette</h3>
+                      <h3 className="font-semibold text-blue-950">Locaux sans le sol — copropriétés et sols de tiers</h3>
                       <span className="text-xs text-stone-600">
-                        — {assiettes.length.toLocaleString('fr-FR')} parcelle(s) où la société ne détient que des lots
+                        — {assiettes.length.toLocaleString('fr-FR')} parcelle(s) où la société détient des locaux sans le sol
                         {assiettesEtendues.length > 0 && ` · assiette entière : +${assiettesEtendues.length.toLocaleString('fr-FR')} parcelle(s) du syndicat`}
                       </span>
                     </div>
                     <div className="px-6 py-3 text-xs text-stone-600 border-b border-stone-200">
-                      Le fichier des locaux rattache chaque lot à sa parcelle ; le sol, lui, n'est pas au compte de la société. Ces parcelles entrent dans les plans et le Dossier complet comme <b>assiettes</b>, marquées comme telles dans la désignation, avec la contenance du plan, et <b>ne comptent pas</b> dans la surface du portefeuille. Quand le syndicat des copropriétaires est recensé au fichier des parcelles (groupe de personne « copropriétaires »), son SIREN permet de reconstituer l'assiette entière — l'unité foncière du syndicat qui contient la parcelle du lot. Sinon la parcelle du lot reste seule. Rappel : la source ne donne ni numéro de lot d'EDD ni tantièmes ; la désignation du lot reste au relevé de propriété.
+                      Le fichier des locaux rattache chaque local à sa parcelle ; le sol, lui, n'est pas au compte de la société. <b>Un local n'est pas forcément un lot de copropriété</b> : c'est une unité fiscale (appartement, commerce, garage). La mention « assiette de copropriété » est réservée au sol d'un syndicat recensé ; un sol à une autre personne morale peut relever d'un bail emphytéotique, d'un bail à construction ou d'une division en volumes, à vérifier au titre. Ces parcelles entrent dans les plans et le Dossier complet, qualifiées de même dans la désignation, avec la contenance du plan, et <b>ne comptent pas</b> dans la surface du portefeuille. Quand le syndicat des copropriétaires est recensé au fichier des parcelles (groupe de personne « copropriétaires »), son SIREN permet de reconstituer l'assiette entière — l'unité foncière du syndicat qui contient la parcelle des locaux. Sinon la parcelle reste seule. Rappel : la source ne donne ni numéro de lot d'EDD ni tantièmes ; la désignation des lots reste au relevé de propriété et au règlement de copropriété.
                     </div>
                     <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
                       <table className="w-full text-sm">
@@ -4357,7 +4394,7 @@ export default function App() {
                           <tr>
                             <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
                             <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Lots</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Locaux</th>
                             <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
                             <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Sol</th>
                             <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette entière</th>
@@ -4409,7 +4446,7 @@ export default function App() {
                                     <div key={i} className="mt-1 text-blue-950">{t.denomination} <span className="text-stone-500">· droit {t.code_droit}{t.siren_reel ? ` · SIREN ${t.numero_siren}` : ''}</span></div>
                                   ))}
                                   {info && etat === 'non_recense' && (
-                                    <div className="mt-1 text-stone-500">aucune personne morale au sol : copropriétaires personnes physiques, hors fichier</div>
+                                    <div className="mt-1 text-stone-500">aucune personne morale au sol : titulaire hors fichier (personnes physiques), nature du droit à établir</div>
                                   )}
                                   {info && info.motif && <div className="mt-1 text-stone-500">{info.motif}</div>}
                                 </td>
@@ -4419,11 +4456,11 @@ export default function App() {
                                       <div className="font-medium">{unite.length.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(surfaceUnite)}</div>
                                       <div className="font-mono text-stone-600 break-words">{refsUnite.map((r) => designationCadastrale(r).replace('Section ', '').replace(' — Parcelle n° ', ' ')).join(' · ')}</div>
                                       {info.totalSyndicat > unite.length && (
-                                        <div className="text-stone-500">le syndicat détient {info.totalSyndicat.toLocaleString('fr-FR')} parcelle(s) au total ; seules celles d'un seul tenant avec l'assiette du lot sont retenues</div>
+                                        <div className="text-stone-500">le syndicat détient {info.totalSyndicat.toLocaleString('fr-FR')} parcelle(s) au total ; seules celles d'un seul tenant avec la parcelle des locaux sont retenues</div>
                                       )}
                                     </>
                                   ) : (etat === 'syndicat' ? <span className="text-stone-500">unité foncière non calculée{info && info.motif ? '' : '…'}</span>
-                                    : <span className="text-stone-500">limitée à la parcelle du lot</span>)}
+                                    : <span className="text-stone-500">limitée à la parcelle des locaux</span>)}
                                 </td>
                                 <td className="px-4 py-3 text-center">
                                   {lienUnite && (
@@ -4589,7 +4626,7 @@ export default function App() {
                                 : 'Aucune parcelle bâtie dans cette commune'}
                             </span>
                             <button onClick={cocherBatiesCarte} disabled={!refsBatiesCommune.length}
-                              title="Coche toutes les parcelles portant des lots, sans décocher les autres"
+                              title="Coche toutes les parcelles portant des locaux, sans décocher les autres"
                               className="ml-auto px-3 py-1 font-semibold text-white rounded-lg disabled:opacity-40"
                               style={{ backgroundColor: '#33838B' }}>
                               Parcelles bâties seulement
@@ -4628,12 +4665,16 @@ export default function App() {
                                     {batiDeRef(l.ref) && (
                                       <span className="text-xs font-semibold whitespace-nowrap" style={{ color: '#33838B' }}
                                         title="Locaux bâtis détenus sur cette parcelle">
-                                        {batiDeRef(l.ref).bats.toLocaleString('fr-FR')} bât. · {batiDeRef(l.ref).lots.toLocaleString('fr-FR')} lot{batiDeRef(l.ref).lots > 1 ? 's' : ''}
+                                        {batiDeRef(l.ref).bats.toLocaleString('fr-FR')} bât. · {batiDeRef(l.ref).lots.toLocaleString('fr-FR')} {batiDeRef(l.ref).lots > 1 ? 'locaux' : 'local'}
                                       </span>
                                     )}
-                                    {l.assiette && (
-                                      <span className="text-xs px-1.5 rounded border border-stone-300 text-stone-600" title="La société n'y détient que des lots : parcelle d'assiette de la copropriété, hors surface du portefeuille">assiette</span>
-                                    )}
+                                    {l.assiette && (() => {
+                                      const [txt, bulle] = LIBELLE_SOL[natureSol(l.ref) || 'attente'];
+                                      return (
+                                        <span className="text-xs px-1.5 rounded border border-stone-300 text-stone-600 whitespace-nowrap"
+                                          title={bulle + ' — hors surface du portefeuille'}>{txt}</span>
+                                      );
+                                    })()}
                                     {!contoursPlan?.get(l.ref) && (
                                       <span className="text-xs text-amber-700">sans contour</span>
                                     )}
@@ -4656,7 +4697,7 @@ export default function App() {
                             <span className="text-stone-600">{contenanceNotariale(carteSurface)}</span>
                             {carteBati.lots > 0 && (
                               <span className="text-xs font-semibold" style={{ color: '#33838B' }}>
-                                {carteBati.bats.toLocaleString('fr-FR')} bâtiment(s) · {carteBati.lots.toLocaleString('fr-FR')} lot(s) sur {carteBati.parcelles.toLocaleString('fr-FR')} parcelle(s)
+                                {carteBati.bats.toLocaleString('fr-FR')} bâtiment(s) · {carteBati.lots.toLocaleString('fr-FR')} local(aux) sur {carteBati.parcelles.toLocaleString('fr-FR')} parcelle(s)
                               </span>
                             )}
                             {carteApercu && carteApercu.mesurable && (
@@ -4886,7 +4927,7 @@ export default function App() {
                       </button>
                       <button onClick={() => setLocauxGroupes(false)}
                         className={`px-3 py-1.5 ${!locauxGroupes ? 'bg-blue-950 text-amber-400 font-medium' : 'bg-white text-stone-600'}`}>
-                        lot par lot
+                        local par local
                       </button>
                     </div>
                     {!locauxLoading && locaux.length > 0 && (
@@ -4907,16 +4948,16 @@ export default function App() {
                   {!locauxLoading && !locauxError && locaux.length === 0 && (
                     <div className="px-6 py-8 text-center text-sm text-stone-600">
                       Aucun local bâti au nom de cette personne morale.
-                      <div className="text-xs text-stone-500 mt-1">Le fichier des locaux ne comporte ni surface ni numéro invariant : un lot s'identifie par bâtiment, entrée, niveau et porte.</div>
+                      <div className="text-xs text-stone-500 mt-1">Le fichier des locaux ne comporte ni surface ni numéro invariant : un local s'identifie par bâtiment, entrée, niveau et porte. Ce n'est pas nécessairement un lot de copropriété.</div>
                     </div>
                   )}
 
                   {!locauxLoading && locaux.length > 0 && (
                     <>
                       <div className="px-6 py-3 border-b border-stone-200 text-xs text-stone-500">
-                        {locaux.length.toLocaleString('fr-FR')} lot{locaux.length > 1 ? 's' : ''} sur {immeubles.toLocaleString('fr-FR')} parcelle{immeubles > 1 ? 's' : ''} bâtie{immeubles > 1 ? 's' : ''}.
+                        {locaux.length.toLocaleString('fr-FR')} {locaux.length > 1 ? 'locaux' : 'local'} sur {immeubles.toLocaleString('fr-FR')} parcelle{immeubles > 1 ? 's' : ''} bâtie{immeubles > 1 ? 's' : ''}.
                         {qLocaux && ` Filtre actif : ${(locauxGroupes ? immeublesAffiches.length : locauxAffiches.length).toLocaleString('fr-FR')} ligne(s) affichée(s).`}
-                        {' '}Un même lot peut figurer deux fois à des titres de droit différents.
+                        {' '}Un même local peut figurer deux fois à des titres de droit différents. Un local est une unité fiscale, pas nécessairement un lot de copropriété.
                       </div>
                       <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
                         <table className="w-full text-sm">
@@ -4927,7 +4968,7 @@ export default function App() {
                                 <EnTete label="Commune" champ="commune" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Adresse" champ="adresse" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Parcelle" champ="codeParcelle" tri={triLocaux} onTri={setTriLocaux} />
-                                <EnTete label="Lots" champ="nbLots" tri={triLocaux} onTri={setTriLocaux} align="text-right" />
+                                <EnTete label="Locaux" champ="nbLots" tri={triLocaux} onTri={setTriLocaux} align="text-right" />
                                 <EnTete label="Bâtiments" champ="batimentsTxt" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
                                 <EnTete label="Titres" champ="titresTxt" tri={triLocaux} onTri={setTriLocaux} />
                                 <EnTete label="Extrait" champ="" tri={triLocaux} onTri={setTriLocaux} align="text-center" />
