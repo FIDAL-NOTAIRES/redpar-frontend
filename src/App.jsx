@@ -4210,96 +4210,75 @@ export default function App() {
               </div>
             )}
 
-            {/* Ordre du haut de page, décision JFD du 29/09/2026 : bandeau « Plans »,
-                puis « Exports », puis la carte. */}
-              {/* ------------------------------------------------------------
-                  PLANS — bandeau à part, décision JFD du 29/09/2026 (titre abrégé en « Plans » le même jour).
-                  Les deux boutons logeaient dans l'en-tête de « Détail des
-                  parcelles », alors qu'ils portent sur tout le portefeuille (le
-                  plan à la carte prend aussi les locaux sans le sol, le dossier
-                  complet couvre toutes les communes) ; tableaux repliés, on ne
-                  pensait plus à les chercher là. Le panneau du plan à la carte
-                  s'ouvre juste en dessous.
-                  ------------------------------------------------------------ */}
-              {!parcellesLoading && parcelles.length > 0 && (
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
-                    <MapIcon className="w-5 h-5 text-blue-950" />
-                    <div>
-                      <h3 className="font-semibold text-blue-950">Plans</h3>
-                      {lot && !lot.fini && (
-                        <div className="text-xs font-semibold" style={{ color: '#33838B' }}>
-                          Archive du dossier complet en cours : {lot.faits} / {lot.total}
-                        </div>
-                      )}
-                      <div className="text-xs text-stone-500">
-                        Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune, à générer un à un. Dossier compilé : tous les documents d'un coup, dans une archive ZIP ouverte par un sommaire général.
-                      </div>
-                    </div>
-                    <div className="ml-auto flex items-center gap-2">
-                      <button onClick={ouvrirCarte} disabled={!parcelles.length}
-                        title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
-                        className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
-                        style={{ backgroundColor: '#A01040' }}>
-                        Plan à la carte
-                      </button>
-                      <button onClick={() => { setArchiveEnVue(false); setDossierOuvert(true); }} disabled={!parcelles.length}
-                        title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
-                        className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
-                        style={{ backgroundColor: '#33838B' }}>
-                        Dossier complet
-                      </button>
-                      {/* Accès direct à l'archive (29/09/2026) : ouvre la fenêtre du
-                          dossier complet, bande de l'archive mise en évidence — le
-                          n° de dossier se vérifie avant de lancer. */}
-                      <button onClick={() => { setArchiveEnVue(true); setDossierOuvert(true); }} disabled={!parcelles.length}
-                        title="Tous les documents du dossier complet d'un coup, dans une archive ZIP ouverte par un sommaire général"
-                        className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
-                        style={{ backgroundColor: '#0F2238' }}>
-                        Dossier compilé (ZIP)
-                      </button>
-                    </div>
-                  </div>
+            {/* ------------------------------------------------------------
+                PLANS ET EXPORTS — un seul bandeau, décision JFD du 29/09/2026
+                (il y en avait deux, Plans puis Exports). Tout ce qui produit
+                une pièce est réuni au même endroit, au-dessus de la carte, sur
+                deux lignes : les plans, puis les exports. Non repliable : ce
+                sont les boutons d'action de la page.
+                ------------------------------------------------------------ */}
+            {!parcellesLoading && parcelles.length > 0 && (
+              <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3 flex-wrap">
+                  <MapIcon className="w-5 h-5 text-blue-950" />
+                  <h3 className="font-semibold text-blue-950">Plans et exports</h3>
+                  {lot && !lot.fini && (
+                    <span className="text-xs font-semibold" style={{ color: '#33838B' }}>
+                      Archive du dossier complet en cours : {lot.faits} / {lot.total}
+                    </span>
+                  )}
+                  {geoStatus && !geoStatus.termine && (
+                    <span className="ml-auto flex items-center gap-1.5 text-xs text-amber-700">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      localisation en cours — attendez pour des liens à la parcelle
+                    </span>
+                  )}
                 </div>
-              )}
-
-              {/* ------------------------------------------------------------
-                  EXPORTS — Excel et PDF sortis de la barre du haut et posés sur
-                  un bandeau à eux, AU-DESSUS du bandeau « Plans » : décision JFD
-                  du 29/09/2026. Tout ce qui produit une pièce se lit ainsi de
-                  haut en bas, au même endroit de la page.
-                  ------------------------------------------------------------ */}
-              {!parcellesLoading && parcelles.length > 0 && (
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
-                    <Download className="w-5 h-5 text-blue-950" />
-                    <div>
-                      <h3 className="font-semibold text-blue-950">Exports</h3>
-                      <div className="text-xs text-stone-500">
-                        Excel : le relevé complet, une feuille par commune. PDF : le rapport de synthèse.
-                      </div>
-                    </div>
-                    <div className="ml-auto flex items-center gap-2 flex-wrap">
-                      {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
-                        <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                          localisation en cours — attendez pour des liens à la parcelle
-                        </span>
-                      )}
-                      {!parcellesLoading && parcelles.length > 0 && (
-                        <>
-                          <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
-                            {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
-                          </button>
-                          <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
-                            {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
-                          </button>
-                        </>
-                      )}
-                    </div>
-                  </div>
+                <div className="px-6 py-3 flex items-center gap-2 flex-wrap border-b border-stone-100">
+                  <span className="w-20 text-xs font-semibold uppercase text-stone-500">Plans</span>
+                  <button onClick={ouvrirCarte} disabled={!parcelles.length}
+                    title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
+                    className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                    style={{ backgroundColor: '#A01040' }}>
+                    Plan à la carte
+                  </button>
+                  <button onClick={() => { setArchiveEnVue(false); setDossierOuvert(true); }} disabled={!parcelles.length}
+                    title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
+                    className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                    style={{ backgroundColor: '#33838B' }}>
+                    Dossier complet
+                  </button>
+                  {/* Accès direct à l'archive : ouvre la fenêtre du dossier complet,
+                      bande de l'archive mise en évidence — le n° de dossier se
+                      vérifie avant de lancer. */}
+                  <button onClick={() => { setArchiveEnVue(true); setDossierOuvert(true); }} disabled={!parcelles.length}
+                    title="Tous les documents du dossier complet d'un coup, dans une archive ZIP ouverte par un sommaire général"
+                    className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                    style={{ backgroundColor: '#0F2238' }}>
+                    Dossier compilé (ZIP)
+                  </button>
+                  <span className="text-xs text-stone-500 flex-1 min-w-[16rem] ml-2">
+                    les parcelles de votre choix sur un plan · un document par commune · tous les documents dans une archive
+                  </span>
                 </div>
-              )}
+                <div className="px-6 py-3 flex items-center gap-2 flex-wrap">
+                  <span className="w-20 text-xs font-semibold uppercase text-stone-500">Exports</span>
+                  <button onClick={exportExcel} disabled={exportingExcel}
+                    title="Le relevé complet, une feuille par commune"
+                    className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
+                    {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
+                  </button>
+                  <button onClick={exportPdf} disabled={exportingPdf}
+                    title="Le rapport de synthèse"
+                    className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
+                    {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
+                  </button>
+                  <span className="text-xs text-stone-500 flex-1 min-w-[16rem] ml-2">
+                    Excel : le relevé complet, une feuille par commune · PDF : le rapport de synthèse
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* CARTE — remontée juste au-dessus de « Répartition par type de
                 droits retenus » : décision JFD du 29/09/2026. */}
