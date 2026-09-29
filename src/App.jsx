@@ -1858,6 +1858,8 @@ export default function App() {
   // porte que sur une commune (le clic ne servirait à rien).
   const [communesParcOuvertes, setCommunesParcOuvertes] = useState(() => new Set());
   const [communesLocOuvertes, setCommunesLocOuvertes] = useState(() => new Set());
+  // Même dépliage par commune dans « Détail des locaux sans le sol » (29/09/2026).
+  const [communesAssOuvertes, setCommunesAssOuvertes] = useState(() => new Set());
   // Regroupe une liste DÉJÀ FILTRÉE ET TRIÉE par commune (code INSEE en tête de
   // la référence, qui départage les homonymes) : une ligne d'en-tête cliquable
   // par commune, puis ses lignes dans l'ordre du tri choisi. Les communes sont
@@ -4305,7 +4307,11 @@ export default function App() {
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Départements et palmarès des communes CÔTE À CÔTE dès 768 px de
+                    large (et non plus 1 024) — demandé par JFD le 29/09/2026 : sur
+                    une fenêtre ordinaire les deux blocs s'empilaient. items-start :
+                    le palmarès déplié ne fait pas s'allonger le bloc voisin. */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
                   <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                     <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
                       <BarChart3 className="w-4 h-4 text-blue-950" />
@@ -4435,193 +4441,42 @@ export default function App() {
                 )}
 
                 {/* ------------------------------------------------------------
-                    COPROPRIÉTÉS — PARCELLES D'ASSIETTE (03/09/2026, v11 § 5)
+                    PLANS CADASTRAUX — bandeau à part, décision JFD du 29/09/2026.
+                    Les deux boutons logeaient dans l'en-tête de « Détail des
+                    parcelles », alors qu'ils portent sur tout le portefeuille (le
+                    plan à la carte prend aussi les locaux sans le sol, le dossier
+                    complet couvre toutes les communes) ; tableaux repliés, on ne
+                    pensait plus à les chercher là. Le panneau du plan à la carte
+                    s'ouvre juste en dessous.
                     ------------------------------------------------------------ */}
-                {assiettes.length > 0 && (
+                {parcelles.length > 0 && (
                   <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
-                      <button onClick={() => setAssiettesDepliees((v) => !v)} title={assiettesDepliees ? "Replier" : "Déplier"}
-                        className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
-                        <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${assiettesDepliees ? 'rotate-90' : ''}`} strokeWidth={2.5} />
-                      </button>
-                      <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setAssiettesDepliees((v) => !v)}>Détail des locaux sans le sol (copropriétés et sols d'un tiers)</h3>
-                      <span className="text-xs text-stone-600">
-                        — {assiettes.length.toLocaleString('fr-FR')} parcelle(s) où la société détient des locaux sans le sol
-                        {assiettesEtendues.length > 0 && ` · assiette entière : +${assiettesEtendues.length.toLocaleString('fr-FR')} parcelle(s) du syndicat`}
-                      </span>
+                    <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
+                      <MapIcon className="w-5 h-5 text-blue-950" />
+                      <div>
+                        <h3 className="font-semibold text-blue-950">Plans cadastraux</h3>
+                        <div className="text-xs text-stone-500">
+                          Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune pour tout le relevé.
+                        </div>
+                      </div>
+                      <div className="ml-auto flex items-center gap-2">
+                        <button onClick={ouvrirCarte} disabled={!parcelles.length}
+                          title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
+                          className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                          style={{ backgroundColor: '#A01040' }}>
+                          Plan à la carte
+                        </button>
+                        <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
+                          title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
+                          className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                          style={{ backgroundColor: '#33838B' }}>
+                          Dossier complet
+                        </button>
+                      </div>
                     </div>
-                    {assiettesDepliees && (<>
-                    <div className="px-6 py-3 text-xs text-stone-600 border-b border-stone-200">
-                      Le fichier des locaux rattache chaque local à sa parcelle ; le sol, lui, n'est pas au compte de la société. <b>Un local n'est pas forcément un lot de copropriété</b> : c'est une unité fiscale (appartement, commerce, garage). La mention « assiette de copropriété » est réservée au sol d'un syndicat recensé ; un sol à une autre personne morale peut relever d'un bail emphytéotique, d'un bail à construction ou d'une division en volumes, à vérifier au titre. Ces parcelles entrent dans les plans et le Dossier complet, qualifiées de même dans la désignation, avec la contenance du plan, et <b>ne comptent pas</b> dans la surface du portefeuille. Quand le syndicat des copropriétaires est recensé au fichier des parcelles (groupe de personne « copropriétaires »), son SIREN permet de reconstituer l'assiette entière — l'unité foncière du syndicat qui contient la parcelle des locaux. Sinon la parcelle reste seule. Rappel : la source ne donne ni numéro de lot d'EDD ni tantièmes ; la désignation des lots reste au relevé de propriété et au règlement de copropriété.
-                    </div>
-                    <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
-                      <table className="w-full text-sm">
-                        <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Locaux</th>
-                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Sol</th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette entière</th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Plan colorisé</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {assiettes.map((a) => {
-                            const info = assiettesInfo ? assiettesInfo.get(a.codeParcelle) : null;
-                            const etat = info ? info.etat : (geoStatus && geoStatus.termine ? 'recherche' : 'attente');
-                            const unite = (info && info.unite) || [];
-                            const refsUnite = unite.map((o) => o.codeParcelle);
-                            const surfaceUnite = unite.reduce((t, o) => t + (Number(o.contenance) || 0), 0);
-                            const lienUnite = refsUnite.length >= 2
-                              ? lienPaintUnite(refsUnite, surfaceParRef, contoursPlan, a.commune, adresseParRef)
-                              : lienPaintColorise(a.codeParcelle, a.commune, contoursPlan?.get(a.codeParcelle));
-                            const pastille = {
-                              attente: ['bg-stone-50 text-stone-500 border-stone-300', 'en attente du géocodage'],
-                              recherche: ['bg-stone-50 text-stone-500 border-stone-300', 'recherche du titulaire du sol…'],
-                              syndicat: ['bg-emerald-50 text-emerald-800 border-emerald-300', 'syndicat recensé'],
-                              majic: ['bg-amber-50 text-amber-800 border-amber-300', 'syndicat sans identifiant'],
-                              autre_titulaire: ['bg-amber-50 text-amber-800 border-amber-300', 'sol à une autre personne morale'],
-                              non_recense: ['bg-stone-50 text-stone-600 border-stone-300', 'syndicat non recensé'],
-                              indisponible: ['bg-stone-50 text-stone-500 border-stone-300', 'recherche inverse indisponible'],
-                              erreur: ['bg-red-50 text-red-800 border-red-300', 'erreur'],
-                            }[etat] || ['bg-stone-50 text-stone-500 border-stone-300', etat];
-                            return (
-                              <tr key={a.codeParcelle} className="border-b border-stone-100 hover:bg-stone-50 align-top">
-                                <td className="px-4 py-3 text-blue-950">{a.commune}<div className="text-xs text-stone-500">{a.adresse}</div></td>
-                                <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">
-                                  {a.codeParcelle}
-                                  <div className="font-sans text-stone-500">{designationCadastrale(a.codeParcelle)}</div>
-                                </td>
-                                <td className="px-4 py-3 text-right text-blue-950">{a.nbLots.toLocaleString('fr-FR')}</td>
-                                <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{a.contenance != null ? `${Number(a.contenance).toLocaleString('fr-FR')} m²` : '—'}</td>
-                                <td className="px-4 py-3 text-xs">
-                                  <span className={`px-2 py-0.5 rounded border ${pastille[0]}`}>{pastille[1]}</span>
-                                  {info && info.syndicat && (
-                                    <div className="mt-1 text-blue-950">
-                                      {info.syndicat.denomination}
-                                      <span className="text-stone-500"> · {info.syndicat.sirenReel ? `SIREN ${info.syndicat.siren}`
-                                        : (info.syndicat.siren ? `identifiant MAJIC ${info.syndicat.siren} (sans SIREN)` : `n° MAJIC ${info.syndicat.majic || '?'}`)}</span>
-                                      {info.syndicat.par && info.syndicat.par !== 'groupe' && (
-                                        <span className="text-amber-800"> · reconnu par {info.syndicat.par === 'denomination' ? 'sa dénomination' : 'le droit S (syndic)'}, pas par le groupe de personne</span>
-                                      )}
-                                    </div>
-                                  )}
-                                  {info && etat === 'autre_titulaire' && (info.titulaires || []).slice(0, 3).map((t, i) => (
-                                    <div key={i} className="mt-1 text-blue-950">{t.denomination} <span className="text-stone-500">· droit {t.code_droit}{t.siren_reel ? ` · SIREN ${t.numero_siren}` : ''}</span></div>
-                                  ))}
-                                  {info && etat === 'non_recense' && (
-                                    <div className="mt-1 text-stone-500">aucune personne morale au sol : titulaire hors fichier (personnes physiques), nature du droit à établir</div>
-                                  )}
-                                  {info && info.motif && <div className="mt-1 text-stone-500">{info.motif}</div>}
-                                </td>
-                                <td className="px-4 py-3 text-xs text-blue-950">
-                                  {etat === 'syndicat' && info.uniteTrouvee ? (
-                                    <>
-                                      <div className="font-medium">{unite.length.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(surfaceUnite)}</div>
-                                      <div className="font-mono text-stone-600 break-words">{refsUnite.map((r) => designationCadastrale(r).replace('Section ', '').replace(' — Parcelle n° ', ' ')).join(' · ')}</div>
-                                      {info.totalSyndicat > unite.length && (
-                                        <div className="text-stone-500">le syndicat détient {info.totalSyndicat.toLocaleString('fr-FR')} parcelle(s) au total ; seules celles d'un seul tenant avec la parcelle des locaux sont retenues</div>
-                                      )}
-                                    </>
-                                  ) : (etat === 'syndicat' ? <span className="text-stone-500">unité foncière non calculée{info && info.motif ? '' : '…'}</span>
-                                    : <span className="text-stone-500">limitée à la parcelle des locaux</span>)}
-                                </td>
-                                <td className="px-4 py-3 text-center">
-                                  {lienUnite && (
-                                    <a href={lienUnite} target="_blank" rel="noreferrer"
-                                      title={refsUnite.length >= 2 ? "Plan de l'assiette entière, toutes parcelles coloriées" : 'Plan de la parcelle d\'assiette, coloriée'}
-                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
-                                  )}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                    </>)}
                   </div>
                 )}
 
-                {/* ------------------------------------------------------------
-                    PLAN À LA CARTE — commune, puis sections en accordéon.
-                    La commune est VERROUILLANTE : le service ne sert qu'une
-                    emprise, donc un plan ne porte que sur une commune. Le code
-                    INSEE est affiché parce qu'il départage les homonymes, comme
-                    dans le classeur. Les sections ne sont qu'un accordéon de
-                    navigation : le panier traverse les sections, une unité
-                    foncière enjambant volontiers une limite de section.
-                    ------------------------------------------------------------ */}
-                {dossierOuvert && (
-                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
-                    <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
-                      <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-3">
-                        <MapPin className="w-4 h-4" style={{ color: '#33838B' }} />
-                        <h3 className="font-semibold text-blue-950">Dossier complet</h3>
-                        <span className="text-sm text-stone-600">
-                          {dossierLignes ? dossierLignes.length : 0} document(s) · {parcelles.length.toLocaleString('fr-FR')} parcelle(s)
-                        </span>
-                        <button onClick={() => setDossierOuvert(false)}
-                          className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
-                      </div>
-                      <div className="px-6 py-3 text-xs text-amber-800 bg-amber-50 border-b border-amber-100">
-                        Un document par volume — sections entières regroupées par 50 parcelles. Chaque parcelle
-                        coûte un extrait officiel colorié (~18 s : service du cadastre à débit limité, calage et
-                        peinture) plus ses vues : la durée estimée figure par ligne. Le document se génère et se
-                        télécharge tout seul dans l'onglet PAINT — la coche suit votre avancement.
-                      </div>
-                      <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3">
-                        <label className="text-xs text-stone-600 whitespace-nowrap" htmlFor="dossierNum">N° de dossier</label>
-                        <input id="dossierNum" type="text" value={dossierNum}
-                          onChange={(e) => setDossierNum(e.target.value)}
-                          placeholder="porté au pied de page de tous les documents (dossier complet, panier, liens unitaires)"
-                          className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
-                      </div>
-                      <div className="overflow-y-auto px-6 py-3">
-                        {(dossierLignes || []).map((lg) => {
-                          const lienOk = !!lienDossierCommune(lg);
-                          const aContour = lg.refs.some((r) => contoursPlan?.get(r));
-                          return (
-                            <div key={lg.cle} className="flex items-center gap-3 py-2 border-b border-stone-100">
-                              <input type="checkbox" checked={dossierFaits.has(lg.cle)}
-                                onChange={() => basculerDossierFait(lg.cle)}
-                                title="Fait / à faire" className="accent-teal-700" />
-                              <div className="flex-1 min-w-0">
-                                <span className={dossierFaits.has(lg.cle) ? 'text-stone-400' : 'text-blue-950 font-medium'}>
-                                  {dossierFaits.has(lg.cle) && <span style={{ color: '#33838B' }}>✓ </span>}{lg.nom}
-                                  {lg.volume && <span className="font-normal text-stone-500"> — volume {lg.volume.replace('/', ' de ')}</span>}
-                                </span>
-                                <span className="text-stone-400 text-xs ml-2">({lg.insee})</span>
-                                {!aContour && contours && (
-                                  <div className="text-xs" style={{ color: '#A01040' }}>Aucun contour pour ce volume — plan centré sur une parcelle, sans colorisation.</div>
-                                )}
-                                {!lienOk && contours && aContour && (
-                                  <div className="text-xs" style={{ color: '#A01040' }}>Volume à cheval sur deux zones coniques conformes : document impossible d'un tenant.</div>
-                                )}
-                              </div>
-                              <span className="text-xs text-stone-600 whitespace-nowrap">{lg.nb.toLocaleString('fr-FR')} parc.{lg.nbAssiettes ? ` (dont ${lg.nbAssiettes} assiette${lg.nbAssiettes > 1 ? 's' : ''})` : ''} · {contenanceNotariale(lg.surface)}</span>
-                              <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(lg.nb)}</span>
-                              <button onClick={() => genererDossierCommune(lg)}
-                                disabled={!contours || !lienOk}
-                                className="px-3 py-1.5 text-xs font-semibold text-white rounded-lg disabled:opacity-40"
-                                style={{ backgroundColor: '#33838B' }}>
-                                Générer
-                              </button>
-                            </div>
-                          );
-                        })}
-                        {!contours && (
-                          <div className="text-xs text-stone-500 py-3">Les contours se chargent avec le relevé — patientez, les boutons s'activeront d'eux-mêmes.</div>
-                        )}
-                      </div>
-                      <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
-                        {dossierFaits.size} / {dossierLignes ? dossierLignes.length : 0} document(s) généré(s)
-                      </div>
-                    </div>
-                  </div>
-                )}
                 {carteOuverte && (
                   <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
                     <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
@@ -4840,6 +4695,195 @@ export default function App() {
                   </div>
                 )}
 
+                {/* ------------------------------------------------------------
+                    COPROPRIÉTÉS — PARCELLES D'ASSIETTE (03/09/2026, v11 § 5)
+                    ------------------------------------------------------------ */}
+                {assiettes.length > 0 && (
+                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                    <div className="px-6 py-4 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
+                      <button onClick={() => setAssiettesDepliees((v) => !v)} title={assiettesDepliees ? "Replier" : "Déplier"}
+                        className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                        <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${assiettesDepliees ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                      </button>
+                      <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setAssiettesDepliees((v) => !v)}>Détail des locaux sans le sol (copropriétés et sols d'un tiers)</h3>
+                      <span className="text-xs text-stone-600">
+                        — {assiettes.length.toLocaleString('fr-FR')} parcelle(s) où la société détient des locaux sans le sol
+                        {assiettesEtendues.length > 0 && ` · assiette entière : +${assiettesEtendues.length.toLocaleString('fr-FR')} parcelle(s) du syndicat`}
+                      </span>
+                    </div>
+                    {assiettesDepliees && (<>
+                    <div className="px-6 py-3 text-xs text-stone-600 border-b border-stone-200">
+                      Le fichier des locaux rattache chaque local à sa parcelle ; le sol, lui, n'est pas au compte de la société. <b>Un local n'est pas forcément un lot de copropriété</b> : c'est une unité fiscale (appartement, commerce, garage). La mention « assiette de copropriété » est réservée au sol d'un syndicat recensé ; un sol à une autre personne morale peut relever d'un bail emphytéotique, d'un bail à construction ou d'une division en volumes, à vérifier au titre. Ces parcelles entrent dans les plans et le Dossier complet, qualifiées de même dans la désignation, avec la contenance du plan, et <b>ne comptent pas</b> dans la surface du portefeuille. Quand le syndicat des copropriétaires est recensé au fichier des parcelles (groupe de personne « copropriétaires »), son SIREN permet de reconstituer l'assiette entière — l'unité foncière du syndicat qui contient la parcelle des locaux. Sinon la parcelle reste seule. Rappel : la source ne donne ni numéro de lot d'EDD ni tantièmes ; la désignation des lots reste au relevé de propriété et au règlement de copropriété.
+                    </div>
+                    <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Locaux</th>
+                            <th className="px-4 py-3 text-right text-xs font-semibold text-stone-600 uppercase">Plan</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Sol</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Assiette entière</th>
+                            <th className="px-4 py-3 text-center text-xs font-semibold text-stone-600 uppercase">Plan colorisé</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rangsParCommune(assiettes, communesAssOuvertes, setCommunesAssOuvertes, false, (n) => `${n.toLocaleString('fr-FR')} parcelle${n > 1 ? 's' : ''}`, (a) => {
+                            const info = assiettesInfo ? assiettesInfo.get(a.codeParcelle) : null;
+                            const etat = info ? info.etat : (geoStatus && geoStatus.termine ? 'recherche' : 'attente');
+                            const unite = (info && info.unite) || [];
+                            const refsUnite = unite.map((o) => o.codeParcelle);
+                            const surfaceUnite = unite.reduce((t, o) => t + (Number(o.contenance) || 0), 0);
+                            const lienUnite = refsUnite.length >= 2
+                              ? lienPaintUnite(refsUnite, surfaceParRef, contoursPlan, a.commune, adresseParRef)
+                              : lienPaintColorise(a.codeParcelle, a.commune, contoursPlan?.get(a.codeParcelle));
+                            const pastille = {
+                              attente: ['bg-stone-50 text-stone-500 border-stone-300', 'en attente du géocodage'],
+                              recherche: ['bg-stone-50 text-stone-500 border-stone-300', 'recherche du titulaire du sol…'],
+                              syndicat: ['bg-emerald-50 text-emerald-800 border-emerald-300', 'syndicat recensé'],
+                              majic: ['bg-amber-50 text-amber-800 border-amber-300', 'syndicat sans identifiant'],
+                              autre_titulaire: ['bg-amber-50 text-amber-800 border-amber-300', 'sol à une autre personne morale'],
+                              non_recense: ['bg-stone-50 text-stone-600 border-stone-300', 'syndicat non recensé'],
+                              indisponible: ['bg-stone-50 text-stone-500 border-stone-300', 'recherche inverse indisponible'],
+                              erreur: ['bg-red-50 text-red-800 border-red-300', 'erreur'],
+                            }[etat] || ['bg-stone-50 text-stone-500 border-stone-300', etat];
+                            return (
+                              <tr key={a.codeParcelle} className="border-b border-stone-100 hover:bg-stone-50 align-top">
+                                <td className="px-4 py-3 text-blue-950">{a.commune}<div className="text-xs text-stone-500">{a.adresse}</div></td>
+                                <td className="px-4 py-3 font-mono text-xs text-blue-950 whitespace-nowrap">
+                                  {a.codeParcelle}
+                                  <div className="font-sans text-stone-500">{designationCadastrale(a.codeParcelle)}</div>
+                                </td>
+                                <td className="px-4 py-3 text-right text-blue-950">{a.nbLots.toLocaleString('fr-FR')}</td>
+                                <td className="px-4 py-3 text-right text-blue-950 whitespace-nowrap">{a.contenance != null ? `${Number(a.contenance).toLocaleString('fr-FR')} m²` : '—'}</td>
+                                <td className="px-4 py-3 text-xs">
+                                  <span className={`px-2 py-0.5 rounded border ${pastille[0]}`}>{pastille[1]}</span>
+                                  {info && info.syndicat && (
+                                    <div className="mt-1 text-blue-950">
+                                      {info.syndicat.denomination}
+                                      <span className="text-stone-500"> · {info.syndicat.sirenReel ? `SIREN ${info.syndicat.siren}`
+                                        : (info.syndicat.siren ? `identifiant MAJIC ${info.syndicat.siren} (sans SIREN)` : `n° MAJIC ${info.syndicat.majic || '?'}`)}</span>
+                                      {info.syndicat.par && info.syndicat.par !== 'groupe' && (
+                                        <span className="text-amber-800"> · reconnu par {info.syndicat.par === 'denomination' ? 'sa dénomination' : 'le droit S (syndic)'}, pas par le groupe de personne</span>
+                                      )}
+                                    </div>
+                                  )}
+                                  {info && etat === 'autre_titulaire' && (info.titulaires || []).slice(0, 3).map((t, i) => (
+                                    <div key={i} className="mt-1 text-blue-950">{t.denomination} <span className="text-stone-500">· droit {t.code_droit}{t.siren_reel ? ` · SIREN ${t.numero_siren}` : ''}</span></div>
+                                  ))}
+                                  {info && etat === 'non_recense' && (
+                                    <div className="mt-1 text-stone-500">aucune personne morale au sol : titulaire hors fichier (personnes physiques), nature du droit à établir</div>
+                                  )}
+                                  {info && info.motif && <div className="mt-1 text-stone-500">{info.motif}</div>}
+                                </td>
+                                <td className="px-4 py-3 text-xs text-blue-950">
+                                  {etat === 'syndicat' && info.uniteTrouvee ? (
+                                    <>
+                                      <div className="font-medium">{unite.length.toLocaleString('fr-FR')} parcelle(s) · {contenanceNotariale(surfaceUnite)}</div>
+                                      <div className="font-mono text-stone-600 break-words">{refsUnite.map((r) => designationCadastrale(r).replace('Section ', '').replace(' — Parcelle n° ', ' ')).join(' · ')}</div>
+                                      {info.totalSyndicat > unite.length && (
+                                        <div className="text-stone-500">le syndicat détient {info.totalSyndicat.toLocaleString('fr-FR')} parcelle(s) au total ; seules celles d'un seul tenant avec la parcelle des locaux sont retenues</div>
+                                      )}
+                                    </>
+                                  ) : (etat === 'syndicat' ? <span className="text-stone-500">unité foncière non calculée{info && info.motif ? '' : '…'}</span>
+                                    : <span className="text-stone-500">limitée à la parcelle des locaux</span>)}
+                                </td>
+                                <td className="px-4 py-3 text-center">
+                                  {lienUnite && (
+                                    <a href={lienUnite} target="_blank" rel="noreferrer"
+                                      title={refsUnite.length >= 2 ? "Plan de l'assiette entière, toutes parcelles coloriées" : 'Plan de la parcelle d\'assiette, coloriée'}
+                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    </>)}
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------
+                    PLAN À LA CARTE — commune, puis sections en accordéon.
+                    La commune est VERROUILLANTE : le service ne sert qu'une
+                    emprise, donc un plan ne porte que sur une commune. Le code
+                    INSEE est affiché parce qu'il départage les homonymes, comme
+                    dans le classeur. Les sections ne sont qu'un accordéon de
+                    navigation : le panier traverse les sections, une unité
+                    foncière enjambant volontiers une limite de section.
+                    ------------------------------------------------------------ */}
+                {dossierOuvert && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ backgroundColor: 'rgba(15,34,56,0.55)' }}>
+                    <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl flex flex-col" style={{ maxHeight: '88vh' }}>
+                      <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-3">
+                        <MapPin className="w-4 h-4" style={{ color: '#33838B' }} />
+                        <h3 className="font-semibold text-blue-950">Dossier complet</h3>
+                        <span className="text-sm text-stone-600">
+                          {dossierLignes ? dossierLignes.length : 0} document(s) · {parcelles.length.toLocaleString('fr-FR')} parcelle(s)
+                        </span>
+                        <button onClick={() => setDossierOuvert(false)}
+                          className="ml-auto text-stone-400 hover:text-stone-700 text-xl leading-none">×</button>
+                      </div>
+                      <div className="px-6 py-3 text-xs text-amber-800 bg-amber-50 border-b border-amber-100">
+                        Un document par volume — sections entières regroupées par 50 parcelles. Chaque parcelle
+                        coûte un extrait officiel colorié (~18 s : service du cadastre à débit limité, calage et
+                        peinture) plus ses vues : la durée estimée figure par ligne. Le document se génère et se
+                        télécharge tout seul dans l'onglet PAINT — la coche suit votre avancement.
+                      </div>
+                      <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3">
+                        <label className="text-xs text-stone-600 whitespace-nowrap" htmlFor="dossierNum">N° de dossier</label>
+                        <input id="dossierNum" type="text" value={dossierNum}
+                          onChange={(e) => setDossierNum(e.target.value)}
+                          placeholder="porté au pied de page de tous les documents (dossier complet, panier, liens unitaires)"
+                          className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
+                      </div>
+                      <div className="overflow-y-auto px-6 py-3">
+                        {(dossierLignes || []).map((lg) => {
+                          const lienOk = !!lienDossierCommune(lg);
+                          const aContour = lg.refs.some((r) => contoursPlan?.get(r));
+                          return (
+                            <div key={lg.cle} className="flex items-center gap-3 py-2 border-b border-stone-100">
+                              <input type="checkbox" checked={dossierFaits.has(lg.cle)}
+                                onChange={() => basculerDossierFait(lg.cle)}
+                                title="Fait / à faire" className="accent-teal-700" />
+                              <div className="flex-1 min-w-0">
+                                <span className={dossierFaits.has(lg.cle) ? 'text-stone-400' : 'text-blue-950 font-medium'}>
+                                  {dossierFaits.has(lg.cle) && <span style={{ color: '#33838B' }}>✓ </span>}{lg.nom}
+                                  {lg.volume && <span className="font-normal text-stone-500"> — volume {lg.volume.replace('/', ' de ')}</span>}
+                                </span>
+                                <span className="text-stone-400 text-xs ml-2">({lg.insee})</span>
+                                {!aContour && contours && (
+                                  <div className="text-xs" style={{ color: '#A01040' }}>Aucun contour pour ce volume — plan centré sur une parcelle, sans colorisation.</div>
+                                )}
+                                {!lienOk && contours && aContour && (
+                                  <div className="text-xs" style={{ color: '#A01040' }}>Volume à cheval sur deux zones coniques conformes : document impossible d'un tenant.</div>
+                                )}
+                              </div>
+                              <span className="text-xs text-stone-600 whitespace-nowrap">{lg.nb.toLocaleString('fr-FR')} parc.{lg.nbAssiettes ? ` (dont ${lg.nbAssiettes} assiette${lg.nbAssiettes > 1 ? 's' : ''})` : ''} · {contenanceNotariale(lg.surface)}</span>
+                              <span className="text-xs text-stone-500 whitespace-nowrap">{dureeDossier(lg.nb)}</span>
+                              <button onClick={() => genererDossierCommune(lg)}
+                                disabled={!contours || !lienOk}
+                                className="px-3 py-1.5 text-xs font-semibold text-white rounded-lg disabled:opacity-40"
+                                style={{ backgroundColor: '#33838B' }}>
+                                Générer
+                              </button>
+                            </div>
+                          );
+                        })}
+                        {!contours && (
+                          <div className="text-xs text-stone-500 py-3">Les contours se chargent avec le relevé — patientez, les boutons s'activeront d'eux-mêmes.</div>
+                        )}
+                      </div>
+                      <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
+                        {dossierFaits.size} / {dossierLignes ? dossierLignes.length : 0} document(s) généré(s)
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                   <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
                     <button onClick={() => setParcellesDepliees((v) => !v)} title={parcellesDepliees ? "Replier" : "Déplier"}
@@ -4856,18 +4900,6 @@ export default function App() {
                       <span className="text-xs text-stone-500">{parcellesAffichees.length.toLocaleString('fr-FR')} sur {parcelles.length.toLocaleString('fr-FR')}</span>
                     )}
                     <span className="ml-2 text-xs px-2 py-0.5 bg-green-50 text-green-700 rounded border border-green-200">Fichiers DGFiP des personnes morales — millésime 2025</span>
-                    <button onClick={ouvrirCarte} disabled={!parcelles.length}
-                      title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
-                      className="ml-auto px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                      style={{ backgroundColor: '#A01040' }}>
-                      Plan à la carte
-                    </button>
-                    <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
-                      title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
-                      className="px-3 py-1.5 text-sm font-semibold text-white rounded-lg disabled:opacity-40"
-                      style={{ backgroundColor: '#33838B' }}>
-                      Dossier complet
-                    </button>
                   </div>
                   {parcellesDepliees && (
                   <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
