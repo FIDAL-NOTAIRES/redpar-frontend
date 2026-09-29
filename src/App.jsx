@@ -786,7 +786,19 @@ const designationCadastrale = (codeParcelle) => {
 // ou un window.open direct, qui n'ont aucun repli si l'URL déborde. Les deux
 // chemins qui passent par ouvrirPaint (plan à la carte, dossier complet)
 // demandent CANAL_MESSAGE ; l'Excel demande CANAL_EXCEL.
-const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar, canal = CANAL_URL) => {
+// Fond du bouton « Colorier » d'une parcelle à locaux seuls : les mêmes bandes
+// carmin et violet que sur le plan.
+const FOND_HACHURE = {
+  backgroundColor: '#A01040',
+  backgroundImage: 'repeating-linear-gradient(45deg, #A01040 0 6px, #7a6fd3 6px 12px)',
+  textShadow: '0 0 2px rgba(0,0,0,0.55)',
+};
+
+// `motif` (29/09/2026) : 'locaux' pour une assiette où la société ne détient que
+// des LOCAUX — PAINT colorie alors en HACHURES carmin et violet. On laisse
+// `couleur` au carmin : un PAINT antérieur ignorerait `motif` et retomberait sur
+// l'ancien comportement.
+const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar, canal = CANAL_URL, motif = null) => {
   if (!membres || membres.length < 2 || !contours) return null;
   if (membres.filter((r) => contours.get(r)).length < 2) return null;
 
@@ -879,6 +891,7 @@ const lienPaintUnite = (membres, parParcelle, contours, nomCommune, adressePar, 
       echelle: ef.deborde ? '5000' : ef.echelle,
       format: ef.deborde ? 'A3|paysage' : ef.format,
       couleur: '#A01040',
+      ...(motif ? { motif } : {}),
       x: cx.toFixed(1),
       y: cy.toFixed(1),
       pt: `${cx.toFixed(1)},${cy.toFixed(1)}`,
@@ -1068,7 +1081,7 @@ const grouperPourCarte = (liste) => {
   return [...communes.values()].sort((a, b) => a.nom.localeCompare(b.nom, 'fr') || String(a.insee).localeCompare(String(b.insee)));
 };
 
-const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
+const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations, motif = null) => {
   const r = String(codeParcelle || '');
   if (r.length !== 14) return null;
   const qs = new URLSearchParams({
@@ -1089,6 +1102,8 @@ const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
     couleur: '#A01040',
     auto: '1',
   });
+  // Parcelle à LOCAUX SEULS : hachures carmin et violet (voir lienPaintUnite).
+  if (motif) qs.set('motif', motif);
   // Dimensions réelles de la parcelle, en mètres, quand le contour est connu :
   // PAINT en déduit la taille attendue en pixels et cesse de deviner.
   const f = descripteursForme(geom, departementDe(r));
@@ -4930,8 +4945,8 @@ export default function App() {
                             const refsUnite = unite.map((o) => o.codeParcelle);
                             const surfaceUnite = unite.reduce((t, o) => t + (Number(o.contenance) || 0), 0);
                             const lienUnite = refsUnite.length >= 2
-                              ? lienPaintUnite(refsUnite, surfaceParRef, contoursPlan, a.commune, adresseParRef)
-                              : lienPaintColorise(a.codeParcelle, a.commune, contoursPlan?.get(a.codeParcelle));
+                              ? lienPaintUnite(refsUnite, surfaceParRef, contoursPlan, a.commune, adresseParRef, CANAL_URL, 'locaux')
+                              : lienPaintColorise(a.codeParcelle, a.commune, contoursPlan?.get(a.codeParcelle), null, 'locaux');
                             const pastille = {
                               attente: ['bg-stone-50 text-stone-500 border-stone-300', 'en attente du géocodage'],
                               recherche: ['bg-stone-50 text-stone-500 border-stone-300', 'recherche du titulaire du sol…'],
@@ -4986,8 +5001,8 @@ export default function App() {
                                 <td className="px-4 py-3 text-center">
                                   {lienUnite && (
                                     <a href={lienUnite} target="_blank" rel="noreferrer"
-                                      title={refsUnite.length >= 2 ? "Plan de l'assiette entière, toutes parcelles coloriées" : 'Plan de la parcelle d\'assiette, coloriée'}
-                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
+                                      title={refsUnite.length >= 2 ? "Plan de l'assiette entière, toutes parcelles hachurées carmin et violet (locaux seuls)" : 'Plan de la parcelle d\'assiette, hachurée carmin et violet (locaux seuls)'}
+                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={FOND_HACHURE}>Colorier</a>
                                   )}
                                 </td>
                               </tr>
@@ -5345,11 +5360,16 @@ export default function App() {
                                   <td className="px-4 py-3 text-center text-blue-950 text-xs">{im.batimentsTxt}</td>
                                   <td className="px-4 py-3 text-stone-600 text-xs">{im.titresTxt}</td>
                                   <td className="px-4 py-3 text-center">
-                                    {lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle)) && (
-                                      <a href={lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle))} target="_blank" rel="noreferrer"
-                                        title="Ouvre PAINT : extrait généré et parcelle coloriée"
-                                        className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={{ backgroundColor: '#A01040' }}>Colorier</a>
-                                    )}
+                                    {(() => {
+                                      // Sol non détenu par la société (29/09/2026) : hachures.
+                                      const seul = !refsNonBati.has(im.codeParcelle);
+                                      const lien = lienPaintColorise(im.codeParcelle, im.commune, contours?.get(im.codeParcelle), null, seul ? 'locaux' : null);
+                                      return lien && (
+                                      <a href={lien} target="_blank" rel="noreferrer"
+                                        title={seul ? 'Ouvre PAINT : extrait généré, parcelle hachurée carmin et violet (locaux seuls, sol non détenu)' : 'Ouvre PAINT : extrait généré et parcelle coloriée'}
+                                        className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90" style={seul ? FOND_HACHURE : { backgroundColor: '#A01040' }}>Colorier</a>
+                                      );
+                                    })()}
                                   </td>
                                 </tr>
                               ))
