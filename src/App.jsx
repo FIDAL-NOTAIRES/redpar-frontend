@@ -1860,6 +1860,7 @@ export default function App() {
   const [communesLocOuvertes, setCommunesLocOuvertes] = useState(() => new Set());
   // Même dépliage par commune dans « Détail des locaux sans le sol » (29/09/2026).
   const [communesAssOuvertes, setCommunesAssOuvertes] = useState(() => new Set());
+  const [communesSansGeoOuvertes, setCommunesSansGeoOuvertes] = useState(() => new Set());
   // Regroupe une liste DÉJÀ FILTRÉE ET TRIÉE par commune (code INSEE en tête de
   // la référence, qui départage les homonymes) : une ligne d'en-tête cliquable
   // par commune, puis ses lignes dans l'ordre du tri choisi. Les communes sont
@@ -3960,22 +3961,6 @@ export default function App() {
                 {parcellesLoading ? 'Recherche dans les fichiers DGFiP...' : `${totalParcelles.toLocaleString('fr-FR')} parcelle${totalParcelles > 1 ? 's' : ''} • ${parcelles.length.toLocaleString('fr-FR')} affichée${parcelles.length > 1 ? 's' : ''}`}
               </div>
               <div className="flex items-center gap-2 flex-wrap">
-                {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
-                  <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    localisation en cours — attendez pour des liens à la parcelle
-                  </span>
-                )}
-                {!parcellesLoading && parcelles.length > 0 && (
-                  <>
-                    <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
-                      {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
-                    </button>
-                    <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
-                      {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
-                    </button>
-                  </>
-                )}
                 <button onClick={resetAll} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-950 rounded-lg hover:bg-stone-100"><RotateCcw className="w-4 h-4" />Nouvelle recherche</button>
               </div>
             </div>
@@ -4202,109 +4187,9 @@ export default function App() {
                     {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
                     {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
                     {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
-                      <span className="text-amber-700"> {(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s) sans géométrie — détail ci-dessous.</span>
+                      <span className="text-amber-700"> {(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s) sans géométrie — voir « Références inconnues du plan », plus bas.</span>
                     )}
                   </div>
-                  {/* Le reliquat sans géométrie, nommément. Deux motifs qu'il
-                      ne faut pas confondre : ce que le plan ne connaît à aucun
-                      millésime (à instruire) et ce qui n'a pas pu être
-                      interrogé (à relancer). */}
-                  {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
-                    <div className="px-6 py-3 border-t border-amber-200 bg-amber-50">
-                      <div className="flex items-center gap-3 flex-wrap">
-                        <AlertCircle className="w-4 h-4 text-amber-700 shrink-0" />
-                        <span className="text-xs text-amber-900 flex-1 min-w-[16rem]">
-                          {sansGeo.absentes.length > 0 && (
-                            <>
-                              <strong>{sansGeo.absentes.length.toLocaleString('fr-FR')}</strong>
-                              {' '}référence(s) inconnue(s) du plan, ni au millésime courant
-                              {sansGeo.millesimes.length ? ` ni au${sansGeo.millesimes.length > 1 ? 'x' : ''} millésime${sansGeo.millesimes.length > 1 ? 's' : ''} ${sansGeo.millesimes.join(' et ')}` : ''}
-                              {' '}: parcelles divisées, réunies ou remembrées, à instruire au relevé
-                              {' '}de propriété.
-                            </>
-                          )}
-                          {sansGeo.absentes.length > 0 && sansGeo.echouees.length > 0 && ' '}
-                          {sansGeo.echouees.length > 0 && (
-                            <>
-                              <strong>{sansGeo.echouees.length.toLocaleString('fr-FR')}</strong>
-                              {' '}référence(s) non interrogée(s) : le lot a échoué après trois
-                              {' '}tentatives, rien ne dit qu'elles manquent au plan.
-                            </>
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => setSansGeoOuvert((v) => !v)}
-                          className="text-xs font-semibold text-blue-950 underline"
-                        >
-                          {sansGeoOuvert ? 'masquer la liste' : 'voir la liste'}
-                        </button>
-                        {sansGeo.echouees.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={relancerGeocodage}
-                            disabled={!!geoStatus && !geoStatus.termine}
-                            className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded bg-blue-950 text-amber-400 disabled:opacity-50"
-                          >
-                            <RotateCcw className="w-3 h-3" />Relancer le géocodage
-                          </button>
-                        )}
-                      </div>
-                      {sansGeoOuvert && (
-                        <>
-                        <div className="mt-3 max-h-52 overflow-y-auto rounded border border-amber-200 bg-white">
-                          <table className="w-full text-xs">
-                            <thead className="bg-stone-50 sticky top-0">
-                              <tr className="text-left text-stone-500">
-                                <th className="px-3 py-1.5 font-medium">Référence</th>
-                                <th className="px-3 py-1.5 font-medium">Commune</th>
-                                <th className="px-3 py-1.5 font-medium">Motif</th>
-                                <th className="px-3 py-1.5 font-medium">Vérifier</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {[
-                                ...sansGeo.absentes.map((o) => ({ ...o, motif: 'absente du plan' })),
-                                ...sansGeo.echouees.map((o) => ({ ...o, motif: 'lot en échec' })),
-                              ].map((o) => {
-                                // Sans contour, PAINT ne peut ni recentrer ni colorier : on
-                                // pointe l'extrait officiel au 1/1000 A4, qui s'ouvre quand
-                                // même et permet de lever la référence sur pièce.
-                                const extrait = lienExtraitCadastral(o.ref, null);
-                                return (
-                                  <tr key={`${o.motif}-${o.ref}`} className="border-t border-stone-100">
-                                    <td className="px-3 py-1.5 font-mono text-blue-950">{o.ref}</td>
-                                    <td className="px-3 py-1.5 text-stone-600">{o.commune}</td>
-                                    <td className="px-3 py-1.5 text-stone-500">{o.motif}</td>
-                                    <td className="px-3 py-1.5">
-                                      {extrait && (
-                                        <a
-                                          href={extrait}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                          className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90"
-                                          style={{ backgroundColor: '#0F2238' }}
-                                        >
-                                          Extrait DGFiP ↗
-                                        </a>
-                                      )}
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                        <p className="mt-2 text-[11px] text-stone-500">
-                          L'extrait est édité au 1/1000 sur A4 et sans colorisation : faute de
-                          contour, PAINT ne peut ni choisir l'échelle ni peindre la parcelle.
-                          À ouvrir une référence à la fois — le service de consultation du plan
-                          est limité en débit et refuserait une édition en masse.
-                        </p>
-                        </>
-                      )}
-                    </div>
-                  )}
                 </div>
 
                 {/* Départements et palmarès des communes CÔTE À CÔTE dès 768 px de
@@ -4441,7 +4326,45 @@ export default function App() {
                 )}
 
                 {/* ------------------------------------------------------------
-                    PLANS CADASTRAUX — bandeau à part, décision JFD du 29/09/2026.
+                    EXPORTS — Excel et PDF sortis de la barre du haut et posés sur
+                    un bandeau à eux, AU-DESSUS du bandeau « Plans » : décision JFD
+                    du 29/09/2026. Tout ce qui produit une pièce se lit ainsi de
+                    haut en bas, au même endroit de la page.
+                    ------------------------------------------------------------ */}
+                {parcelles.length > 0 && (
+                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                    <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
+                      <Download className="w-5 h-5 text-blue-950" />
+                      <div>
+                        <h3 className="font-semibold text-blue-950">Exports</h3>
+                        <div className="text-xs text-stone-500">
+                          Excel : le relevé complet, une feuille par commune. PDF : le rapport de synthèse.
+                        </div>
+                      </div>
+                      <div className="ml-auto flex items-center gap-2 flex-wrap">
+                        {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
+                          <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            localisation en cours — attendez pour des liens à la parcelle
+                          </span>
+                        )}
+                        {!parcellesLoading && parcelles.length > 0 && (
+                          <>
+                            <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
+                              {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
+                            </button>
+                            <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
+                              {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* ------------------------------------------------------------
+                    PLANS — bandeau à part, décision JFD du 29/09/2026 (titre abrégé en « Plans » le même jour).
                     Les deux boutons logeaient dans l'en-tête de « Détail des
                     parcelles », alors qu'ils portent sur tout le portefeuille (le
                     plan à la carte prend aussi les locaux sans le sol, le dossier
@@ -4454,7 +4377,7 @@ export default function App() {
                     <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
                       <MapIcon className="w-5 h-5 text-blue-950" />
                       <div>
-                        <h3 className="font-semibold text-blue-950">Plans cadastraux</h3>
+                        <h3 className="font-semibold text-blue-950">Plans</h3>
                         <div className="text-xs text-stone-500">
                           Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune pour tout le relevé.
                         </div>
@@ -5139,6 +5062,108 @@ export default function App() {
                   )}
                   </>)}
                 </div>
+
+                {/* ------------------------------------------------------------
+                    RÉFÉRENCES INCONNUES DU PLAN — tableau dépliable à part,
+                    décision JFD du 29/09/2026 (il logeait au pied de la carte).
+                    Replié par défaut ; une fois déplié, les communes, dépliables
+                    à leur tour. Deux motifs à ne pas confondre : ce que le plan ne
+                    connaît à aucun millésime (à instruire) et ce qui n'a pas pu
+                    être interrogé (à relancer).
+                    ------------------------------------------------------------ */}
+                {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
+                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2 flex-wrap">
+                      <button onClick={() => setSansGeoOuvert((v) => !v)} title={sansGeoOuvert ? "Replier" : "Déplier"}
+                        className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                        <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${sansGeoOuvert ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                      </button>
+                      <AlertCircle className="w-4 h-4 text-amber-700" />
+                      <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setSansGeoOuvert((v) => !v)}>Références inconnues du plan</h3>
+                      <span className="text-xs text-stone-500">
+                        ({(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s){!sansGeoOuvert ? ' — cliquer pour déplier' : ''})
+                      </span>
+                      {sansGeo.echouees.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={relancerGeocodage}
+                          disabled={!!geoStatus && !geoStatus.termine}
+                          className="ml-auto flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded bg-blue-950 text-amber-400 disabled:opacity-50"
+                        >
+                          <RotateCcw className="w-3 h-3" />Relancer le géocodage
+                        </button>
+                      )}
+                    </div>
+                    {sansGeoOuvert && (<>
+                    <div className="px-6 py-3 text-xs text-amber-900 bg-amber-50 border-b border-amber-200">
+                      {sansGeo.absentes.length > 0 && (
+                        <>
+                          <strong>{sansGeo.absentes.length.toLocaleString('fr-FR')}</strong>
+                          {' '}référence(s) inconnue(s) du plan, ni au millésime courant
+                          {sansGeo.millesimes.length ? ` ni au${sansGeo.millesimes.length > 1 ? 'x' : ''} millésime${sansGeo.millesimes.length > 1 ? 's' : ''} ${sansGeo.millesimes.join(' et ')}` : ''}
+                          {' '}: parcelles divisées, réunies ou remembrées, à instruire au relevé
+                          {' '}de propriété.
+                        </>
+                      )}
+                      {sansGeo.absentes.length > 0 && sansGeo.echouees.length > 0 && ' '}
+                      {sansGeo.echouees.length > 0 && (
+                        <>
+                          <strong>{sansGeo.echouees.length.toLocaleString('fr-FR')}</strong>
+                          {' '}référence(s) non interrogée(s) : le lot a échoué après trois
+                          {' '}tentatives, rien ne dit qu'elles manquent au plan.
+                        </>
+                      )}
+                      {' '}L'extrait est édité au 1/1000 sur A4 et sans colorisation : faute de
+                      {' '}contour, PAINT ne peut ni choisir l'échelle ni peindre la parcelle. À ouvrir
+                      {' '}une référence à la fois — le service de consultation du plan est limité en
+                      {' '}débit et refuserait une édition en masse.
+                    </div>
+                    <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+                      <table className="w-full text-sm">
+                        <thead className="bg-stone-50 border-b border-stone-200 sticky top-0 z-10">
+                          <tr>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">#</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Commune</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Référence</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Motif</th>
+                            <th className="px-4 py-3 text-left text-xs font-semibold text-stone-600 uppercase">Vérifier</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rangsParCommune([
+                            ...sansGeo.absentes.map((o) => ({ ...o, codeParcelle: o.ref, motif: 'absente du plan' })),
+                            ...sansGeo.echouees.map((o) => ({ ...o, codeParcelle: o.ref, motif: 'lot en échec' })),
+                          ], communesSansGeoOuvertes, setCommunesSansGeoOuvertes, false,
+                          (n) => `${n.toLocaleString('fr-FR')} référence${n > 1 ? 's' : ''}`, (o, i) => {
+                            // Sans contour, PAINT ne peut ni recentrer ni colorier : on
+                            // pointe l'extrait officiel au 1/1000 A4, qui s'ouvre quand
+                            // même et permet de lever la référence sur pièce.
+                            const extrait = lienExtraitCadastral(o.ref, null);
+                            return (
+                              <tr key={`${o.motif}-${o.ref}`} className="border-b border-stone-100 hover:bg-stone-50">
+                                <td className="px-4 py-2 text-stone-400 text-xs">{i + 1}</td>
+                                <td className="px-4 py-2 text-blue-950">{o.commune}</td>
+                                <td className="px-4 py-2 font-mono text-xs text-blue-950 whitespace-nowrap" title={o.ref}>{refCourte(o.ref)}</td>
+                                <td className="px-4 py-2 text-xs text-stone-500">{o.motif}</td>
+                                <td className="px-4 py-2">
+                                  {extrait && (
+                                    <a href={extrait} target="_blank" rel="noreferrer"
+                                      className="inline-block px-2.5 py-1 text-xs font-semibold text-white rounded-md whitespace-nowrap hover:opacity-90"
+                                      style={{ backgroundColor: '#0F2238' }}>
+                                      Extrait DGFiP ↗
+                                    </a>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    </>)}
+                  </div>
+                )}
+
               </>
             )}
           </div>
