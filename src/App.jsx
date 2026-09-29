@@ -1849,6 +1849,9 @@ export default function App() {
   // Taper dans leur champ de recherche les déplie.
   const [parcellesDepliees, setParcellesDepliees] = useState(false);
   const [locauxDeplies, setLocauxDeplies] = useState(false);
+  // « Détail des locaux sans le sol » replié par défaut, comme les deux autres
+  // tableaux de détail — demandé par JFD le 29/09/2026.
+  const [assiettesDepliees, setAssiettesDepliees] = useState(false);
   // Communes dépliables à l'intérieur des deux tableaux de détail — demandé
   // par JFD le 28/09/2026. Toutes repliées au départ ; dépliées d'office quand
   // une recherche est tapée (on veut voir les résultats) ou quand le relevé ne
@@ -4437,12 +4440,17 @@ export default function App() {
                 {assiettes.length > 0 && (
                   <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                     <div className="px-6 py-4 border-b border-stone-200 bg-stone-50 flex items-center gap-2 flex-wrap">
-                      <h3 className="font-semibold text-blue-950">Locaux sans le sol — copropriétés et sols de tiers</h3>
+                      <button onClick={() => setAssiettesDepliees((v) => !v)} title={assiettesDepliees ? "Replier" : "Déplier"}
+                        className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                        <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${assiettesDepliees ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                      </button>
+                      <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setAssiettesDepliees((v) => !v)}>Détail des locaux sans le sol (copropriétés et sols d'un tiers)</h3>
                       <span className="text-xs text-stone-600">
                         — {assiettes.length.toLocaleString('fr-FR')} parcelle(s) où la société détient des locaux sans le sol
                         {assiettesEtendues.length > 0 && ` · assiette entière : +${assiettesEtendues.length.toLocaleString('fr-FR')} parcelle(s) du syndicat`}
                       </span>
                     </div>
+                    {assiettesDepliees && (<>
                     <div className="px-6 py-3 text-xs text-stone-600 border-b border-stone-200">
                       Le fichier des locaux rattache chaque local à sa parcelle ; le sol, lui, n'est pas au compte de la société. <b>Un local n'est pas forcément un lot de copropriété</b> : c'est une unité fiscale (appartement, commerce, garage). La mention « assiette de copropriété » est réservée au sol d'un syndicat recensé ; un sol à une autre personne morale peut relever d'un bail emphytéotique, d'un bail à construction ou d'une division en volumes, à vérifier au titre. Ces parcelles entrent dans les plans et le Dossier complet, qualifiées de même dans la désignation, avec la contenance du plan, et <b>ne comptent pas</b> dans la surface du portefeuille. Quand le syndicat des copropriétaires est recensé au fichier des parcelles (groupe de personne « copropriétaires »), son SIREN permet de reconstituer l'assiette entière — l'unité foncière du syndicat qui contient la parcelle des locaux. Sinon la parcelle reste seule. Rappel : la source ne donne ni numéro de lot d'EDD ni tantièmes ; la désignation des lots reste au relevé de propriété et au règlement de copropriété.
                     </div>
@@ -4533,6 +4541,7 @@ export default function App() {
                         </tbody>
                       </table>
                     </div>
+                    </>)}
                   </div>
                 )}
 
