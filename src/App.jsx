@@ -1844,6 +1844,10 @@ export default function App() {
   const [carteSel, setCarteSel] = useState(() => new Set());
   const [carteDepliees, setCarteDepliees] = useState(() => new Set());
   const [communesDepliees, setCommunesDepliees] = useState(false);
+  // Bandeaux « Répartition par type de droits retenus » et « Répartition
+  // géographique », repliés par défaut (29/09/2026).
+  const [droitsOuverts, setDroitsOuverts] = useState(false);
+  const [geoOuverte, setGeoOuverte] = useState(false);
   // Détail des parcelles et des locaux REPLIÉS par défaut — demandé par JFD le
   // 28/09/2026 : sur un gros portefeuille les deux tableaux noyaient la page.
   // Taper dans leur champ de recherche les déplie.
@@ -4019,11 +4023,26 @@ export default function App() {
 
             {!parcellesLoading && droitsPresents.length > 0 && (
               <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-sm">
-                <div className="flex items-baseline gap-2 flex-wrap mb-3">
-                  <h3 className="font-semibold text-blue-950 text-sm">Titres de droit retenus</h3>
-                  <span className="text-xs text-stone-500">
-                    les indicateurs, la carte et les exports ne portent que sur les titres cochés
-                  </span>
+                {/* Renommé et rendu DÉPLIABLE le 29/09/2026 (décision JFD). Replié,
+                    l'en-tête dit quand même quels titres sont retenus : un filtre
+                    actif ne doit jamais passer inaperçu. */}
+                <div className={`flex items-center gap-2 flex-wrap ${droitsOuverts ? 'mb-3' : ''}`}>
+                  <button onClick={() => setDroitsOuverts((v) => !v)} title={droitsOuverts ? "Replier" : "Déplier"}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                    <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${droitsOuverts ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                  </button>
+                  <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setDroitsOuverts((v) => !v)}>Répartition par type de droits retenus</h3>
+                  {droitsOuverts ? (
+                    <span className="text-xs text-stone-500">
+                      les indicateurs, la carte et les exports ne portent que sur les titres cochés
+                    </span>
+                  ) : (
+                    <span className={`text-xs ${droitsActifs.length === 0 ? 'text-red-700' : droitsActifs.length < droitsPresents.length ? 'text-amber-800' : 'text-stone-500'}`}>
+                      {droitsActifs.length === 0
+                        ? 'aucun titre retenu — dépliez pour en cocher'
+                        : `${droitsActifs.length} titre(s) retenu(s) sur ${droitsPresents.length} : ${droitsActifs.map((d) => String(d).split(' ')[0]).join(', ')}`}
+                    </span>
+                  )}
                   <div className="ml-auto flex items-center gap-3">
                     {propriete.length > 0 && propriete.length < droitsPresents.length && (
                       <button onClick={() => setDroitsChoisis(propriete)} className="text-xs text-blue-900 underline hover:text-blue-700">
@@ -4037,6 +4056,7 @@ export default function App() {
                     )}
                   </div>
                 </div>
+                {droitsOuverts && (<>
                 <div className="flex flex-wrap gap-2">
                   {droitsPresents.map(([d, n]) => {
                     const actif = droitsActifs.includes(d);
@@ -4062,6 +4082,102 @@ export default function App() {
                 )}
                 {droitsActifs.length === 0 && (
                   <div className="mt-3 text-xs text-red-700">Aucun titre retenu : cochez-en au moins un.</div>
+                )}
+                </>)}
+              </div>
+            )}
+
+            {/* ------------------------------------------------------------
+                RÉPARTITION GÉOGRAPHIQUE — bandeau dépliable sous la répartition
+                par type de droits, décision JFD du 29/09/2026. Il réunit la
+                répartition par département et le palmarès des communes, côte à
+                côte dès 768 px (items-start : le palmarès déplié n'allonge pas
+                le bloc voisin).
+                ------------------------------------------------------------ */}
+            {!parcellesLoading && parcelles.length > 0 && (
+              <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                <div className="px-4 py-4 flex items-center gap-2 flex-wrap">
+                  <button onClick={() => setGeoOuverte((v) => !v)} title={geoOuverte ? "Replier" : "Déplier"}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                    <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${geoOuverte ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                  </button>
+                  <MapIcon className="w-4 h-4 text-blue-950" />
+                  <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setGeoOuverte((v) => !v)}>Répartition géographique</h3>
+                  <span className="text-xs text-stone-500">
+                    {stats.depts.length.toLocaleString('fr-FR')} département(s) · {stats.communes.length.toLocaleString('fr-FR')} commune(s){!geoOuverte ? ' — cliquer pour déplier' : ''}
+                  </span>
+                </div>
+                {geoOuverte && (
+                  <div className="px-4 pb-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                      <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                        <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                          <BarChart3 className="w-4 h-4 text-blue-950" />
+                          <h3 className="font-semibold text-blue-950">
+                            {stats.depts.length > 1 ? `Répartition par département (${stats.depts.length})` : 'Département'}
+                          </h3>
+                        </div>
+                        <div className="p-4 space-y-3">
+                          {stats.depts.map((d) => (
+                            <div key={d.nom}>
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="font-medium text-blue-950">{d.nom}</span>
+                                <span className="text-sm text-stone-600">{d.count.toLocaleString('fr-FR')} • {d.surface.toLocaleString('fr-FR')} m²</span>
+                              </div>
+                              <div className="w-full bg-stone-100 rounded-full h-3 overflow-hidden">
+                                <div className="h-full bg-blue-950 rounded-full" style={{ width: `${d.pct}%` }} />
+                              </div>
+                              <div className="text-right text-xs text-blue-950 font-medium mt-0.5">{d.pct}%</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                        <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                          <MapPin className="w-4 h-4 text-blue-950" />
+                          <h3 className="font-semibold text-blue-950">
+                            {stats.communes.length <= COMMUNES_REPLIEES
+                              ? `Communes (${stats.communes.length})`
+                              : communesDepliees
+                                ? `Toutes les communes (${stats.communes.length})`
+                                : `${COMMUNES_REPLIEES} premières communes (sur ${stats.communes.length})`}
+                          </h3>
+                          {stats.communes.length > COMMUNES_REPLIEES && (
+                            <button onClick={() => setCommunesDepliees((v) => !v)}
+                              className="ml-auto text-xs underline text-blue-900">
+                              {communesDepliees ? 'replier' : `voir les ${stats.communes.length} communes`}
+                            </button>
+                          )}
+                        </div>
+                        <div className="p-4">
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="border-b border-stone-200">
+                                <th className="text-left text-xs font-semibold text-stone-500 uppercase pb-2">Commune</th>
+                                <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Parc.</th>
+                                <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Surface</th>
+                                <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">%</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {displayedCommunes.map((c, i) => (
+                                <tr key={c.nom} className="border-b border-stone-100 last:border-0">
+                                  <td className="py-2 flex items-center gap-2">
+                                    <div className="w-5 h-5 rounded bg-blue-950 text-amber-400 text-[10px] font-semibold flex items-center justify-center">{i + 1}</div>
+                                    <span className="text-blue-950">{c.nom}</span>
+                                  </td>
+                                  <td className="py-2 text-right text-blue-950">{c.count}</td>
+                                  <td className="py-2 text-right text-stone-600">{c.surface.toLocaleString('fr-FR')} m²</td>
+                                  <td className="py-2 text-right text-blue-950 font-medium">{c.pct}%</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 )}
               </div>
             )}
@@ -4192,78 +4308,6 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Départements et palmarès des communes CÔTE À CÔTE dès 768 px de
-                    large (et non plus 1 024) — demandé par JFD le 29/09/2026 : sur
-                    une fenêtre ordinaire les deux blocs s'empilaient. items-start :
-                    le palmarès déplié ne fait pas s'allonger le bloc voisin. */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
-                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
-                      <BarChart3 className="w-4 h-4 text-blue-950" />
-                      <h3 className="font-semibold text-blue-950">
-                        {stats.depts.length > 1 ? `Répartition par département (${stats.depts.length})` : 'Département'}
-                      </h3>
-                    </div>
-                    <div className="p-4 space-y-3">
-                      {stats.depts.map((d) => (
-                        <div key={d.nom}>
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="font-medium text-blue-950">{d.nom}</span>
-                            <span className="text-sm text-stone-600">{d.count.toLocaleString('fr-FR')} • {d.surface.toLocaleString('fr-FR')} m²</span>
-                          </div>
-                          <div className="w-full bg-stone-100 rounded-full h-3 overflow-hidden">
-                            <div className="h-full bg-blue-950 rounded-full" style={{ width: `${d.pct}%` }} />
-                          </div>
-                          <div className="text-right text-xs text-blue-950 font-medium mt-0.5">{d.pct}%</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
-                      <MapPin className="w-4 h-4 text-blue-950" />
-                      <h3 className="font-semibold text-blue-950">
-                        {stats.communes.length <= COMMUNES_REPLIEES
-                          ? `Communes (${stats.communes.length})`
-                          : communesDepliees
-                            ? `Toutes les communes (${stats.communes.length})`
-                            : `${COMMUNES_REPLIEES} premières communes (sur ${stats.communes.length})`}
-                      </h3>
-                      {stats.communes.length > COMMUNES_REPLIEES && (
-                        <button onClick={() => setCommunesDepliees((v) => !v)}
-                          className="ml-auto text-xs underline text-blue-900">
-                          {communesDepliees ? 'replier' : `voir les ${stats.communes.length} communes`}
-                        </button>
-                      )}
-                    </div>
-                    <div className="p-4">
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="border-b border-stone-200">
-                            <th className="text-left text-xs font-semibold text-stone-500 uppercase pb-2">Commune</th>
-                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Parc.</th>
-                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">Surface</th>
-                            <th className="text-right text-xs font-semibold text-stone-500 uppercase pb-2">%</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {displayedCommunes.map((c, i) => (
-                            <tr key={c.nom} className="border-b border-stone-100 last:border-0">
-                              <td className="py-2 flex items-center gap-2">
-                                <div className="w-5 h-5 rounded bg-blue-950 text-amber-400 text-[10px] font-semibold flex items-center justify-center">{i + 1}</div>
-                                <span className="text-blue-950">{c.nom}</span>
-                              </td>
-                              <td className="py-2 text-right text-blue-950">{c.count}</td>
-                              <td className="py-2 text-right text-stone-600">{c.surface.toLocaleString('fr-FR')} m²</td>
-                              <td className="py-2 text-right text-blue-950 font-medium">{c.pct}%</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
 
                 {coherence.ecarts.length > 0 && (
                   <div className="bg-white border border-amber-300 rounded-xl shadow-sm overflow-hidden">
