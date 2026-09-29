@@ -1062,7 +1062,10 @@ const grouperPourCarte = (liste) => {
   // Communes classées par nombre de parcelles décroissant : sur un portefeuille
   // de quarante-sept communes, celle qui porte le dossier est presque toujours
   // celle qui en compte le plus.
-  return [...communes.values()].sort((a, b) => b.nb - a.nb || a.nom.localeCompare(b.nom, 'fr'));
+  // Communes par ORDRE ALPHABÉTIQUE — décision JFD du 29/09/2026 : le tri par
+  // nombre de parcelles « n'a pas de sens » pour retrouver une commune. Le code
+  // INSEE départage les homonymes.
+  return [...communes.values()].sort((a, b) => a.nom.localeCompare(b.nom, 'fr') || String(a.insee).localeCompare(String(b.insee)));
 };
 
 const lienPaintColorise = (codeParcelle, nomCommune, geom, annotations) => {
