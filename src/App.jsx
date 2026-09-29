@@ -1057,11 +1057,11 @@ const grouperPourCarte = (liste) => {
   for (const c of communes.values()) {
     c.sectionsTriees = [...c.sections.values()]
       .map((s) => ({ ...s, lignes: s.lignes.sort((a, b) => (Number(a.numero) || 0) - (Number(b.numero) || 0) || a.ref.localeCompare(b.ref)) }))
-      .sort((a, b) => b.lignes.length - a.lignes.length || a.cle.localeCompare(b.cle, 'fr'));
+      // Sections par ORDRE ALPHABÉTIQUE (préfixe puis section) — décision JFD du
+      // 29/09/2026, même motif que pour les communes : on cherche une section
+      // par son nom, pas par son effectif. Tri « naturel » : 0A avant AB, 9 avant 10.
+      .sort((a, b) => a.cle.localeCompare(b.cle, 'fr', { numeric: true, sensitivity: 'base' }));
   }
-  // Communes classées par nombre de parcelles décroissant : sur un portefeuille
-  // de quarante-sept communes, celle qui porte le dossier est presque toujours
-  // celle qui en compte le plus.
   // Communes par ORDRE ALPHABÉTIQUE — décision JFD du 29/09/2026 : le tri par
   // nombre de parcelles « n'a pas de sens » pour retrouver une commune. Le code
   // INSEE départage les homonymes.
