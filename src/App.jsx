@@ -4211,17 +4211,19 @@ export default function App() {
             )}
 
             {/* ------------------------------------------------------------
-                PLANS ET EXPORTS — un seul bandeau, décision JFD du 29/09/2026
+                PLANS ET RELEVÉS — un seul bandeau, décision JFD du 29/09/2026
+                (« Exports » renommé « Relevés » le même jour : l'Excel est le relevé
+                complet, le PDF sa synthèse ; « Listes » écarté, le PDF n'en est pas une)
                 (il y en avait deux, Plans puis Exports). Tout ce qui produit
                 une pièce est réuni au même endroit, au-dessus de la carte, sur
-                deux lignes : les plans, puis les exports. Non repliable : ce
+                deux lignes : les plans, puis les relevés. Non repliable : ce
                 sont les boutons d'action de la page.
                 ------------------------------------------------------------ */}
             {!parcellesLoading && parcelles.length > 0 && (
               <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
                 <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3 flex-wrap">
                   <MapIcon className="w-5 h-5 text-blue-950" />
-                  <h3 className="font-semibold text-blue-950">Plans et exports</h3>
+                  <h3 className="font-semibold text-blue-950">Plans et relevés</h3>
                   {lot && !lot.fini && (
                     <span className="text-xs font-semibold" style={{ color: '#33838B' }}>
                       Archive du dossier complet en cours : {lot.faits} / {lot.total}
@@ -4262,7 +4264,7 @@ export default function App() {
                   </span>
                 </div>
                 <div className="px-6 py-3 flex items-center gap-2 flex-wrap">
-                  <span className="w-20 text-xs font-semibold uppercase text-stone-500">Exports</span>
+                  <span className="w-20 text-xs font-semibold uppercase text-stone-500">Relevés</span>
                   <button onClick={exportExcel} disabled={exportingExcel}
                     title="Le relevé complet, une feuille par commune"
                     className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
