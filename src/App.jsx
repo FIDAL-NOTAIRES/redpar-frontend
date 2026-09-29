@@ -4021,6 +4021,44 @@ export default function App() {
               </div>
             )}
 
+            {/* CARTE — remontée juste au-dessus de « Répartition par type de
+                droits retenus » : décision JFD du 29/09/2026. */}
+            {!parcellesLoading && parcelles.length > 0 && (
+              <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                  <MapIcon className="w-4 h-4 text-blue-950" />
+                  <h3 className="font-semibold text-blue-950">Carte interactive</h3>
+                  <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
+                  <div className="ml-auto flex items-center gap-3">
+                    {geoStatus && !geoStatus.termine && (
+                      <span className="flex items-center gap-1.5 text-xs text-amber-700">
+                        <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
+                      </span>
+                    )}
+                    {/* Les contours arrivent AVEC le géocodage : même endpoint,
+                        mêmes communes, mêmes références. Ne pas les redissocier. */}
+                    {contours && contours.size > 0 && (
+                      <span className="flex items-center gap-2 text-xs text-stone-600">
+                        <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: '#A01040', opacity: 0.55 }} />
+                        {contours.size.toLocaleString('fr-FR')} contour(s) tracé(s)
+                        <span className="text-stone-400">— décochez la couche pour les masquer</span>
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
+                <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
+                  Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
+                  {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les locaux détenus sur la parcelle.
+                  {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
+                  {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
+                  {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
+                    <span className="text-amber-700"> {(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s) sans géométrie — voir « Références inconnues du plan », plus bas.</span>
+                  )}
+                </div>
+              </div>
+            )}
+
             {!parcellesLoading && droitsPresents.length > 0 && (
               <div className="bg-white border border-stone-200 rounded-xl p-4 shadow-sm">
                 {/* Renommé et rendu DÉPLIABLE le 29/09/2026 (décision JFD). Replié,
@@ -4271,40 +4309,6 @@ export default function App() {
                           ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
                           : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
                     </div>
-                  </div>
-                </div>
-
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
-                    <MapIcon className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950">Carte interactive</h3>
-                    <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
-                    <div className="ml-auto flex items-center gap-3">
-                      {geoStatus && !geoStatus.termine && (
-                        <span className="flex items-center gap-1.5 text-xs text-amber-700">
-                          <Loader2 className="w-3 h-3 animate-spin" />localisation en cours
-                        </span>
-                      )}
-                      {/* Les contours arrivent AVEC le géocodage : même endpoint,
-                          mêmes communes, mêmes références. Ne pas les redissocier. */}
-                      {contours && contours.size > 0 && (
-                        <span className="flex items-center gap-2 text-xs text-stone-600">
-                          <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: '#A01040', opacity: 0.55 }} />
-                          {contours.size.toLocaleString('fr-FR')} contour(s) tracé(s)
-                          <span className="text-stone-400">— décochez la couche pour les masquer</span>
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
-                  <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
-                    Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
-                    {' '}Le bâti est regroupé par immeuble : un marqueur porte tous les locaux détenus sur la parcelle.
-                    {contours && " Les contours proviennent du plan cadastral et sont tracés en carmin, la couleur retenue pour la colorisation des extraits."}
-                    {unitesF && unitesF.groupees > 0 && " Dans le tableau des parcelles, la pastille de la colonne Unité est cliquable lorsque l'unité compte plusieurs parcelles : elle édite un plan unique où toutes sont coloriées, avec leur désignation et le total au cartouche."}
-                    {sansGeo && (sansGeo.absentes.length + sansGeo.echouees.length) > 0 && (
-                      <span className="text-amber-700"> {(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s) sans géométrie — voir « Références inconnues du plan », plus bas.</span>
-                    )}
                   </div>
                 </div>
 
