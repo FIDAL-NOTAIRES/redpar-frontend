@@ -1848,6 +1848,7 @@ export default function App() {
   // géographique », repliés par défaut (29/09/2026).
   const [droitsOuverts, setDroitsOuverts] = useState(false);
   const [geoOuverte, setGeoOuverte] = useState(false);
+  const [clesOuvertes, setClesOuvertes] = useState(false);   // bandeau « Données clés » (29/09/2026)
   // Détail des parcelles et des locaux REPLIÉS par défaut — demandé par JFD le
   // 28/09/2026 : sur un gros portefeuille les deux tableaux noyaient la page.
   // Taper dans leur champ de recherche les déplie.
@@ -1907,6 +1908,11 @@ export default function App() {
   const [dossierOuvert, setDossierOuvert] = useState(false);
   const [dossierFaits, setDossierFaits] = useState(() => new Set());
   const [dossierNum, setDossierNum] = useState('');
+  // Archive ZIP du Dossier complet (29/09/2026) — état affiché ; la mécanique
+  // vit dans lotRef, lue par le gestionnaire de messages (qui ne voit pas les
+  // re-rendus).
+  const [lot, setLot] = useState(null);
+  const lotRef = useRef(null);
   // ASSIETTES DE COPROPRIÉTÉ — 03/09/2026 (addendum v11 § 5). Résultat de la
   // recherche inverse sur les parcelles d'assiette des lots : Map ref → état
   // ('recherche' | 'syndicat' | 'majic' | 'autre_titulaire' | 'non_recense' |
@@ -2715,6 +2721,187 @@ export default function App() {
     if (!lien) return;
     ouvrirPaint(lien);   // garde-fou des 7 000 caractères, mutualisé
     setDossierFaits((s) => new Set(s).add(lg.cle));
+  };
+
+  // ---- DOSSIER COMPLET EN ARCHIVE ZIP — décision JFD du 29/09/2026 ----------
+  // Un clic enchaîne TOUS les volumes dans UN SEUL onglet PAINT (le navigateur
+  // bloquerait des dizaines d'ouvertures par script). Protocole, par le canal
+  // postMessage déjà ouvert pour les liens longs :
+  //   PAINT « paint-pret » → REDPAR envoie les paramètres du volume suivant
+  //   (lot=1) → PAINT génère, NE TÉLÉCHARGE PAS, renvoie « paint-document »
+  //   (ou « paint-echec ») → PAINT se recharge à neuf et redemande → … →
+  //   REDPAR répond « paint-fin », l'onglet se ferme.
+  // Chaque document est rangé tel quel (compression STORE : un PDF d'images ne
+  // se comprime plus, et on épargne la mémoire) ; un sommaire général ouvre
+  // l'archive. Un échec, un délai dépassé ou l'onglet refermé ne bloquent
+  // jamais la série : la commune est notée au sommaire, à relancer seule.
+  // Tous les liens sont calculés AU LANCEMENT : le gestionnaire ne dépend
+  // d'aucun état React.
+  const lancerArchive = () => {
+    if (lotRef.current || !dossierLignes || !window.JSZip) {
+      if (!window.JSZip) alert("Bibliothèque d'archive (JSZip) non chargée : rechargez la page (Ctrl + Maj + R).");
+      return;
+    }
+    const lignes = dossierLignes
+      .map((lg) => ({ lg, lien: lienDossierCommune(lg) }))
+      .filter((o) => o.lien);
+    if (!lignes.length) return;
+    const u0 = new URL(lignes[0].lien);
+    const base = u0.origin + u0.pathname;
+    const w = window.open(base + '?charge=message&lot=1&cb=' + Date.now(), 'paint-archive');
+    if (!w) {
+      alert("Le navigateur a bloqué l'ouverture de PAINT : autorisez les fenêtres pour REDPAR, puis relancez.");
+      return;
+    }
+    const jour = new Date();
+    const et = {
+      w, base, origine: u0.origin, lignes, i: -1, enCours: false, fini: false,
+      zip: new window.JSZip(), resultats: [], minuteur: null, veille: null,
+      meta: {
+        societe: selectedCompany?.nom || '', siren: selectedCompany?.siren || '',
+        dossier: dossierNum.trim(), jour,
+        aaaammjj: String(jour.getFullYear() * 10000 + (jour.getMonth() + 1) * 100 + jour.getDate()),
+      },
+    };
+    lotRef.current = et;
+    const publier = () => setLot({
+      total: et.lignes.length, faits: et.resultats.length,
+      courant: et.enCours ? et.lignes[et.i].lg : null,
+      echecs: et.resultats.filter((r) => r.etat === 'echec').length,
+      reserves: et.resultats.filter((r) => r.etat === 'reserves').length,
+      fini: et.fini, archive: et.archive || null,
+    });
+    const noter = (etat, d) => {
+      const { lg } = et.lignes[et.i];
+      clearTimeout(et.minuteur);
+      et.enCours = false;
+      et.resultats.push({
+        lg, etat, fichier: d.nom || '', pages: d.pages || 0,
+        octets: d.pdf ? d.pdf.byteLength : 0,
+        motif: d.message || '', reserves: d.reserves || [],
+      });
+      if (d.pdf) et.zip.file(d.nom, d.pdf, { binary: true, compression: 'STORE' });
+      if (etat !== 'echec') setDossierFaits((s) => new Set(s).add(lg.cle));
+      publier();
+    };
+    const suivant = () => {
+      et.i += 1;
+      if (et.i >= et.lignes.length) { terminer(); return; }
+      const { lg, lien } = et.lignes[et.i];
+      const qs = new URL(lien + '&lot=1').search.slice(1);
+      et.enCours = true;
+      publier();
+      et.w.postMessage({ type: 'paint-params', qs }, et.origine);
+      // Délai de garde : deux fois l'estimation, plus trois minutes de marge.
+      clearTimeout(et.minuteur);
+      et.minuteur = setTimeout(() => {
+        if (!et.enCours || et.fini) return;
+        noter('echec', { message: 'délai dépassé — PAINT ne s\u2019est pas manifesté' });
+        try { et.w.location.href = et.base + '?charge=message&lot=1&cb=' + Date.now(); } catch (e) { /* onglet fermé */ }
+      }, (lg.nb * 36 + 180) * 1000);
+    };
+    const ecoute = (e) => {
+      if (e.source !== et.w || !e.data || et.fini) return;
+      const d = e.data;
+      if (d.type === 'paint-pret') { if (!et.enCours) suivant(); }
+      else if (d.type === 'paint-document' && et.enCours) noter(d.reserves && d.reserves.length ? 'reserves' : 'ok', d);
+      else if (d.type === 'paint-echec' && et.enCours) noter('echec', d);
+    };
+    const terminer = async (interrompu) => {
+      if (et.fini) return;
+      et.fini = true;
+      clearTimeout(et.minuteur); clearInterval(et.veille);
+      window.removeEventListener('message', ecoute);
+      try { if (!et.w.closed) et.w.postMessage({ type: 'paint-fin' }, et.origine); } catch (e) { /* rien */ }
+      // Volumes jamais traités (interruption, onglet fermé) : notés tels quels.
+      for (let k = et.resultats.length; k < et.lignes.length; k++) {
+        et.resultats.push({ lg: et.lignes[k].lg, etat: 'echec', fichier: '', pages: 0, octets: 0,
+          motif: interrompu || 'non traité', reserves: [] });
+      }
+      publier();
+      try {
+        const nomSommaire = `${et.meta.aaaammjj} ${et.meta.dossier ? 'Dossier ' + et.meta.dossier + ' — ' : ''}00 Sommaire général.pdf`.replace(/[\\/:*?"<>|]/g, '-');
+        et.zip.file(nomSommaire, sommaireArchive(et), { binary: true });
+        const blob = await et.zip.generateAsync({ type: 'blob', compression: 'STORE' });
+        const nom = `${et.meta.aaaammjj} ${et.meta.dossier ? 'Dossier ' + et.meta.dossier + ' — ' : ''}${et.meta.societe || 'REDPAR'} — dossier complet.zip`
+          .replace(/[\\/:*?"<>|]/g, '-');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = nom; a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+        et.archive = { nom, octets: blob.size };
+      } catch (err) {
+        console.error('Archive du dossier complet', err);
+        alert("L'archive n'a pas pu être assemblée : " + (err && err.message ? err.message : err));
+      }
+      et.zip = null;   // libère la mémoire des documents
+      publier();
+      lotRef.current = null;
+    };
+    et.terminer = terminer;
+    window.addEventListener('message', ecoute);
+    // Onglet PAINT refermé à la main : on clôt avec ce qui est arrivé.
+    et.veille = setInterval(() => { if (et.w.closed && !et.fini) terminer('onglet PAINT refermé'); }, 2000);
+    publier();
+  };
+  const interrompreArchive = () => {
+    const et = lotRef.current;
+    if (!et) return;
+    try { et.w.close(); } catch (e) { /* rien */ }
+    et.terminer('interrompu');
+  };
+  // Sommaire général de l'archive : un tableau par volume — commune, INSEE,
+  // sections (préfixe + section, nombre de parcelles), pages, fichier, état.
+  const sommaireArchive = (et) => {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+    const m = et.meta;
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.setTextColor(15, 34, 56);
+    doc.text('Dossier complet — sommaire général', 14, 18);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(60, 60, 60);
+    doc.text(`${m.societe}${m.siren ? '  |  SIREN ' + m.siren : ''}${m.dossier ? '  |  Dossier ' + m.dossier : ''}`, 14, 25);
+    const ok = et.resultats.filter((r) => r.etat !== 'echec');
+    const nbParc = et.resultats.reduce((t, r) => t + r.lg.nb, 0);
+    doc.text(`Généré le ${m.jour.toLocaleDateString('fr-FR')} — ${et.resultats.length} document(s) prévu(s), `
+      + `${ok.length} produit(s), ${et.resultats.length - ok.length} en échec — ${nbParc.toLocaleString('fr-FR')} parcelle(s) — `
+      + `${ok.reduce((t, r) => t + r.pages, 0).toLocaleString('fr-FR')} page(s) au total`, 14, 31);
+    const sections = (refs) => {
+      const c = new Map();
+      refs.forEach((r) => { const k = r.slice(5, 8) + ' ' + r.slice(8, 10); c.set(k, (c.get(k) || 0) + 1); });
+      return [...c.entries()].map(([k, n]) => `${k} (${n})`).join(', ');
+    };
+    doc.autoTable({
+      startY: 36,
+      head: [['#', 'Commune', 'Sections — préfixe, section (parcelles)', 'Parc.', 'Pages', 'Fichier', 'État']],
+      body: et.resultats.map((r, i) => [
+        String(i + 1),
+        `${r.lg.nom} (${r.lg.insee})${r.lg.volume ? '\nvolume ' + r.lg.volume.replace('/', ' de ') : ''}`,
+        sections(r.lg.refs),
+        String(r.lg.nb),
+        r.pages ? String(r.pages) : '—',
+        r.fichier || '—',
+        r.etat === 'ok' ? 'produit'
+          : r.etat === 'reserves' ? 'produit, avec réserves : ' + r.reserves.join(' ; ')
+          : 'ÉCHEC : ' + r.motif + ' — à relancer seul depuis le panneau Dossier complet',
+      ]),
+      styles: { fontSize: 7.5, cellPadding: 1.6, valign: 'top', overflow: 'linebreak' },
+      headStyles: { fillColor: [15, 34, 56], textColor: [255, 255, 255] },
+      columnStyles: { 0: { cellWidth: 8 }, 1: { cellWidth: 38 }, 2: { cellWidth: 70 }, 3: { cellWidth: 12, halign: 'right' },
+        4: { cellWidth: 12, halign: 'right' }, 5: { cellWidth: 70 }, 6: { cellWidth: 57 } },
+      didParseCell: (h) => {
+        if (h.section === 'body' && h.column.index === 6) {
+          const t = String(h.cell.raw || '');
+          if (t.startsWith('ÉCHEC')) h.cell.styles.textColor = [160, 16, 64];
+          else if (t.includes('réserves')) h.cell.styles.textColor = [146, 64, 14];
+        }
+      },
+    });
+    const n = doc.internal.getNumberOfPages();
+    for (let i = 1; i <= n; i++) {
+      doc.setPage(i); doc.setFontSize(7.5); doc.setTextColor(101, 125, 150);
+      doc.text('FIDAL Notaires — REDPAR — chaque document de l\u2019archive porte son propre sommaire, parcelle par parcelle.', 14, 203);
+      doc.text(`${i} / ${n}`, 283, 203, { align: 'right' });
+    }
+    return doc.output('arraybuffer');
   };
   const basculerDossierFait = (insee) => setDossierFaits((s) => {
     const n = new Set(s);
@@ -4021,6 +4208,88 @@ export default function App() {
               </div>
             )}
 
+            {/* Ordre du haut de page, décision JFD du 29/09/2026 : bandeau « Plans »,
+                puis « Exports », puis la carte. */}
+              {/* ------------------------------------------------------------
+                  PLANS — bandeau à part, décision JFD du 29/09/2026 (titre abrégé en « Plans » le même jour).
+                  Les deux boutons logeaient dans l'en-tête de « Détail des
+                  parcelles », alors qu'ils portent sur tout le portefeuille (le
+                  plan à la carte prend aussi les locaux sans le sol, le dossier
+                  complet couvre toutes les communes) ; tableaux repliés, on ne
+                  pensait plus à les chercher là. Le panneau du plan à la carte
+                  s'ouvre juste en dessous.
+                  ------------------------------------------------------------ */}
+              {!parcellesLoading && parcelles.length > 0 && (
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
+                    <MapIcon className="w-5 h-5 text-blue-950" />
+                    <div>
+                      <h3 className="font-semibold text-blue-950">Plans</h3>
+                      {lot && !lot.fini && (
+                        <div className="text-xs font-semibold" style={{ color: '#33838B' }}>
+                          Archive du dossier complet en cours : {lot.faits} / {lot.total}
+                        </div>
+                      )}
+                      <div className="text-xs text-stone-500">
+                        Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune pour tout le relevé.
+                      </div>
+                    </div>
+                    <div className="ml-auto flex items-center gap-2">
+                      <button onClick={ouvrirCarte} disabled={!parcelles.length}
+                        title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
+                        className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                        style={{ backgroundColor: '#A01040' }}>
+                        Plan à la carte
+                      </button>
+                      <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
+                        title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
+                        className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                        style={{ backgroundColor: '#33838B' }}>
+                        Dossier complet
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ------------------------------------------------------------
+                  EXPORTS — Excel et PDF sortis de la barre du haut et posés sur
+                  un bandeau à eux, AU-DESSUS du bandeau « Plans » : décision JFD
+                  du 29/09/2026. Tout ce qui produit une pièce se lit ainsi de
+                  haut en bas, au même endroit de la page.
+                  ------------------------------------------------------------ */}
+              {!parcellesLoading && parcelles.length > 0 && (
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
+                    <Download className="w-5 h-5 text-blue-950" />
+                    <div>
+                      <h3 className="font-semibold text-blue-950">Exports</h3>
+                      <div className="text-xs text-stone-500">
+                        Excel : le relevé complet, une feuille par commune. PDF : le rapport de synthèse.
+                      </div>
+                    </div>
+                    <div className="ml-auto flex items-center gap-2 flex-wrap">
+                      {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
+                        <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          localisation en cours — attendez pour des liens à la parcelle
+                        </span>
+                      )}
+                      {!parcellesLoading && parcelles.length > 0 && (
+                        <>
+                          <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
+                            {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
+                          </button>
+                          <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
+                            {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
             {/* CARTE — remontée juste au-dessus de « Répartition par type de
                 droits retenus » : décision JFD du 29/09/2026. */}
             {!parcellesLoading && parcelles.length > 0 && (
@@ -4222,94 +4491,113 @@ export default function App() {
 
             {!parcellesLoading && parcelles.length > 0 && (
               <>
-                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Parcelles</div>
-                    <div className="text-2xl font-semibold text-blue-950">{parcelles.length.toLocaleString('fr-FR')}</div>
-                    {ecartesParcelles > 0 && (
-                      <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
-                    )}
-                    {melangeDesTitres && (
-                      <div className="text-xs text-blue-900 mt-1">dont {parcellesPropriete.length.toLocaleString('fr-FR')} au titre de la propriété</div>
-                    )}
-                    {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
+                {/* DONNÉES CLÉS — bandeau dépliable, décision JFD du 29/09/2026.
+                    Replié par défaut ; l'en-tête garde l'essentiel en une ligne. */}
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-4 py-4 flex items-center gap-2 flex-wrap">
+                    <button onClick={() => setClesOuvertes((v) => !v)} title={clesOuvertes ? "Replier" : "Déplier"}
+                      className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                      <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${clesOuvertes ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                    </button>
+                    <BarChart3 className="w-4 h-4 text-blue-950" />
+                    <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setClesOuvertes((v) => !v)}>Données clés</h3>
+                    <span className="text-xs text-stone-500">
+                      {parcelles.length.toLocaleString('fr-FR')} parcelle(s) · {totalSurface.toLocaleString('fr-FR')} m² · {locaux.length.toLocaleString('fr-FR')} local(aux){!clesOuvertes ? ' — cliquer pour déplier' : ''}
+                    </span>
                   </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Surface totale</div>
-                    <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
-                    {melangeDesTitres && (
-                      <div className="text-xs text-blue-900 mt-1">dont {surfaceEnPropriete.toLocaleString('fr-FR')} m² en propriété</div>
-                    )}
-                    {parcellesDistinctes < parcelles.length && (
-                      <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
-                    )}
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Communes</div>
-                    <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
-                    <div className="text-2xl font-semibold text-blue-950">
-                      {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : locaux.length.toLocaleString('fr-FR')}
-                    </div>
-                    {!locauxLoading && totalLocaux > 0 && (
-                      <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
-                    )}
-                    {ecartesLocaux > 0 && (
-                      <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
-                    )}
-                    {melangeDesTitres && !locauxLoading && (
-                      <div className="text-xs text-blue-900 mt-1">dont {localsPropriete.toLocaleString('fr-FR')} au titre de la propriété</div>
-                    )}
-                    {locauxTronque && (
-                      <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
-                    )}
-                  </div>
-                  {unitesF && (
-                    <div className="bg-white border border-stone-200 rounded-lg p-4">
-                      <div className="text-xs text-stone-500 mb-1">Unités foncières</div>
-                      <div className="text-2xl font-semibold text-blue-950">
-                        {unitesF.unites.length.toLocaleString('fr-FR')}
+                  {clesOuvertes && (
+                    <div className="px-4 pb-4">
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Parcelles</div>
+                        <div className="text-2xl font-semibold text-blue-950">{parcelles.length.toLocaleString('fr-FR')}</div>
+                        {ecartesParcelles > 0 && (
+                          <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
+                        )}
+                        {melangeDesTitres && (
+                          <div className="text-xs text-blue-900 mt-1">dont {parcellesPropriete.length.toLocaleString('fr-FR')} au titre de la propriété</div>
+                        )}
+                        {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
                       </div>
-                      <div className="text-xs text-stone-500 mt-1">
-                        {unitesF.groupees.toLocaleString('fr-FR')} d'un seul tenant de plusieurs parcelles,
-                        {' '}{unitesF.isolees.toLocaleString('fr-FR')} isolée(s)
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Surface totale</div>
+                        <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
+                        {melangeDesTitres && (
+                          <div className="text-xs text-blue-900 mt-1">dont {surfaceEnPropriete.toLocaleString('fr-FR')} m² en propriété</div>
+                        )}
+                        {parcellesDistinctes < parcelles.length && (
+                          <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
+                        )}
                       </div>
-                      {unitesF.sansContour > 0 && (
-                        <div className="text-xs text-stone-500">{unitesF.sansContour.toLocaleString('fr-FR')} sans contour, donc non regroupée(s)</div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Communes</div>
+                        <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
+                        <div className="text-2xl font-semibold text-blue-950">
+                          {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : locaux.length.toLocaleString('fr-FR')}
+                        </div>
+                        {!locauxLoading && totalLocaux > 0 && (
+                          <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
+                        )}
+                        {ecartesLocaux > 0 && (
+                          <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
+                        )}
+                        {melangeDesTitres && !locauxLoading && (
+                          <div className="text-xs text-blue-900 mt-1">dont {localsPropriete.toLocaleString('fr-FR')} au titre de la propriété</div>
+                        )}
+                        {locauxTronque && (
+                          <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
+                        )}
+                      </div>
+                      {unitesF && (
+                        <div className="bg-white border border-stone-200 rounded-lg p-4">
+                          <div className="text-xs text-stone-500 mb-1">Unités foncières</div>
+                          <div className="text-2xl font-semibold text-blue-950">
+                            {unitesF.unites.length.toLocaleString('fr-FR')}
+                          </div>
+                          <div className="text-xs text-stone-500 mt-1">
+                            {unitesF.groupees.toLocaleString('fr-FR')} d'un seul tenant de plusieurs parcelles,
+                            {' '}{unitesF.isolees.toLocaleString('fr-FR')} isolée(s)
+                          </div>
+                          {unitesF.sansContour > 0 && (
+                            <div className="text-xs text-stone-500">{unitesF.sansContour.toLocaleString('fr-FR')} sans contour, donc non regroupée(s)</div>
+                          )}
+                        </div>
                       )}
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
+                        <div className="text-2xl font-semibold text-blue-950">
+                          {coherence.attente > 0 ? '—' : (coherence.notables + coherence.mineurs).toLocaleString('fr-FR')}
+                        </div>
+                        <div className="text-xs text-stone-500 mt-1">
+                          {coherence.attente > 0
+                            ? 'en attente du géocodage'
+                            : `écart(s) sur ${coherence.controlees.toLocaleString('fr-FR')} parcelles · ${coherence.concordantes.toLocaleString('fr-FR')} concordantes`}
+                        </div>
+                        {coherence.absentes > 0 && coherence.attente === 0 && (
+                          <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
+                        )}
+                        {coherence.echecs > 0 && coherence.attente === 0 && (
+                          <div className="text-xs text-amber-700">{coherence.echecs.toLocaleString('fr-FR')} non contrôlée(s) : lot en échec, à relancer</div>
+                        )}
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Géocodage</div>
+                        <div className="text-2xl font-semibold text-blue-950">
+                          {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
+                        </div>
+                        <div className="text-xs text-stone-500 mt-1">
+                          {!geoStatus ? 'en attente'
+                            : geoStatus.termine
+                              ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
+                              : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
+                        </div>
+                      </div>
+                    </div>
                     </div>
                   )}
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
-                    <div className="text-2xl font-semibold text-blue-950">
-                      {coherence.attente > 0 ? '—' : (coherence.notables + coherence.mineurs).toLocaleString('fr-FR')}
-                    </div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      {coherence.attente > 0
-                        ? 'en attente du géocodage'
-                        : `écart(s) sur ${coherence.controlees.toLocaleString('fr-FR')} parcelles · ${coherence.concordantes.toLocaleString('fr-FR')} concordantes`}
-                    </div>
-                    {coherence.absentes > 0 && coherence.attente === 0 && (
-                      <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
-                    )}
-                    {coherence.echecs > 0 && coherence.attente === 0 && (
-                      <div className="text-xs text-amber-700">{coherence.echecs.toLocaleString('fr-FR')} non contrôlée(s) : lot en échec, à relancer</div>
-                    )}
-                  </div>
-                  <div className="bg-white border border-stone-200 rounded-lg p-4">
-                    <div className="text-xs text-stone-500 mb-1">Géocodage</div>
-                    <div className="text-2xl font-semibold text-blue-950">
-                      {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
-                    </div>
-                    <div className="text-xs text-stone-500 mt-1">
-                      {!geoStatus ? 'en attente'
-                        : geoStatus.termine
-                          ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
-                          : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
-                    </div>
-                  </div>
                 </div>
 
 
@@ -4369,81 +4657,6 @@ export default function App() {
                           })}
                         </tbody>
                       </table>
-                    </div>
-                  </div>
-                )}
-
-                {/* ------------------------------------------------------------
-                    EXPORTS — Excel et PDF sortis de la barre du haut et posés sur
-                    un bandeau à eux, AU-DESSUS du bandeau « Plans » : décision JFD
-                    du 29/09/2026. Tout ce qui produit une pièce se lit ainsi de
-                    haut en bas, au même endroit de la page.
-                    ------------------------------------------------------------ */}
-                {parcelles.length > 0 && (
-                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
-                      <Download className="w-5 h-5 text-blue-950" />
-                      <div>
-                        <h3 className="font-semibold text-blue-950">Exports</h3>
-                        <div className="text-xs text-stone-500">
-                          Excel : le relevé complet, une feuille par commune. PDF : le rapport de synthèse.
-                        </div>
-                      </div>
-                      <div className="ml-auto flex items-center gap-2 flex-wrap">
-                        {!parcellesLoading && parcelles.length > 0 && geoStatus && !geoStatus.termine && (
-                          <span className="flex items-center gap-1.5 text-xs text-amber-700 mr-1">
-                            <Loader2 className="w-3 h-3 animate-spin" />
-                            localisation en cours — attendez pour des liens à la parcelle
-                          </span>
-                        )}
-                        {!parcellesLoading && parcelles.length > 0 && (
-                          <>
-                            <button onClick={exportExcel} disabled={exportingExcel} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-blue-950 text-amber-400 rounded-lg hover:bg-blue-900 font-medium shadow-sm disabled:opacity-50">
-                              {exportingExcel ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}Excel
-                            </button>
-                            <button onClick={exportPdf} disabled={exportingPdf} className="flex items-center gap-1.5 px-4 py-2 text-sm bg-amber-400 text-blue-950 rounded-lg hover:bg-amber-500 font-medium shadow-sm disabled:opacity-50">
-                              {exportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className="w-4 h-4" />}PDF
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* ------------------------------------------------------------
-                    PLANS — bandeau à part, décision JFD du 29/09/2026 (titre abrégé en « Plans » le même jour).
-                    Les deux boutons logeaient dans l'en-tête de « Détail des
-                    parcelles », alors qu'ils portent sur tout le portefeuille (le
-                    plan à la carte prend aussi les locaux sans le sol, le dossier
-                    complet couvre toutes les communes) ; tableaux repliés, on ne
-                    pensait plus à les chercher là. Le panneau du plan à la carte
-                    s'ouvre juste en dessous.
-                    ------------------------------------------------------------ */}
-                {parcelles.length > 0 && (
-                  <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                    <div className="px-6 py-4 flex items-center gap-3 flex-wrap">
-                      <MapIcon className="w-5 h-5 text-blue-950" />
-                      <div>
-                        <h3 className="font-semibold text-blue-950">Plans</h3>
-                        <div className="text-xs text-stone-500">
-                          Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune pour tout le relevé.
-                        </div>
-                      </div>
-                      <div className="ml-auto flex items-center gap-2">
-                        <button onClick={ouvrirCarte} disabled={!parcelles.length}
-                          title="Choisir librement les parcelles à faire figurer sur un même plan colorié et annoté"
-                          className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
-                          style={{ backgroundColor: '#A01040' }}>
-                          Plan à la carte
-                        </button>
-                        <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
-                          title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
-                          className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
-                          style={{ backgroundColor: '#33838B' }}>
-                          Dossier complet
-                        </button>
-                      </div>
                     </div>
                   </div>
                 )}
@@ -4810,6 +5023,46 @@ export default function App() {
                           onChange={(e) => setDossierNum(e.target.value)}
                           placeholder="porté au pied de page de tous les documents (dossier complet, panier, liens unitaires)"
                           className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
+                      </div>
+                      {/* Archive ZIP — 29/09/2026 */}
+                      <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3 flex-wrap" style={{ backgroundColor: '#F2F7F7' }}>
+                        {!lot || lot.fini ? (
+                          <>
+                            <button onClick={lancerArchive} disabled={!contours || !dossierLignes || !dossierLignes.length || !!lotRef.current}
+                              className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                              style={{ backgroundColor: '#0F2238' }}>
+                              Tout générer en archive ZIP
+                            </button>
+                            <span className="text-xs text-stone-600 flex-1 min-w-[16rem]">
+                              Un seul onglet PAINT enchaîne tous les documents ; ils arrivent ici et partent dans une archive
+                              unique, ouverte par un sommaire général. Laissez l'onglet PAINT ouvert jusqu'au bout.
+                              {dossierLignes && ` Durée estimée : ${dureeDossier(dossierLignes.reduce((t, lg) => t + lg.nb, 0))}.`}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin" style={{ color: '#33838B' }} />
+                            <span className="text-sm text-blue-950 font-medium">
+                              Archive en cours : {lot.faits} / {lot.total} document(s)
+                              {lot.courant && <span className="font-normal text-stone-600"> — {lot.courant.nom}{lot.courant.volume ? ` (volume ${lot.courant.volume.replace('/', ' de ')})` : ''}</span>}
+                            </span>
+                            {(lot.echecs > 0 || lot.reserves > 0) && (
+                              <span className="text-xs" style={{ color: '#A01040' }}>
+                                {lot.echecs > 0 && `${lot.echecs} échec(s)`}{lot.echecs > 0 && lot.reserves > 0 && ' · '}{lot.reserves > 0 && `${lot.reserves} avec réserves`}
+                              </span>
+                            )}
+                            <button onClick={interrompreArchive}
+                              className="ml-auto px-3 py-1.5 text-xs font-semibold rounded-lg border border-stone-300 text-blue-950 hover:bg-stone-100">
+                              Interrompre et archiver l'acquis
+                            </button>
+                          </>
+                        )}
+                        {lot && lot.fini && lot.archive && (
+                          <div className="w-full text-xs" style={{ color: '#33838B' }}>
+                            ✓ Archive téléchargée : {lot.archive.nom} ({(lot.archive.octets / 1e6).toFixed(0)} Mo)
+                            {lot.echecs > 0 && <span style={{ color: '#A01040' }}> — {lot.echecs} document(s) en échec, listés au sommaire : relancez-les avec leur bouton « Générer ».</span>}
+                          </div>
+                        )}
                       </div>
                       <div className="overflow-y-auto px-6 py-3">
                         {(dossierLignes || []).map((lg) => {
