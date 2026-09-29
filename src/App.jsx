@@ -1848,7 +1848,8 @@ export default function App() {
   // géographique », repliés par défaut (29/09/2026).
   const [droitsOuverts, setDroitsOuverts] = useState(false);
   const [geoOuverte, setGeoOuverte] = useState(false);
-  const [clesOuvertes, setClesOuvertes] = useState(false);   // bandeau « Données clés » (29/09/2026)
+  const [clesOuvertes, setClesOuvertes] = useState(false);
+  const [carteVisible, setCarteVisible] = useState(true);   // carte dépliée par défaut (29/09/2026)   // bandeau « Données clés » (29/09/2026)
   // Détail des parcelles et des locaux REPLIÉS par défaut — demandé par JFD le
   // 28/09/2026 : sur un gros portefeuille les deux tableaux noyaient la page.
   // Taper dans leur champ de recherche les déplie.
@@ -1913,6 +1914,7 @@ export default function App() {
   // re-rendus).
   const [lot, setLot] = useState(null);
   const lotRef = useRef(null);
+  const [archiveEnVue, setArchiveEnVue] = useState(false);   // bande de l'archive soulignée à l'ouverture
   // ASSIETTES DE COPROPRIÉTÉ — 03/09/2026 (addendum v11 § 5). Résultat de la
   // recherche inverse sur les parcelles d'assiette des lots : Map ref → état
   // ('recherche' | 'syndicat' | 'majic' | 'autre_titulaire' | 'non_recense' |
@@ -4231,7 +4233,7 @@ export default function App() {
                         </div>
                       )}
                       <div className="text-xs text-stone-500">
-                        Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune pour tout le relevé.
+                        Plan à la carte : les parcelles de votre choix sur un même plan colorié et annoté. Dossier complet : un document par commune, à générer un à un. Dossier compilé : tous les documents d'un coup, dans une archive ZIP ouverte par un sommaire général.
                       </div>
                     </div>
                     <div className="ml-auto flex items-center gap-2">
@@ -4241,11 +4243,20 @@ export default function App() {
                         style={{ backgroundColor: '#A01040' }}>
                         Plan à la carte
                       </button>
-                      <button onClick={() => setDossierOuvert(true)} disabled={!parcelles.length}
+                      <button onClick={() => { setArchiveEnVue(false); setDossierOuvert(true); }} disabled={!parcelles.length}
                         title="Un document PAINT par commune, pour tout le relevé : désignation, une page par parcelle, plan d'ensemble"
                         className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
                         style={{ backgroundColor: '#33838B' }}>
                         Dossier complet
+                      </button>
+                      {/* Accès direct à l'archive (29/09/2026) : ouvre la fenêtre du
+                          dossier complet, bande de l'archive mise en évidence — le
+                          n° de dossier se vérifie avant de lancer. */}
+                      <button onClick={() => { setArchiveEnVue(true); setDossierOuvert(true); }} disabled={!parcelles.length}
+                        title="Tous les documents du dossier complet d'un coup, dans une archive ZIP ouverte par un sommaire général"
+                        className="px-4 py-2 text-sm font-semibold text-white rounded-lg disabled:opacity-40 hover:opacity-90"
+                        style={{ backgroundColor: '#0F2238' }}>
+                        Dossier compilé (ZIP)
                       </button>
                     </div>
                   </div>
@@ -4294,10 +4305,18 @@ export default function App() {
                 droits retenus » : décision JFD du 29/09/2026. */}
             {!parcellesLoading && parcelles.length > 0 && (
               <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                <div className="px-6 py-4 border-b border-stone-200 flex items-center gap-2">
+                {/* Carte REPLIABLE mais DÉPLIÉE par défaut — décision JFD du
+                    29/09/2026. Repliée, la carte est démontée (et non masquée) :
+                    au redépliage, Leaflet repart d'un conteneur visible et recadre
+                    proprement, sans le gris d'une carte dessinée à taille nulle. */}
+                <div className={`px-6 py-4 ${carteVisible ? 'border-b border-stone-200' : ''} flex items-center gap-2 flex-wrap`}>
+                  <button onClick={() => setCarteVisible((v) => !v)} title={carteVisible ? "Replier" : "Déplier"}
+                    className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                    <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${carteVisible ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                  </button>
                   <MapIcon className="w-4 h-4 text-blue-950" />
-                  <h3 className="font-semibold text-blue-950">Carte interactive</h3>
-                  <span className="text-xs text-stone-500">— cliquez sur un marqueur pour les détails</span>
+                  <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setCarteVisible((v) => !v)}>Carte interactive</h3>
+                  <span className="text-xs text-stone-500">{carteVisible ? '— cliquez sur un marqueur pour les détails' : '— cliquer pour déplier'}</span>
                   <div className="ml-auto flex items-center gap-3">
                     {geoStatus && !geoStatus.termine && (
                       <span className="flex items-center gap-1.5 text-xs text-amber-700">
@@ -4315,6 +4334,7 @@ export default function App() {
                     )}
                   </div>
                 </div>
+                {carteVisible && (<>
                 <ParcellesMap parcelles={parcelles} locaux={locaux} contours={contours} companyName={selectedCompany?.nom} />
                 <div className="px-6 py-3 border-t border-stone-200 text-xs text-stone-500">
                   Position au centroïde de la parcelle, d'après le plan cadastral (DGFiP, version Etalab).
@@ -4325,7 +4345,122 @@ export default function App() {
                     <span className="text-amber-700"> {(sansGeo.absentes.length + sansGeo.echouees.length).toLocaleString('fr-FR')} référence(s) sans géométrie — voir « Références inconnues du plan », plus bas.</span>
                   )}
                 </div>
+                </>)}
               </div>
+            )}
+
+            {!parcellesLoading && parcelles.length > 0 && (
+              <>
+                {/* DONNÉES CLÉS — bandeau dépliable, décision JFD du 29/09/2026,
+                    placé juste sous la carte le même jour.
+                    Replié par défaut ; l'en-tête garde l'essentiel en une ligne. */}
+                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
+                  <div className="px-4 py-4 flex items-center gap-2 flex-wrap">
+                    <button onClick={() => setClesOuvertes((v) => !v)} title={clesOuvertes ? "Replier" : "Déplier"}
+                      className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
+                      <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${clesOuvertes ? 'rotate-90' : ''}`} strokeWidth={2.5} />
+                    </button>
+                    <BarChart3 className="w-4 h-4 text-blue-950" />
+                    <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setClesOuvertes((v) => !v)}>Données clés</h3>
+                    <span className="text-xs text-stone-500">
+                      {parcelles.length.toLocaleString('fr-FR')} parcelle(s) · {totalSurface.toLocaleString('fr-FR')} m² · {locaux.length.toLocaleString('fr-FR')} local(aux){!clesOuvertes ? ' — cliquer pour déplier' : ''}
+                    </span>
+                  </div>
+                  {clesOuvertes && (
+                    <div className="px-4 pb-4">
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Parcelles</div>
+                        <div className="text-2xl font-semibold text-blue-950">{parcelles.length.toLocaleString('fr-FR')}</div>
+                        {ecartesParcelles > 0 && (
+                          <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
+                        )}
+                        {melangeDesTitres && (
+                          <div className="text-xs text-blue-900 mt-1">dont {parcellesPropriete.length.toLocaleString('fr-FR')} au titre de la propriété</div>
+                        )}
+                        {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Surface totale</div>
+                        <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
+                        {melangeDesTitres && (
+                          <div className="text-xs text-blue-900 mt-1">dont {surfaceEnPropriete.toLocaleString('fr-FR')} m² en propriété</div>
+                        )}
+                        {parcellesDistinctes < parcelles.length && (
+                          <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
+                        )}
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Communes</div>
+                        <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
+                        <div className="text-2xl font-semibold text-blue-950">
+                          {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : locaux.length.toLocaleString('fr-FR')}
+                        </div>
+                        {!locauxLoading && totalLocaux > 0 && (
+                          <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
+                        )}
+                        {ecartesLocaux > 0 && (
+                          <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
+                        )}
+                        {melangeDesTitres && !locauxLoading && (
+                          <div className="text-xs text-blue-900 mt-1">dont {localsPropriete.toLocaleString('fr-FR')} au titre de la propriété</div>
+                        )}
+                        {locauxTronque && (
+                          <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
+                        )}
+                      </div>
+                      {unitesF && (
+                        <div className="bg-white border border-stone-200 rounded-lg p-4">
+                          <div className="text-xs text-stone-500 mb-1">Unités foncières</div>
+                          <div className="text-2xl font-semibold text-blue-950">
+                            {unitesF.unites.length.toLocaleString('fr-FR')}
+                          </div>
+                          <div className="text-xs text-stone-500 mt-1">
+                            {unitesF.groupees.toLocaleString('fr-FR')} d'un seul tenant de plusieurs parcelles,
+                            {' '}{unitesF.isolees.toLocaleString('fr-FR')} isolée(s)
+                          </div>
+                          {unitesF.sansContour > 0 && (
+                            <div className="text-xs text-stone-500">{unitesF.sansContour.toLocaleString('fr-FR')} sans contour, donc non regroupée(s)</div>
+                          )}
+                        </div>
+                      )}
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
+                        <div className="text-2xl font-semibold text-blue-950">
+                          {coherence.attente > 0 ? '—' : (coherence.notables + coherence.mineurs).toLocaleString('fr-FR')}
+                        </div>
+                        <div className="text-xs text-stone-500 mt-1">
+                          {coherence.attente > 0
+                            ? 'en attente du géocodage'
+                            : `écart(s) sur ${coherence.controlees.toLocaleString('fr-FR')} parcelles · ${coherence.concordantes.toLocaleString('fr-FR')} concordantes`}
+                        </div>
+                        {coherence.absentes > 0 && coherence.attente === 0 && (
+                          <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
+                        )}
+                        {coherence.echecs > 0 && coherence.attente === 0 && (
+                          <div className="text-xs text-amber-700">{coherence.echecs.toLocaleString('fr-FR')} non contrôlée(s) : lot en échec, à relancer</div>
+                        )}
+                      </div>
+                      <div className="bg-white border border-stone-200 rounded-lg p-4">
+                        <div className="text-xs text-stone-500 mb-1">Géocodage</div>
+                        <div className="text-2xl font-semibold text-blue-950">
+                          {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
+                        </div>
+                        <div className="text-xs text-stone-500 mt-1">
+                          {!geoStatus ? 'en attente'
+                            : geoStatus.termine
+                              ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
+                              : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
+                        </div>
+                      </div>
+                    </div>
+                    </div>
+                  )}
+                </div>
+              </>
             )}
 
             {!parcellesLoading && droitsPresents.length > 0 && (
@@ -4491,115 +4626,6 @@ export default function App() {
 
             {!parcellesLoading && parcelles.length > 0 && (
               <>
-                {/* DONNÉES CLÉS — bandeau dépliable, décision JFD du 29/09/2026.
-                    Replié par défaut ; l'en-tête garde l'essentiel en une ligne. */}
-                <div className="bg-white border border-stone-200 rounded-xl shadow-sm overflow-hidden">
-                  <div className="px-4 py-4 flex items-center gap-2 flex-wrap">
-                    <button onClick={() => setClesOuvertes((v) => !v)} title={clesOuvertes ? "Replier" : "Déplier"}
-                      className="w-8 h-8 flex items-center justify-center rounded-lg border border-stone-300 hover:bg-stone-100">
-                      <ChevronRight className={`w-6 h-6 text-blue-950 transition-transform ${clesOuvertes ? 'rotate-90' : ''}`} strokeWidth={2.5} />
-                    </button>
-                    <BarChart3 className="w-4 h-4 text-blue-950" />
-                    <h3 className="font-semibold text-blue-950 cursor-pointer select-none" onClick={() => setClesOuvertes((v) => !v)}>Données clés</h3>
-                    <span className="text-xs text-stone-500">
-                      {parcelles.length.toLocaleString('fr-FR')} parcelle(s) · {totalSurface.toLocaleString('fr-FR')} m² · {locaux.length.toLocaleString('fr-FR')} local(aux){!clesOuvertes ? ' — cliquer pour déplier' : ''}
-                    </span>
-                  </div>
-                  {clesOuvertes && (
-                    <div className="px-4 pb-4">
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                      <div className="bg-white border border-stone-200 rounded-lg p-4">
-                        <div className="text-xs text-stone-500 mb-1">Parcelles</div>
-                        <div className="text-2xl font-semibold text-blue-950">{parcelles.length.toLocaleString('fr-FR')}</div>
-                        {ecartesParcelles > 0 && (
-                          <div className="text-xs text-stone-500 mt-1">sur {parcellesBrutes.length.toLocaleString('fr-FR')} tous titres confondus</div>
-                        )}
-                        {melangeDesTitres && (
-                          <div className="text-xs text-blue-900 mt-1">dont {parcellesPropriete.length.toLocaleString('fr-FR')} au titre de la propriété</div>
-                        )}
-                        {truncated && <div className="text-xs text-amber-700 mt-1">⚠ {parcelles.length.toLocaleString('fr-FR')} récupérées sur {totalParcelles.toLocaleString('fr-FR')}</div>}
-                      </div>
-                      <div className="bg-white border border-stone-200 rounded-lg p-4">
-                        <div className="text-xs text-stone-500 mb-1">Surface totale</div>
-                        <div className="text-2xl font-semibold text-blue-950">{totalSurface.toLocaleString('fr-FR')} m²</div>
-                        {melangeDesTitres && (
-                          <div className="text-xs text-blue-900 mt-1">dont {surfaceEnPropriete.toLocaleString('fr-FR')} m² en propriété</div>
-                        )}
-                        {parcellesDistinctes < parcelles.length && (
-                          <div className="text-xs text-stone-500 mt-1">sur {parcellesDistinctes.toLocaleString('fr-FR')} parcelles distinctes — {(parcelles.length - parcellesDistinctes).toLocaleString('fr-FR')} ligne(s) en double titre de droit</div>
-                        )}
-                      </div>
-                      <div className="bg-white border border-stone-200 rounded-lg p-4">
-                        <div className="text-xs text-stone-500 mb-1">Communes</div>
-                        <div className="text-2xl font-semibold text-blue-950">{stats.communes.length}</div>
-                      </div>
-                      <div className="bg-white border border-stone-200 rounded-lg p-4">
-                        <div className="text-xs text-stone-500 mb-1">Locaux (bâti)</div>
-                        <div className="text-2xl font-semibold text-blue-950">
-                          {locauxLoading ? <Loader2 className="w-5 h-5 text-amber-500 animate-spin" /> : locaux.length.toLocaleString('fr-FR')}
-                        </div>
-                        {!locauxLoading && totalLocaux > 0 && (
-                          <div className="text-xs text-stone-500 mt-1">{immeubles.toLocaleString('fr-FR')} immeuble{immeubles > 1 ? 's' : ''}</div>
-                        )}
-                        {ecartesLocaux > 0 && (
-                          <div className="text-xs text-stone-500 mt-1">sur {locauxBruts.length.toLocaleString('fr-FR')} tous titres confondus</div>
-                        )}
-                        {melangeDesTitres && !locauxLoading && (
-                          <div className="text-xs text-blue-900 mt-1">dont {localsPropriete.toLocaleString('fr-FR')} au titre de la propriété</div>
-                        )}
-                        {locauxTronque && (
-                          <div className="text-xs text-amber-700 mt-1">⚠ {locaux.length.toLocaleString('fr-FR')} récupérés sur {totalLocaux.toLocaleString('fr-FR')}</div>
-                        )}
-                      </div>
-                      {unitesF && (
-                        <div className="bg-white border border-stone-200 rounded-lg p-4">
-                          <div className="text-xs text-stone-500 mb-1">Unités foncières</div>
-                          <div className="text-2xl font-semibold text-blue-950">
-                            {unitesF.unites.length.toLocaleString('fr-FR')}
-                          </div>
-                          <div className="text-xs text-stone-500 mt-1">
-                            {unitesF.groupees.toLocaleString('fr-FR')} d'un seul tenant de plusieurs parcelles,
-                            {' '}{unitesF.isolees.toLocaleString('fr-FR')} isolée(s)
-                          </div>
-                          {unitesF.sansContour > 0 && (
-                            <div className="text-xs text-stone-500">{unitesF.sansContour.toLocaleString('fr-FR')} sans contour, donc non regroupée(s)</div>
-                          )}
-                        </div>
-                      )}
-                      <div className="bg-white border border-stone-200 rounded-lg p-4">
-                        <div className="text-xs text-stone-500 mb-1">Cohérence matrice / plan</div>
-                        <div className="text-2xl font-semibold text-blue-950">
-                          {coherence.attente > 0 ? '—' : (coherence.notables + coherence.mineurs).toLocaleString('fr-FR')}
-                        </div>
-                        <div className="text-xs text-stone-500 mt-1">
-                          {coherence.attente > 0
-                            ? 'en attente du géocodage'
-                            : `écart(s) sur ${coherence.controlees.toLocaleString('fr-FR')} parcelles · ${coherence.concordantes.toLocaleString('fr-FR')} concordantes`}
-                        </div>
-                        {coherence.absentes > 0 && coherence.attente === 0 && (
-                          <div className="text-xs text-stone-500">{coherence.absentes.toLocaleString('fr-FR')} absente(s) du plan</div>
-                        )}
-                        {coherence.echecs > 0 && coherence.attente === 0 && (
-                          <div className="text-xs text-amber-700">{coherence.echecs.toLocaleString('fr-FR')} non contrôlée(s) : lot en échec, à relancer</div>
-                        )}
-                      </div>
-                      <div className="bg-white border border-stone-200 rounded-lg p-4">
-                        <div className="text-xs text-stone-500 mb-1">Géocodage</div>
-                        <div className="text-2xl font-semibold text-blue-950">
-                          {!geoStatus ? '—' : `${geoStatus.trouvees.toLocaleString('fr-FR')}`}
-                        </div>
-                        <div className="text-xs text-stone-500 mt-1">
-                          {!geoStatus ? 'en attente'
-                            : geoStatus.termine
-                              ? `références localisées sur ${(geoStatus.demandees || 0).toLocaleString('fr-FR')} (bâti et non bâti confondus)`
-                              : `commune ${geoStatus.faites}/${geoStatus.communes} en cours...`}
-                        </div>
-                      </div>
-                    </div>
-                    </div>
-                  )}
-                </div>
-
 
                 {coherence.ecarts.length > 0 && (
                   <div className="bg-white border border-amber-300 rounded-xl shadow-sm overflow-hidden">
@@ -5025,7 +5051,7 @@ export default function App() {
                           className="flex-1 px-3 py-1.5 text-sm border border-stone-300 rounded-lg focus:outline-none focus:border-blue-900" />
                       </div>
                       {/* Archive ZIP — 29/09/2026 */}
-                      <div className="px-6 py-3 border-b border-stone-200 flex items-center gap-3 flex-wrap" style={{ backgroundColor: '#F2F7F7' }}>
+                      <div className={`px-6 py-3 border-b border-stone-200 flex items-center gap-3 flex-wrap ${archiveEnVue ? 'ring-2 ring-inset ring-blue-900' : ''}`} style={{ backgroundColor: '#F2F7F7' }}>
                         {!lot || lot.fini ? (
                           <>
                             <button onClick={lancerArchive} disabled={!contours || !dossierLignes || !dossierLignes.length || !!lotRef.current}
